@@ -1,0 +1,11 @@
+{
+  "skillsdb-autonomous-memory": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "python %USERPROFILE%/.gemini/database/db_manager.py mem-pre-invocation-hook",
+        "timeout": 5
+      }
+    ]
+  }
+}

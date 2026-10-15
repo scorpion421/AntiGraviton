@@ -1,0 +1,31 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Temporary and backup files
+*.bak*
+database/*.bak*
+*.tmp
+*.log
+
+# SQLite temporary journal and lock files
+*.db-wal
+*.db-shm
+*.db-journal
+
+# Local episodic project memory (isolated per workstation)
+.agents/memory.db*
+
+# OS and IDE configuration
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Local credentials and secret stores
+credentials/
+*.credential.xml
+
+# Test scratch folders
+tests/scratch*/
