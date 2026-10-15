@@ -771,19 +771,20 @@ def check_text(text: str, filename: str = "<memory>") -> List[Dict[str, Any]]:
                 "snippet": line[:100].strip(),
             })
 
-        # 3. Deppenbindestrich invariant
+        # 3. Deppenbindestrich invariant (skip negative rule documentation examples like "never 'Abteilungs-Kontingent'")
         deppen_match = DEPPENBINDESTRICH_PATTERN.search(line)
         if deppen_match:
             compound = deppen_match.group()
-            corrected = compound.replace("-", "")
-            violations.append({
-                "file": filename,
-                "line": idx,
-                "rule": "no-deppenbindestrich",
-                "severity": "HIGH",
-                "message": f"Incorrect German compound hyphenation '{compound}'. Write joined as '{corrected}'.",
-                "snippet": line[:100].strip(),
-            })
+            if f"never '{compound}'" not in line and f'never "{compound}"' not in line:
+                corrected = compound.replace("-", "")
+                violations.append({
+                    "file": filename,
+                    "line": idx,
+                    "rule": "no-deppenbindestrich",
+                    "severity": "HIGH",
+                    "message": f"Incorrect German compound hyphenation '{compound}'. Write joined as '{corrected}'.",
+                    "snippet": line[:100].strip(),
+                })
 
         # 4. Secret leak checks
         for secret_name, pat in SECRET_PATTERNS:
@@ -2982,7 +2983,14 @@ def discover_all_workspaces(base_dir: Optional[Path] = None, db_path: Path = DB_
             except Exception:
                 continue
 
-    # 3. Scan optional base_dir or workspaces_root if configured
+    # 3. Scan default Antigravity scratch workspaces directory (~/.gemini/antigravity/scratch)
+    scratch_dir = GEMINI_DIR / "antigravity" / "scratch"
+    if scratch_dir.exists():
+        for item in sorted(scratch_dir.iterdir(), key=lambda x: x.name.lower()):
+            if item.is_dir() and not item.name.startswith("."):
+                _add_candidate(item)
+
+    # 4. Scan optional base_dir or workspaces_root if configured
     root_candidate = base_dir
     if not root_candidate and config.get("workspaces_root"):
         root_candidate = Path(config["workspaces_root"])

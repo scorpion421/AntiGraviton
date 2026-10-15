@@ -128,18 +128,26 @@ if (-not (Test-Path $configPath)) {
         Write-Warning "Template $examplePath not found. Please provide custom\conf\app.ini manually."
     }
 } else {
-    Write-Host "[4/6] Existing app.ini detected at $configPath. Verifying path alignment..."
-    $escapedResolved = ($resolvedPath -replace "\\", "/")
+    Write-Host "[4/6] Existing app.ini detected at $configPath. Verifying path alignment and queue configuration..."
+    $escapedResolvedSlash = ($resolvedPath -replace "\\", "/") -replace '\$', '$$'
+    $escapedResolvedBackslash = $resolvedPath -replace '\$', '$$'
     $rawIni = Get-Content $configPath -Raw
     $updatedIni = $rawIni
-    $updatedIni = [regex]::Replace($updatedIni, "(?m)^(\s*ROOT\s*=\s*).+[/\\]data[/\\]gitea-repositories\s*$", "`${1}$escapedResolved/data/gitea-repositories")
-    $updatedIni = [regex]::Replace($updatedIni, "(?m)^(\s*LFS_CONTENT_PATH\s*=\s*).+[/\\]data[/\\]lfs\s*$", "`${1}$escapedResolved/data/lfs")
-    $updatedIni = [regex]::Replace($updatedIni, "(?m)^(\s*PATH\s*=\s*).+[/\\]data[/\\]gitea\.db\s*$", "`${1}$escapedResolved/data/gitea.db")
-    $updatedIni = [regex]::Replace($updatedIni, "(?m)^(\s*APP_DATA_PATH\s*=\s*).+[/\\]data\s*$", "`${1}$escapedResolved/data")
-    $updatedIni = [regex]::Replace($updatedIni, "(?m)^(\s*ROOT_PATH\s*=\s*).+[/\\]log\s*$", "`${1}$escapedResolved/log")
+    $updatedIni = [regex]::Replace($updatedIni, "(?m)^(\s*WORK_PATH\s*=\s*)[^\r\n]+$", "`${1}$escapedResolvedBackslash")
+    $updatedIni = [regex]::Replace($updatedIni, "(?m)^(\s*ROOT\s*=\s*).+[/\\]data[/\\]gitea-repositories\s*$", "`${1}$escapedResolvedBackslash\data\gitea-repositories")
+    $updatedIni = [regex]::Replace($updatedIni, "(?m)^(\s*LFS_CONTENT_PATH\s*=\s*).+[/\\]data[/\\]lfs\s*$", "`${1}$escapedResolvedSlash/data/lfs")
+    $updatedIni = [regex]::Replace($updatedIni, "(?m)^(\s*PATH\s*=\s*).+[/\\]data[/\\]gitea\.db\s*$", "`${1}$escapedResolvedBackslash\data\gitea.db")
+    $updatedIni = [regex]::Replace($updatedIni, "(?m)^(\s*APP_DATA_PATH\s*=\s*).+[/\\]data\s*$", "`${1}$escapedResolvedSlash/data")
+    $updatedIni = [regex]::Replace($updatedIni, "(?m)^(\s*ROOT_PATH\s*=\s*).+[/\\]log\s*$", "`${1}$escapedResolvedBackslash\log")
+
+    # Ensure LevelDB-free immediate queue configuration is present to prevent Windows file lock errors during 'gitea dump'
+    if ($updatedIni -notmatch "(?m)^\s*\[queue\]") {
+        $updatedIni = $updatedIni.TrimEnd() + "`r`n`r`n[queue]`r`nTYPE = immediate`r`n`r`n[queue.common]`r`nTYPE = immediate`r`n"
+    }
+
     if ($updatedIni -ne $rawIni) {
         Set-Content -Path $configPath -Value $updatedIni -Encoding UTF8
-        Write-Host "  Relocated paths in app.ini updated to: $escapedResolved" -ForegroundColor Yellow
+        Write-Host "  Relocated paths and queue settings in app.ini updated for: $resolvedPath" -ForegroundColor Yellow
         try {
             & $binaryPath admin regenerate hooks --config "$configPath" --work-path "$resolvedPath" | Out-Null
             Write-Host "  Regenerated Git hooks for new location." -ForegroundColor Green
@@ -147,7 +155,7 @@ if (-not (Test-Path $configPath)) {
             Write-Warning "Hook regeneration skipped: $_"
         }
     } else {
-        Write-Host "  All paths in app.ini match $escapedResolved."
+        Write-Host "  All paths and queue settings in app.ini match $resolvedPath."
     }
 }
 

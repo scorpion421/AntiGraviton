@@ -986,7 +986,14 @@ def discover_all_workspaces(base_dir: Optional[Path] = None, db_path: Path = DB_
             except Exception:
                 continue
 
-    # 3. Scan optional base_dir or workspaces_root if configured
+    # 3. Scan default Antigravity scratch workspaces directory (~/.gemini/antigravity/scratch)
+    scratch_dir = GEMINI_DIR / "antigravity" / "scratch"
+    if scratch_dir.exists():
+        for item in sorted(scratch_dir.iterdir(), key=lambda x: x.name.lower()):
+            if item.is_dir() and not item.name.startswith("."):
+                _add_candidate(item)
+
+    # 4. Scan optional base_dir or workspaces_root if configured
     root_candidate = base_dir
     if not root_candidate and config.get("workspaces_root"):
         root_candidate = Path(config["workspaces_root"])

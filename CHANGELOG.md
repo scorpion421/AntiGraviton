@@ -5,6 +5,24 @@ All notable changes to the **AntiGraviton Suite** project will be documented in 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2026-10-15
+
+### Added
+- **Antigravity Scratch Workspace Auto-Discovery (`skillsdb/memory/gitea_sync.py`)**:
+  - `discover_all_workspaces()` now automatically scans `~/.gemini/antigravity/scratch` in addition to `~/.gemini/config/projects/*.json` and `workspaces_root`, ensuring all standard Antigravity scratch workspaces are discovered out of the box.
+- **Automated Regression Tests (`tests/test_gitea_sync.py`)**:
+  - Added `test_gitea_service_templates_and_relocation_regex` to verify LevelDB-free immediate queue settings in `app.example.ini` and `WORK_PATH` relocation self-healing in `deploy-gitea.ps1`.
+
+### Fixed
+- **Windows LevelDB Queue Lock Prevention (`gitea-service` `v1.1.1`)**:
+  - Added `[queue]` and `[queue.common]` with `TYPE = immediate` to `gitea-service/custom/conf/app.example.ini` and automatic injection into existing `app.ini` files via `gitea-service/scripts/deploy-gitea.ps1`. Prevents exclusive Windows LevelDB file lock errors (`LOCK: The process cannot access the file because it is being used by another process`) during `gitea.exe dump` backup operations.
+  - Documented LevelDB lock troubleshooting (`Issue E`) in `gitea-service/INSTALL.md`.
+- **Complete `WORK_PATH` & UNC Path Relocation Self-Healing (`gitea-service/scripts/deploy-gitea.ps1`)**:
+  - Added automatic `WORK_PATH` rewriting when relocating an existing Gitea installation to a new drive or directory (e.g. moving between local SSD and corporate DFS shares).
+  - Preserved native Windows backslashes for `WORK_PATH`, `ROOT`, `PATH`, and `ROOT_PATH` during relocation so UNC paths (`\\server\share\...`) never trigger `go-sqlite3: invalid URI authority` errors.
+- **Guardrail Negative-Example Exclusion (`skillsdb/core/guardrails.py`)**:
+  - Excluded quoted negative documentation examples (e.g. `never "Abteilungs-Kontingent"`) from triggering false-positive `no-deppenbindestrich` warnings during repository audits.
+
 ## [1.0.1] - 2026-10-15
 
 ### Changed

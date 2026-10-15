@@ -1,6 +1,6 @@
 ---
 name: install-antigraviton
-description: Automated installer and self-healing onboarding workflow for the AntiGraviton Complete Suite (SkillsDB v3.5.0 + Antigravity Gitea Service v1.1.0). Trigger this skill whenever the user asks to install, set up, configure, repair, or upgrade AntiGraviton, SkillsDB, or the local Gitea service.
+description: Automated installer and self-healing onboarding workflow for the AntiGraviton Complete Suite (SkillsDB v3.5.0 + Antigravity Gitea Service v1.1.1). Trigger this skill whenever the user asks to install, set up, configure, repair, or upgrade AntiGraviton, SkillsDB, or the local Gitea service.
 ---
 
 # AntiGraviton Complete Suite Onboarding Skill

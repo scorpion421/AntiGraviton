@@ -1,7 +1,7 @@
-# AntiGraviton Complete Suite (`v1.0.1`)
+# AntiGraviton Complete Suite (`v1.0.2`)
 
 **Turnkey Agentic Development Environment for Google Antigravity IDE**  
-*Combining **SkillsDB (`v3.5.0`)** + **Antigravity Gitea Windows Service (`v1.1.0`)** in a single one-command distribution.*
+*Combining **SkillsDB (`v3.5.0`)** + **Antigravity Gitea Windows Service (`v1.1.1`)** in a single one-command distribution.*
 
 ---
 
@@ -14,17 +14,17 @@ It bundles two tightly integrated systems into a single repository and installer
 1. **SkillsDB Context & Memory Engine (`v3.5.0`)**:
    - **On-Demand Micro-Skill Routing**: Replaces static plugin prompt bloat (~35,000 tokens/turn) with a compact (~450 token) routing directive and surgical SQLite FTS5 micro-skill retrieval (`--summary`, `--section`).
    - **Persistent Episodic Project Memory (`.agents/memory.db`)**: Automatically records architectural decisions, milestone snapshots, and workspace telemetry across sessions so every new conversation starts with full project context.
-   - **Organic On-Demand Workspace Learning**: Ships with zero hardcoded paths or credentials. Automatically learns project paths as you work (`mem-init`, `mem-save-snapshot`, `gitea-init`) and discovers Antigravity IDE workspaces from `~/.gemini/config/projects/*.json`.
-2. **Antigravity Gitea Local Windows Service (`v1.1.0`)**:
+   - **Organic On-Demand Workspace Learning**: Ships with zero hardcoded paths or credentials. Automatically learns project paths as you work (`mem-init`, `mem-save-snapshot`, `gitea-init`) and discovers Antigravity IDE workspaces from `~/.gemini/config/projects/*.json` and `~/.gemini/antigravity/scratch`.
+2. **Antigravity Gitea Local Windows Service (`v1.1.1`)**:
    - **Standalone Developer Default (Zero Active Directory Dependency)**: Works out of the box on any Windows developer machine using your local Windows username (`$env:USERNAME`), automatically generating cryptographic config secrets, provisioning your local Gitea admin account, and binding a scoped API token into SkillsDB. Optional Active Directory (LDAP) and `User` vs. `User.adm` role separation can be enabled on demand at any time.
-   - **Isolated Loopback Git Server (`127.0.0.1:3000`)**: Sub-second (`< 0.5s`) automated Git backup for every milestone snapshot and file checkpoint without external cloud latency.
+   - **Isolated Loopback Git Server (`127.0.0.1:3000`)**: Sub-second (`< 0.5s`) automated Git backup for every milestone snapshot and file checkpoint without external cloud latency, pre-configured with LevelDB-free immediate queues (`TYPE = immediate`) for conflict-free `gitea dump` backups on Windows.
    - **Multi-Layered Fault-Tolerance & Auto-Recovery**: Configured with Windows Service Control Manager (SCM) auto-restart (`15s/30s/60s`), non-elevated interactive user start/stop permissions (`sc.exe sdset`), autonomous agent service wake-up (`ensure_gitea_online()`), and cross-workspace catch-up synchronization (`flush_all_pending_pushes()`).
 
 ---
 
 ## 2. Measured Impact in Daily Development
 
-| Metric | Standard Antigravity Setup | AntiGraviton Suite (`v1.0.1`) | Real-World Improvement |
+| Metric | Standard Antigravity Setup | AntiGraviton Suite (`v1.0.2`) | Real-World Improvement |
 | :--- | :--- | :--- | :--- |
 | **System & Plugin Context Load** | ~35,000 tokens / turn | **~1,500 tokens / turn** | **~95% lower base overhead** |
 | **Token Consumption (60-Turn Session, benchmarked on Gemini 4 Argon High)** | ~3.39M input tokens | **~0.83M input tokens** | **~75.5% total token savings (4x session capacity)** |
@@ -69,7 +69,7 @@ powershell -ExecutionPolicy Bypass -File .\install-antigraviton.ps1
 
 ```text
 AntiGraviton/
-|-- VERSION                        # SemVer 2.0.0 suite release version (1.0.0)
+|-- VERSION                        # SemVer 2.0.0 suite release version (1.0.2)
 |-- CHANGELOG.md                   # SemVer release history
 |-- README.md                      # Suite documentation
 |-- install-antigraviton.ps1       # Unified 1-command installer (SkillsDB + Gitea + Auto-Token)
@@ -91,7 +91,7 @@ AntiGraviton/
 |   |-- customizations.db          # Sanitized central SQLite database (zero hardcoded paths)
 |   `-- db_manager.py              # Standalone compiled CLI manager
 |-- plugin/                        # Antigravity IDE customizations-db plugin
-|-- gitea-service/                 # Antigravity Gitea Windows Service distribution (v1.1.0)
+|-- gitea-service/                 # Antigravity Gitea Windows Service distribution (v1.1.1)
 |   |-- INSTALL.md
 |   |-- scripts/
 |   |   `-- deploy-gitea.ps1       # SCM service installer with auto-recovery & sdset ACLs

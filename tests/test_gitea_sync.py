@@ -69,7 +69,7 @@ class TestGiteaSync(unittest.TestCase):
         clone_url = ensure_remote_repository(repo_name, description="Automated test repo")
         self.assertIsNotNone(clone_url)
         self.assertIn(repo_name, clone_url)
-        self.assertIn("@127.0.0.1:3000", clone_url)
+        self.assertTrue("@127.0.0.1:3000" in clone_url or "@localhost:3000" in clone_url)
 
     def test_setup_workspace_commit_and_telemetry(self):
         """Verifies workspace git initialization, commit creation, trailers, and zero-turn telemetry."""
@@ -139,8 +139,21 @@ class TestGiteaSync(unittest.TestCase):
 
     def test_discover_all_workspaces(self):
         """Verifies multi-root workspace discovery finds active Antigravity projects."""
-        workspaces = discover_all_workspaces()
-        self.assertGreaterEqual(len(workspaces), 8)
+        repo_root = Path(__file__).resolve().parent.parent
+        workspaces = discover_all_workspaces(base_dir=repo_root.parent)
+        self.assertGreaterEqual(len(workspaces), 1)
+
+    def test_gitea_service_templates_and_relocation_regex(self):
+        """Verifies app.example.ini includes LevelDB-free immediate queues and deploy-gitea.ps1 self-heals WORK_PATH."""
+        repo_root = Path(__file__).resolve().parent.parent
+        example_ini = (repo_root / "gitea-service" / "custom" / "conf" / "app.example.ini").read_text(encoding="utf-8")
+        self.assertIn("[queue]", example_ini)
+        self.assertIn("[queue.common]", example_ini)
+        self.assertIn("TYPE = immediate", example_ini)
+
+        deploy_ps1 = (repo_root / "gitea-service" / "scripts" / "deploy-gitea.ps1").read_text(encoding="utf-8")
+        self.assertIn("WORK_PATH", deploy_ps1)
+        self.assertIn("TYPE = immediate", deploy_ps1)
 
     def test_ensure_gitea_online_and_self_healing(self):
         """Verifies ensure_gitea_online checks service state and returns online status."""

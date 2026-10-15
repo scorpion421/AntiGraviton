@@ -93,19 +93,20 @@ def check_text(text: str, filename: str = "<memory>") -> List[Dict[str, Any]]:
                 "snippet": line[:100].strip(),
             })
 
-        # 3. Deppenbindestrich invariant
+        # 3. Deppenbindestrich invariant (skip negative rule documentation examples like "never 'Abteilungs-Kontingent'")
         deppen_match = DEPPENBINDESTRICH_PATTERN.search(line)
         if deppen_match:
             compound = deppen_match.group()
-            corrected = compound.replace("-", "")
-            violations.append({
-                "file": filename,
-                "line": idx,
-                "rule": "no-deppenbindestrich",
-                "severity": "HIGH",
-                "message": f"Incorrect German compound hyphenation '{compound}'. Write joined as '{corrected}'.",
-                "snippet": line[:100].strip(),
-            })
+            if f"never '{compound}'" not in line and f'never "{compound}"' not in line:
+                corrected = compound.replace("-", "")
+                violations.append({
+                    "file": filename,
+                    "line": idx,
+                    "rule": "no-deppenbindestrich",
+                    "severity": "HIGH",
+                    "message": f"Incorrect German compound hyphenation '{compound}'. Write joined as '{corrected}'.",
+                    "snippet": line[:100].strip(),
+                })
 
         # 4. Secret leak checks
         for secret_name, pat in SECRET_PATTERNS:

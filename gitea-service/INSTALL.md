@@ -168,3 +168,7 @@ UPDATE_EXISTING = true
 ### Issue D: Service cannot start with custom user account (`1069: Logon failure`)
 * **Cause**: The custom service account lacks the `SeServiceLogonRight` Windows privilege.
 * **Fix**: Run the service as `NT AUTHORITY\SYSTEM` (default) or grant `Log on as a service` in Local Security Policy (`secpol.msc`).
+
+### Issue E: `gitea.exe dump` fails with `LOCK: The process cannot access the file because it is being used by another process`
+* **Cause**: By default, Gitea creates on-disk LevelDB queues in `data/queues/common` that hold exclusive Windows file locks while the service is running.
+* **Fix**: Configure `[queue]` and `[queue.common]` with `TYPE = immediate` in `custom\conf\app.ini` (enabled by default in `app.example.ini` and automatically self-healed by `deploy-gitea.ps1`).

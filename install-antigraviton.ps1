@@ -1,12 +1,12 @@
 <#
 .SYNOPSIS
-    Unified One-Command Installer for the AntiGraviton Complete Suite (v1.0.1).
+    Unified One-Command Installer for the AntiGraviton Complete Suite (v1.0.2).
 
 .DESCRIPTION
     Deploys the complete AntiGraviton environment for Google Antigravity IDE:
     1. SkillsDB Context & Memory Engine (v3.5.0) + customizations-db Plugin
     2. Non-destructive upgrade preservation of existing runtime_config, Gitea tokens, learned workspaces, and user-learned rules
-    3. Antigravity Gitea Local Windows Service (v1.1.0) with 3-tier elevation handling (direct admin, optional DPAPI, or UAC), SCM auto-recovery, and non-elevated start/stop permissions
+    3. Antigravity Gitea Local Windows Service (v1.1.1) with 3-tier elevation handling (direct admin, optional DPAPI, or UAC), SCM auto-recovery, and non-elevated start/stop permissions
     4. Zero-touch local Gitea Admin user & API Token provisioning into SkillsDB (no Active Directory required by default)
     5. Organic workspace discovery, health verification, and interactive capability briefing
 
@@ -54,7 +54,7 @@ $ErrorActionPreference = "Stop"
 
 $suiteRoot = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
 $versionFile = Join-Path $suiteRoot "VERSION"
-$suiteVersion = if (Test-Path $versionFile) { (Get-Content $versionFile -Raw).Trim() } else { "1.0.1" }
+$suiteVersion = if (Test-Path $versionFile) { (Get-Content $versionFile -Raw).Trim() } else { "1.0.2" }
 $userHome = if ($env:USERPROFILE) { $env:USERPROFILE } else { [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile) }
 $geminiDir = Join-Path $userHome ".gemini"
 $targetDbPath = Join-Path $geminiDir "database\customizations.db"
@@ -154,10 +154,10 @@ finally:
 }
 
 # ---------------------------------------------------------------------------
-# STEP 3: Provision or Verify Antigravity Gitea Windows Service (v1.1.0)
+# STEP 3: Provision or Verify Antigravity Gitea Windows Service (v1.1.1)
 # ---------------------------------------------------------------------------
 if (-not $SkipGiteaService) {
-    Write-Host "[3/5] Checking Antigravity Gitea Service (v1.1.0)..."
+    Write-Host "[3/5] Checking Antigravity Gitea Service (v1.1.1)..."
     $existingSvc = Get-Service -Name "gitea" -ErrorAction SilentlyContinue
 
     if (-not $GiteaInstallPath) {
