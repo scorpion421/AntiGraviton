@@ -59,26 +59,34 @@ DEFAULT_SYNONYMS = {
     "speicher": "memory leak debugging allocation gc",
     "speicherleck": "memory leak debugging allocation profiler",
     "geschwindigkeit": "performance optimization latency lcp",
+
+    # Git, Gitea & Repository Synchronization
+    "gitea": "gitea git repository sync init push backup customizations",
+    "hochladen": "gitea git push sync upload repository backup",
+    "sichern": "gitea git backup sync snapshot repository",
+    "versionierung": "gitea git repository commit semver changelog",
+    "backup": "gitea git backup sync snapshot repository",
 }
 
 
 def init_synonyms(conn: sqlite3.Connection):
-    """Populates synonym_synapses table in database if empty."""
+    """Populates or updates synonym_synapses table in database."""
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM synonym_synapses;")
     count = cursor.fetchone()[0]
-    if count == 0:
+    if count < len(DEFAULT_SYNONYMS):
         cursor.execute("DELETE FROM synonym_fts;")
         for term, syns in DEFAULT_SYNONYMS.items():
             cursor.execute("""
             INSERT OR REPLACE INTO synonym_synapses (term, synonyms, language, category)
             VALUES (?, ?, 'de', 'general');
             """, (term.lower(), syns.lower()))
-            row_id = cursor.lastrowid
+        cursor.execute("SELECT rowid, term, synonyms FROM synonym_synapses;")
+        for row in cursor.fetchall():
             cursor.execute("""
             INSERT INTO synonym_fts (rowid, term, synonyms)
             VALUES (?, ?, ?);
-            """, (row_id, term.lower(), syns.lower()))
+            """, (row[0], row[1], row[2]))
         conn.commit()
 
 

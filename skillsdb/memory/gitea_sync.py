@@ -567,6 +567,22 @@ def get_workspace_git_telemetry(project_root: Path, flush_pending: bool = False)
         return "\n".join(extra_notices) if extra_notices else None
 
 
+def _ensure_git_safe_directory(project_root: Path):
+    """Automatically registers project_root in git global safe.directory if dubious ownership is detected (e.g. exFAT or secondary drives)."""
+    chk = subprocess.run(
+        ["git", "rev-parse", "--git-dir"],
+        cwd=str(project_root),
+        capture_output=True,
+        text=True,
+    )
+    if chk.returncode != 0 and "dubious ownership" in (chk.stderr or ""):
+        posix_path = str(project_root.resolve()).replace("\\", "/")
+        subprocess.run(
+            ["git", "config", "--global", "--add", "safe.directory", posix_path],
+            capture_output=True,
+        )
+
+
 def setup_workspace_git(
     project_root: Path,
     repo_name: Optional[str] = None,
@@ -589,6 +605,9 @@ def setup_workspace_git(
         )
         if res.returncode != 0:
             return False
+
+    # 1.5 Auto-heal Git dubious ownership on secondary/exFAT drives
+    _ensure_git_safe_directory(project_root)
 
     # 2. Local config for commit author
     subprocess.run(
@@ -760,13 +779,27 @@ def save_code_commit(
     if not dot_git.exists():
         setup_workspace_git(project_root, configure_remote=not is_temp)
 
-    # Check status
+    # Check status (auto-healing dubious ownership if needed)
     st_res = subprocess.run(
         ["git", "status", "--porcelain"],
         cwd=str(project_root),
         capture_output=True,
         text=True,
     )
+    if st_res.returncode != 0 and "dubious ownership" in (st_res.stderr or ""):
+        _ensure_git_safe_directory(project_root)
+        setup_workspace_git(project_root, configure_remote=not is_temp)
+        st_res = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+        )
+    if st_res.returncode != 0:
+        return {
+            "success": False,
+            "error": st_res.stderr.strip() or "Failed to query git status",
+        }
     status_lines = [l for l in st_res.stdout.splitlines() if l.strip()]
 
     # Extract changed file paths for semantic FTS indexing
@@ -927,22 +960,24 @@ def sync_workspace(project_root: Path, message: Optional[str] = None, push: bool
     """Initializes, learns, and synchronizes a specific workspace to Gitea."""
     msg = message or "Synchronize workspace code history"
     print(f"Synchronizing workspace: {project_root.name} ({project_root})")
-    learn_workspace(project_root)
     setup_workspace_git(project_root)
+    learn_workspace(project_root)
     result = save_code_commit(project_root, message=msg, push=push)
+    config = get_gitea_config()
+    repo_url = f"{config['url']}/{config['user']}/{project_root.name}" if config.get("user") else config["url"]
     if result.get("success"):
         if result.get("committed"):
             print(f"  [OK] Commit created: {result.get('commit_hash', '')[:7]}")
             print(f"  [OK] Files tracked:  {result.get('files_changed', 0)}")
             if result.get("pushed"):
-                print("  [OK] Pushed successfully to Gitea")
+                print(f"  [OK] Pushed successfully to Gitea ({repo_url})")
             else:
                 print("  [WARN] Commit created locally, push skipped or failed")
         else:
             if result.get("pushed"):
-                print(f"  [OK] Flushed pending commits to Gitea (HEAD: {result.get('commit_hash', '')[:7]})")
+                print(f"  [OK] Flushed pending commits to Gitea (HEAD: {result.get('commit_hash', '')[:7]} | {repo_url})")
             else:
-                print(f"  [OK] Already up to date (HEAD: {result.get('commit_hash', '')[:7]})")
+                print(f"  [OK] Already up to date (HEAD: {result.get('commit_hash', '')[:7]} | {repo_url})")
     else:
         print(f"  [ERROR] {result.get('error')}")
 

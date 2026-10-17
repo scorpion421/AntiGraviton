@@ -5,6 +5,23 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.4] - 2026-10-17
+
+### Added
+- **Zero-prompt Gitea CLI routing in plugin rules, skill runbook, and Turn-1 hook (`plugin/rules/AGENTS.md`, `plugin/skills/customizations-db/SKILL.md`, `skillsdb/memory/project_memory.py`, `v3.5.2`)**:
+  - Added Section 8 (`Local Gitea backup and repository synchronization`) to `plugin/skills/customizations-db/SKILL.md` and explicit Gitea CLI instructions (`skillsdb gitea-init "<target_directory>"`, `skillsdb gitea-sync`, `skillsdb gitea-status`, `skillsdb gitea-config`) to `plugin/rules/AGENTS.md` and the Turn-1 `PreInvocation` hook guardrail so agent sessions immediately use the built-in Gitea CLI without manually hunting for `.git/config` or tokens.
+  - Added German and English cross-lingual FTS5 synonyms (`gitea`, `hochladen`, `sichern`, `versionierung`, `backup`) in `skillsdb/search/synonyms.py` so `skillsdb search gitea` and `skillsdb suggest` immediately rank the `customizations-db` Gitea workflow.
+
+### Fixed
+- **Automatic Git `safe.directory` self-healing on secondary and exFAT drives (`skillsdb/memory/gitea_sync.py`)**:
+  - Added `_ensure_git_safe_directory()` in `setup_workspace_git()` and `save_code_commit()` so directories on file systems that do not record POSIX/NTFS ownership (e.g. `D:\` exFAT drives) automatically register in `git config --global --add safe.directory` instead of failing with `fatal: detected dubious ownership`.
+- **Workspace learning order during initial Gitea repository creation (`skillsdb/memory/gitea_sync.py`)**:
+  - Updated `sync_workspace()` to execute `setup_workspace_git()` (creating `.git`) before calling `learn_workspace()` so brand-new standalone folders initialized via `skillsdb gitea-init "<path>"` are immediately registered in `runtime_config` (`workspace:<name>`) and display the clickable Gitea repository URL upon completion.
+- **YAML block scalar frontmatter parsing (`skillsdb/updater/merger.py`)**:
+  - Updated `parse_skill_frontmatter()` to cleanly strip multi-character YAML block scalar indicators (`>-`, `|-`, `>+`, `|+`) across both LF and CRLF files.
+- **Natural sentence case across plugin documentation (`plugin/rules/AGENTS.md`, `plugin/skills/customizations-db/SKILL.md`, `README.md`, `CHANGELOG.md`)**:
+  - Converted all remaining newspaper-style Title Case headings and bold labels in `plugin/rules/AGENTS.md` and `plugin/skills/customizations-db/SKILL.md` to natural sentence case.
+
 ## [1.0.3] - 2026-10-17
 
 ### Added

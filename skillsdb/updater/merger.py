@@ -246,7 +246,7 @@ def parse_skill_frontmatter(content: str) -> tuple[str, str]:
         name_match = re.search(r"^name:\s*(.+)$", frontmatter, re.MULTILINE)
         if name_match:
             name = name_match.group(1).strip()
-        desc_match = re.search(r"^description:\s*(?:[>|-]\s*\n)?(.*?)(?=\n[a-zA-Z0-9_-]+:|$)", frontmatter, re.DOTALL | re.MULTILINE)
+        desc_match = re.search(r"^description:\s*(?:[>|][-+]?\s*\r?\n)?(.*?)(?=\r?\n[a-zA-Z0-9_-]+:|$)", frontmatter, re.DOTALL | re.MULTILINE)
         if desc_match:
             desc_raw = desc_match.group(1).strip()
             description = " ".join([line.strip() for line in desc_raw.splitlines() if line.strip()])

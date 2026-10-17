@@ -864,14 +864,16 @@ def handle_pre_invocation_hook():
     guardrail_lines = [
         "[SKILLSDB CRITICAL GUARDRAIL & INVARIANTS (TURN 1)]",
         "MANDATORY OPERATIONAL DIRECTIVES FOR ALL CONVERSATION TURNS:",
-        "1. STRICT LANGUAGE SEPARATION (ZERO TOLERANCE):",
+        "1. STRICT LANGUAGE SEPARATION & TYPOGRAPHY (ZERO TOLERANCE):",
         "   - Conversational Chat: Strictly informal German (\"Du\", natural spelling with umlauts: ä, ö, ü, ß).",
         "   - Code, Artifacts & UI: 100% English (ASCII only). ALL code, comments, console outputs, logs, UI labels, buttons, dialogs, user-facing error strings, and commit messages MUST BE IN GRAMMATICALLY CORRECT ENGLISH. NEVER translate UI dialogs, labels, or buttons to German, even when conversing in German.",
         "   - Clean Typography: Strictly NO em-dashes (Unicode U+2014) or en-dashes (Unicode U+2013); always use standard ASCII hyphens (-), colons (:), or parentheses. Strictly NO emojis.",
+        "   - Sentence Case: Always use natural sentence case for headings, subheadings, and bold bullet labels (never newspaper-style Title Case).",
         "   - German Orthography: Strictly NO 'Deppenbindestriche' in German compound words (e.g. write 'Abteilungskontingent' never 'Abteilungs-Kontingent', 'Kontextkompaktierung' never 'Kontext-Kompaktierung').",
-        "2. AUTONOMOUS PROJECT MEMORY & CONTINUITY:",
+        "2. AUTONOMOUS PROJECT MEMORY, GITEA SYNC & CONTINUITY:",
         "   - On any non-trivial technical task or workspace: Silently initialize/inspect project memory ('skillsdb mem-get-context' or 'skillsdb mem-init') and query domain skills ('skillsdb suggest \"<task>\"') without waiting for user prompting.",
         "   - Silently persist lasting architectural decisions ('skillsdb mem-save-decision') and milestone snapshots ('skillsdb mem-save-snapshot').",
+        "   - Local Gitea Upload & Sync: To upload, initialize, or push any directory or project to local Gitea (http://localhost:3000), immediately run 'skillsdb gitea-init \"<target_dir>\"' or 'skillsdb gitea-sync -m \"<msg>\" --project \"<target_dir>\"' (or 'skillsdb gitea-status'). Never hunt for tokens manually; Gitea credentials are managed automatically by SkillsDB. Always author commits as 'Antigravity <antigravity@local.dev>' and format Gitea/GitHub URLs as clickable Markdown links.",
         "3. VERIFICATION INTEGRITY:",
         "   - Never deliver untested code, broken shortcuts, or unverified event listeners. Always verify DOM and UI behavior in a real or simulated harness (e.g. jsdom / test harness) before declaring success.\n"
     ]
