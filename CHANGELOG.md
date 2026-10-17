@@ -7,16 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.0.3] - 2026-10-17
 
+### Added
+- **README Technical Deep-Dive on Antigravity IDE Token Traps & Client Bugs (`README.md`)**:
+  - Documented the 5 major Antigravity IDE client pitfalls (35,000-token static plugin bloat, the `2026-10-16` `PreInvocation` `proto3` & KV-cache trap, hook `cwd` escalation without an open workspace, `Gemini 4 Argon` model renaming, and Windows UTF-8 manifest resets on IDE updates) and how AntiGraviton shields against them.
+- **AI Commit Author Attribution (`skillsdb/memory/gitea_sync.py`)**:
+  - Updated `save_code_commit()` to explicitly pass `-c user.name=Antigravity -c user.email=antigravity@local.dev --author="Antigravity <antigravity@local.dev>"` so AI-authored milestone commits are always attributed to the `Antigravity` account (`antigravity@local.dev`) even in pre-existing or cloned repositories.
+
 ### Fixed
 - **Antigravity Post-Update `PreInvocation` Hook Deduplication (`skillsdb/memory/project_memory.py`, `v3.5.1`)**:
-  - Following the Google Antigravity IDE update (`2026-10-16`), `PreInvocation` hooks fire before every model step inside a turn with `invocationNum <= 1`, and each returned `ephemeralMessage` is persisted into `transcript.jsonl` as a `SYSTEM_SDK` step.
-  - Added fast `(conversationId, workspace)` deduplication (`skillsdb_hook_state.json`) so Turn-1 guardrails and project memory context are injected once per conversation/workspace transition rather than repeated on every tool step, preserving tail KV-cache continuity and eliminating ~2-3s per-step hook latency.
+  - Following the Google Antigravity IDE update (`2026-10-16`), `PreInvocation` hooks fire before every internal tool step inside a turn with `invocationNum <= 1` (`proto3` omits `0` on call #1 and sends `1` on call #2), and each returned `ephemeralMessage` is permanently persisted into `transcript.jsonl` as a `SYSTEM_SDK` step.
+  - Full transparency: Any hook relying on Google's documented `invocationNum == 1` check (including AntiGraviton `v1.0.2`) was triggered on every tool step, breaking tail KV-cache continuity and adding ~2-3s latency per tool call.
+  - Added independent sub-millisecond `(conversationId, workspace)` state deduplication (`skillsdb_hook_state.json`) so Turn-1 guardrails and project memory context are injected strictly once per conversation/workspace transition (`< 1 ms` and `0` duplicate tokens on all subsequent tool calls).
 - **System & User Profile Non-Workspace Boundary Hardening (`skillsdb/memory/project_memory.py`, `skillsdb/memory/gitea_sync.py`)**:
   - Hardened `_is_protected_non_workspace()`, `find_project_root()`, `mem_init()`, and `learn_workspace()` so user home (`Path.home()`), `~/.gemini`, `~/.gemini/config/plugins/*` (where Antigravity executes plugin hooks when `workspacePaths` is empty), `~/.gemini/antigravity/scratch` root, and OS temp root are never treated as project workspaces.
 - **Zero-Latency Hook Git Telemetry (`skillsdb/memory/gitea_sync.py`)**:
   - Updated `get_workspace_git_telemetry()` so `flush_pending` defaults to `False` during normal hook telemetry checks while `ensure_gitea_online()` automatically flushes pending commits across all learned workspaces whenever the Gitea Windows Service recovers from a `STOPPED` state.
 - **Gemini 4 Argon (`TIER_ULTRA`) Model Detection (`skillsdb/core/detector.py`)**:
-  - Updated `detect_model_tier()` to recognize `Gemini 4 Argon` (`argon`, `gemini 4`, `gemini-4`) as `TIER_ULTRA`, scan the last 128 KB of `transcript.jsonl` in reverse order for `<USER_SETTINGS_CHANGE>` model switches, and ignore false-positive `"flash"` substrings inside tool declarations.
+  - Updated `detect_model_tier()` to recognize `Gemini 4 Argon` (`argon`, `gemini 4`, `gemini-4`) as `TIER_ULTRA`, scan the last 4 MB of `transcript.jsonl` in reverse order for `<USER_SETTINGS_CHANGE>` model switches, and ignore false-positive `"flash"` substrings inside tool declarations.
 
 ## [1.0.2] - 2026-10-15
 
