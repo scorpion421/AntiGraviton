@@ -7,28 +7,63 @@ import sys
 import json
 import sqlite3
 import shutil
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from ..config import TIER_ULTRA, DB_PATH, __version__
+from ..config import TIER_ULTRA, DB_PATH, GEMINI_DIR, __version__
 from ..core.detector import detect_model_tier
 from .writer_queue import get_writer_queue, flush_journals
 from .gitea_sync import _is_temp_workspace, save_code_commit, get_workspace_git_telemetry, learn_workspace, flush_all_pending_pushes
 from ..search.fts import detect_cwd_hints
 
+_HOOK_STATE_FILE = Path(tempfile.gettempdir()) / "skillsdb_hook_state.json"
+
+
+def _is_protected_non_workspace(path: Path) -> bool:
+    """
+    Returns True if path is a system/user profile/container directory that must never
+    be treated as a project workspace (e.g., user home, ~/.gemini, scratch container root,
+    or root OS temp dir).
+    """
+    if not path:
+        return True
+    try:
+        abs_p = Path(os.path.abspath(str(path)))
+        home_abs = Path(os.path.abspath(str(Path.home())))
+        gemini_abs = Path(os.path.abspath(str(GEMINI_DIR)))
+        scratch_abs = gemini_abs / "antigravity" / "scratch"
+        temp_abs = Path(os.path.abspath(str(tempfile.gettempdir())))
+        if abs_p in (home_abs, gemini_abs, scratch_abs, temp_abs):
+            return True
+        for sub in ("config", "database", "plugins_archive"):
+            try:
+                abs_p.relative_to(gemini_abs / sub)
+                return True
+            except ValueError:
+                pass
+        for ag_sub in ("brain", "builtin", "bin"):
+            try:
+                abs_p.relative_to(gemini_abs / "antigravity" / ag_sub)
+                return True
+            except ValueError:
+                pass
+        return False
+    except Exception:
+        return True
+
 
 def find_project_root(start_path: Path = None) -> Path:
-    """Traverses upward to identify project root boundary without crossing user home."""
+    """Traverses upward to identify project root boundary without crossing user home or system directories."""
     current = Path(os.path.abspath(str(start_path or Path.cwd())))
+    if _is_protected_non_workspace(current):
+        return current
     project_markers = [
         ".agents", ".git", ".antigravity",
         "package.json", "pyproject.toml", "requirements.txt",
         "pubspec.yaml", "go.mod", "pom.xml", "build.gradle"
     ]
-    home_dir = Path(os.path.abspath(str(Path.home())))
     for parent in [current] + list(current.parents):
-        if parent == home_dir:
-            if (parent / ".agents").exists():
-                return parent
+        if _is_protected_non_workspace(parent):
             break
         if any((parent / m).exists() for m in project_markers):
             return parent
@@ -159,6 +194,9 @@ def init_project_db(conn: sqlite3.Connection):
 
 def mem_init(project_root: Path = None):
     root = project_root or find_project_root()
+    if _is_protected_non_workspace(root):
+        print(f"Skipped: '{root}' is a protected system/profile directory, not a project workspace.")
+        return
     db_path = get_project_db_path(root)
     conn = get_project_connection(root)
     init_project_db(conn)
@@ -784,16 +822,42 @@ def handle_pre_invocation_hook():
         payload = {}
 
     invocation_num = payload.get("invocationNum", 1)
-    if invocation_num != 1:
+    if invocation_num is not None and invocation_num > 1:
         print(json.dumps({"injectSteps": []}))
         return
 
     workspace_paths = payload.get("workspacePaths", [])
-    proj_path = Path(workspace_paths[0]) if workspace_paths else Path.cwd()
-    root_path = find_project_root(proj_path)
-    db_path = get_project_db_path(root_path)
+    proj_path = Path(workspace_paths[0]) if workspace_paths else None
+    has_valid_workspace = bool(proj_path) and not _is_protected_non_workspace(proj_path)
+    root_path = find_project_root(proj_path) if has_valid_workspace else None
+    if root_path and _is_protected_non_workspace(root_path):
+        has_valid_workspace = False
+        root_path = None
+    db_path = get_project_db_path(root_path) if (has_valid_workspace and root_path) else None
 
-    tier, tdesc = detect_model_tier()
+    # Deduplicate per (conversationId, workspace) because Antigravity (post-2026-10-16)
+    # invokes PreInvocation before every tool step with invocationNum <= 1 and persists
+    # each injected ephemeralMessage into transcript.jsonl.
+    cid = payload.get("conversationId")
+    workspace_key = str(root_path) if (has_valid_workspace and root_path) else "__no_workspace__"
+    if cid:
+        try:
+            state = {}
+            if _HOOK_STATE_FILE.exists():
+                state = json.loads(_HOOK_STATE_FILE.read_text(encoding="utf-8"))
+            if state.get(cid) == workspace_key:
+                print(json.dumps({"injectSteps": []}))
+                return
+            state[cid] = workspace_key
+            if len(state) > 100:
+                keys = list(state.keys())[-50:]
+                state = {k: state[k] for k in keys}
+            _HOOK_STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
+        except Exception:
+            pass
+
+    model_hint = payload.get("modelName") or payload.get("model")
+    tier, tdesc = detect_model_tier(cid=cid, model_name_hint=model_hint)
     lines = []
 
     # 0. Global Turn-1 Invariant Guardrails (Strict English for maximum LLM attention weight & adherence)
@@ -813,49 +877,50 @@ def handle_pre_invocation_hook():
     ]
     lines.append("\n".join(guardrail_lines))
 
-    # Auto-initialize project memory if workspace has files
-    if not db_path.exists() and root_path.exists():
-        try:
-            has_files = any(f for f in root_path.iterdir() if f.name != ".agents")
-            if has_files:
-                conn = get_project_connection(root_path)
-                conn.close()
-        except Exception:
-            pass
-
-    learn_workspace(root_path)
-
     if tier == TIER_ULTRA:
         lines.append("[SKILLSDB RUNTIME PROFILE: GEMINI ULTRA (16-thread high-concurrency mode)]")
         lines.append("Parallel batch fetching active: 'skillsdb get-skills <s1> <s2>' | Clusters: 'skillsdb get-cluster <domain>' | Parallel search: 'skillsdb search-multi <q1> <q2>' | Concurrent subagents: 8-16 parallel workers supported.\n")
 
-    # 1. Autonomous Directory Scoping (Zero-effort skill routing)
-    cwd_hints = detect_cwd_hints(proj_path)
-    if cwd_hints and DB_PATH.exists():
-        try:
-            gconn = sqlite3.connect(DB_PATH, timeout=5.0)
-            gconn.row_factory = sqlite3.Row
-            gcursor = gconn.cursor()
-            fts_query = " OR ".join(cwd_hints[:8])
-            gcursor.execute("""
-            SELECT s.name, s.description FROM skills_fts f
-            JOIN skills s ON f.rowid = s.id
-            WHERE skills_fts MATCH ?
-            ORDER BY rank LIMIT 3;
-            """, (fts_query,))
-            matched_skills = gcursor.fetchall()
-            gconn.close()
-            if matched_skills:
-                lines.append(f"[AUTONOMOUS DIRECTORY SCOPING: {', '.join(cwd_hints)}]")
-                lines.append("Domain micro-skills pre-routed for current workspace:")
-                for ms in matched_skills:
-                    desc = ms['description'][:95] + "..." if len(ms['description']) > 95 else ms['description']
-                    lines.append(f"  * {ms['name']}: {desc}")
-                lines.append("")
-        except Exception:
-            pass
+    # Auto-initialize project memory if a valid project workspace is open and has files
+    if has_valid_workspace and root_path and db_path:
+        if not db_path.exists() and root_path.exists():
+            try:
+                has_files = any(f for f in root_path.iterdir() if f.name != ".agents")
+                if has_files:
+                    conn = get_project_connection(root_path)
+                    conn.close()
+            except Exception:
+                pass
 
-    if db_path.exists():
+        learn_workspace(root_path)
+
+        # 1. Autonomous Directory Scoping (Zero-effort skill routing)
+        cwd_hints = detect_cwd_hints(proj_path)
+        if cwd_hints and DB_PATH.exists():
+            try:
+                gconn = sqlite3.connect(DB_PATH, timeout=5.0)
+                gconn.row_factory = sqlite3.Row
+                gcursor = gconn.cursor()
+                fts_query = " OR ".join(cwd_hints[:8])
+                gcursor.execute("""
+                SELECT s.name, s.description FROM skills_fts f
+                JOIN skills s ON f.rowid = s.id
+                WHERE skills_fts MATCH ?
+                ORDER BY rank LIMIT 3;
+                """, (fts_query,))
+                matched_skills = gcursor.fetchall()
+                gconn.close()
+                if matched_skills:
+                    lines.append(f"[AUTONOMOUS DIRECTORY SCOPING: {', '.join(cwd_hints)}]")
+                    lines.append("Domain micro-skills pre-routed for current workspace:")
+                    for ms in matched_skills:
+                        desc = ms['description'][:95] + "..." if len(ms['description']) > 95 else ms['description']
+                        lines.append(f"  * {ms['name']}: {desc}")
+                    lines.append("")
+            except Exception:
+                pass
+
+    if has_valid_workspace and db_path and db_path.exists():
         try:
             conn = sqlite3.connect(db_path, timeout=5.0)
             conn.row_factory = sqlite3.Row

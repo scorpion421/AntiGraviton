@@ -25,25 +25,44 @@ def check_local_endpoint(url: str = "http://localhost:11434/api/tags", timeout: 
     return {"available": False, "models": [], "url": url}
 
 
-def detect_model_tier(cid: str = None, db_path: Path = None) -> tuple[str, str]:
+def _classify_model_string(text: str) -> str | None:
+    """Classifies a model name or settings change string into a SkillsDB tier."""
+    if not text:
+        return None
+    low = text.lower()
+    if any(k in low for k in ("argon", "gemini 4", "gemini-4", "gemini-ultra", "gemini-2.0-ultra", "gemini-3.0-ultra", "ultra")):
+        return TIER_ULTRA
+    if any(k in low for k in ("gemini 3.8 flash", "gemini-flash", "flash-lite", "flash (")):
+        return TIER_LEAN
+    if any(k in low for k in ("gemini-pro", "gemini pro", "pro (")):
+        return TIER_STANDARD
+    return None
+
+
+def detect_model_tier(cid: str = None, db_path: Path = None, model_name_hint: str = None) -> tuple[str, str]:
     """
     Detects the active model tier and returns (tier, source_description).
     Tiers:
-      - 'ultra': Gemini Ultra, Gemini 2.0/3.x Pro (High/Ultra capability).
+      - 'ultra': Gemini 4 Argon, Gemini Ultra, Gemini 2.0/3.x Pro (High/Ultra capability).
       - 'standard': Gemini Pro (Standard).
       - 'lean': Gemini Flash, Flash-Lite, or low-quota sessions.
       - 'local' / 'offline': Air-gapped local model (Codestral, Ollama, vLLM).
     """
-    # Stage 1: Explicit environment variable override
-    env_tier = (os.environ.get("SKILLSDB_MODEL_TIER") or os.environ.get("ANTIGRAVITY_MODEL", "")).strip().lower()
-    if env_tier in [TIER_LEAN, TIER_STANDARD, TIER_ULTRA, TIER_LOCAL, TIER_OFFLINE]:
-        return env_tier, f"Environment variable SKILLSDB_MODEL_TIER={env_tier}"
-    if "local" in env_tier or "offline" in env_tier or "ollama" in env_tier or "codestral" in env_tier:
-        return TIER_LOCAL, f"Environment variable ({env_tier}: Local sovereignty detected)"
-    if "ultra" in env_tier:
-        return TIER_ULTRA, f"Environment variable ({env_tier}: Ultra detected)"
-    if "flash" in env_tier:
-        return TIER_LEAN, f"Environment variable ({env_tier}: Flash detected)"
+    # Stage 1: Explicit environment variable or hook modelName hint
+    env_tier = (model_name_hint or os.environ.get("SKILLSDB_MODEL_TIER") or os.environ.get("ANTIGRAVITY_MODEL", "")).strip().lower()
+    if env_tier and env_tier != "auto":
+        if env_tier in [TIER_LEAN, TIER_STANDARD, TIER_ULTRA, TIER_LOCAL, TIER_OFFLINE]:
+            return env_tier, f"Environment variable SKILLSDB_MODEL_TIER={env_tier}"
+        if any(k in env_tier for k in ("local", "offline", "ollama", "codestral")):
+            return TIER_LOCAL, f"Environment variable ({env_tier}: Local sovereignty detected)"
+        classified = _classify_model_string(env_tier)
+        if classified:
+            label = "Argon/ULTRA" if classified == TIER_ULTRA else ("Flash" if classified == TIER_LEAN else "Pro")
+            return classified, f"Model hint ({env_tier}: {label} detected)"
+        if "flash" in env_tier:
+            return TIER_LEAN, f"Environment variable ({env_tier}: Flash detected)"
+        if "pro" in env_tier:
+            return TIER_STANDARD, f"Environment variable ({env_tier}: Pro detected)"
 
     # Stage 2: Database configuration override (runtime_config table)
     target_db = db_path or DB_PATH
@@ -61,7 +80,7 @@ def detect_model_tier(cid: str = None, db_path: Path = None) -> tuple[str, str]:
     except Exception:
         pass
 
-    # Stage 3: Schema-resilient transcript inspection
+    # Stage 3: Schema-resilient transcript inspection (reads latest <USER_SETTINGS_CHANGE> event first)
     cid = cid or os.environ.get("ANTIGRAVITY_CONVERSATION_ID")
     brain_dir = Path.home() / ".gemini" / "antigravity" / "brain"
     target_path = None
@@ -80,18 +99,36 @@ def detect_model_tier(cid: str = None, db_path: Path = None) -> tuple[str, str]:
 
     if target_path and target_path.exists():
         try:
+            import re
+            conv_name = target_path.parents[2].name
+            file_size = target_path.stat().st_size
+            read_bytes = min(file_size, 4194304)  # Read up to last 4 MB for recent model switches
+            with open(target_path, "rb") as f:
+                if file_size > read_bytes:
+                    f.seek(file_size - read_bytes)
+                tail_text = f.read().decode("utf-8", errors="ignore")
+
+            # Pass 1: Find the most recent explicit <USER_SETTINGS_CHANGE> Model Selection event
+            settings_matches = re.findall(
+                r"<USER_SETTINGS_CHANGE>(?:\\n|\s)*The user changed (?:the )?setting [`'\"]?Model Selection[`'\"]? from [^<]+? to ([^.<\n\\]+)\.",
+                tail_text,
+            )
+            for target_model in reversed(settings_matches):
+                tier = _classify_model_string(target_model)
+                if tier:
+                    label = f"{target_model.strip()} -> ULTRA" if tier == TIER_ULTRA else ("Flash" if tier == TIER_LEAN else "Pro")
+                    return tier, f"Transcript auto-detection ({conv_name}: {label} detected)"
+
+            # Pass 2: Check head lines if no settings change event occurred in tail
             with open(target_path, "r", encoding="utf-8", errors="ignore") as f:
                 head_lines = [f.readline() for _ in range(15)]
             for line in head_lines:
-                if not line.strip():
+                if not line.strip() or "invoke_subagent" in line or "flash_lite" in line:
                     continue
-                lower_line = line.lower()
-                if "gemini-ultra" in lower_line or "gemini-2.0-ultra" in lower_line or "gemini-3.0-ultra" in lower_line or "ultra" in lower_line:
-                    return TIER_ULTRA, f"Transcript auto-detection ({target_path.parents[2].name}: Ultra detected)"
-                if "gemini-flash" in lower_line or "flash" in lower_line or "flash-lite" in lower_line:
-                    return TIER_LEAN, f"Transcript auto-detection ({target_path.parents[2].name}: Flash detected)"
-                if "pro" in lower_line or "gemini-pro" in lower_line:
-                    return TIER_STANDARD, f"Transcript auto-detection ({target_path.parents[2].name}: Pro detected)"
+                tier = _classify_model_string(line)
+                if tier:
+                    label = "Argon/Ultra" if tier == TIER_ULTRA else ("Flash" if tier == TIER_LEAN else "Pro")
+                    return tier, f"Transcript auto-detection ({conv_name}: {label} detected)"
         except Exception:
             pass
 

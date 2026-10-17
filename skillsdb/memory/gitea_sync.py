@@ -49,9 +49,18 @@ def learn_workspace(project_root: Path, db_path: Path = DB_PATH) -> Optional[str
         abs_root = Path(os.path.abspath(str(project_root)))
         if not abs_root.exists() or not abs_root.is_dir():
             return None
-        # Only learn valid project roots (containing .agents or .git)
-        if abs_root == Path(os.path.abspath(str(Path.home()))):
+        # Only learn valid project roots (containing .agents or .git) and never home/.gemini/scratch root
+        home_abs = Path(os.path.abspath(str(Path.home())))
+        gemini_abs = Path(os.path.abspath(str(GEMINI_DIR)))
+        scratch_abs = gemini_abs / "antigravity" / "scratch"
+        if abs_root in (home_abs, gemini_abs, scratch_abs):
             return None
+        for excluded_sub in (gemini_abs / "config", gemini_abs / "database"):
+            try:
+                abs_root.relative_to(excluded_sub)
+                return None
+            except ValueError:
+                pass
         if not ((abs_root / ".agents").exists() or (abs_root / ".git").exists()):
             return None
         ws_key = f"workspace:{abs_root.name}"
@@ -352,7 +361,7 @@ def ensure_gitea_online(
         except Exception:
             pass
 
-    if online and flush_pending:
+    if online and (flush_pending or recovered):
         flushed_repos = flush_all_pending_pushes(db_path=db_path)
 
     return {
@@ -464,11 +473,11 @@ def _build_auth_clone_url(clone_url: Optional[str], user: str, token: str) -> Op
     return clone_url
 
 
-def get_workspace_git_telemetry(project_root: Path) -> Optional[str]:
+def get_workspace_git_telemetry(project_root: Path, flush_pending: bool = False) -> Optional[str]:
     """
     Returns a compact Git & Gitea status string (~20 tokens), auto-recovers the Gitea
-    service if STOPPED, flushes any pending unpushed commits across learned workspaces,
-    and emits an unmissable alert if Gitea is offline.
+    service if STOPPED, flushes any pending unpushed commits upon recovery or when
+    flush_pending=True, and emits an unmissable alert if Gitea is offline.
     """
     if not project_root or not (project_root / ".git").exists():
         return None
@@ -478,7 +487,7 @@ def get_workspace_git_telemetry(project_root: Path) -> Optional[str]:
     extra_notices: List[str] = []
     if not _is_temp_workspace(project_root):
         try:
-            health = ensure_gitea_online(auto_recover=True, flush_pending=True)
+            health = ensure_gitea_online(auto_recover=True, flush_pending=flush_pending)
             if not health.get("online"):
                 svc_st = health.get("service_status", "STOPPED")
                 extra_notices.append(

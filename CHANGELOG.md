@@ -5,6 +5,19 @@ All notable changes to the **AntiGraviton Suite** project will be documented in 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.3] - 2026-10-17
+
+### Fixed
+- **Antigravity Post-Update `PreInvocation` Hook Deduplication (`skillsdb/memory/project_memory.py`, `v3.5.1`)**:
+  - Following the Google Antigravity IDE update (`2026-10-16`), `PreInvocation` hooks fire before every model step inside a turn with `invocationNum <= 1`, and each returned `ephemeralMessage` is persisted into `transcript.jsonl` as a `SYSTEM_SDK` step.
+  - Added fast `(conversationId, workspace)` deduplication (`skillsdb_hook_state.json`) so Turn-1 guardrails and project memory context are injected once per conversation/workspace transition rather than repeated on every tool step, preserving tail KV-cache continuity and eliminating ~2-3s per-step hook latency.
+- **System & User Profile Non-Workspace Boundary Hardening (`skillsdb/memory/project_memory.py`, `skillsdb/memory/gitea_sync.py`)**:
+  - Hardened `_is_protected_non_workspace()`, `find_project_root()`, `mem_init()`, and `learn_workspace()` so user home (`Path.home()`), `~/.gemini`, `~/.gemini/config/plugins/*` (where Antigravity executes plugin hooks when `workspacePaths` is empty), `~/.gemini/antigravity/scratch` root, and OS temp root are never treated as project workspaces.
+- **Zero-Latency Hook Git Telemetry (`skillsdb/memory/gitea_sync.py`)**:
+  - Updated `get_workspace_git_telemetry()` so `flush_pending` defaults to `False` during normal hook telemetry checks while `ensure_gitea_online()` automatically flushes pending commits across all learned workspaces whenever the Gitea Windows Service recovers from a `STOPPED` state.
+- **Gemini 4 Argon (`TIER_ULTRA`) Model Detection (`skillsdb/core/detector.py`)**:
+  - Updated `detect_model_tier()` to recognize `Gemini 4 Argon` (`argon`, `gemini 4`, `gemini-4`) as `TIER_ULTRA`, scan the last 128 KB of `transcript.jsonl` in reverse order for `<USER_SETTINGS_CHANGE>` model switches, and ignore false-positive `"flash"` substrings inside tool declarations.
+
 ## [1.0.2] - 2026-10-15
 
 ### Added

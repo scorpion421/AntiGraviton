@@ -1,7 +1,7 @@
-# AntiGraviton Complete Suite (`v1.0.2`)
+# AntiGraviton Complete Suite (`v1.0.3`)
 
 **Turnkey Agentic Development Environment for Google Antigravity IDE**  
-*Combining **SkillsDB (`v3.5.0`)** + **Antigravity Gitea Windows Service (`v1.1.1`)** in a single one-command distribution.*
+*Combining **SkillsDB (`v3.5.1`)** + **Antigravity Gitea Windows Service (`v1.1.1`)** in a single one-command distribution.*
 
 ---
 
@@ -11,7 +11,7 @@
 
 It bundles two tightly integrated systems into a single repository and installer:
 
-1. **SkillsDB Context & Memory Engine (`v3.5.0`)**:
+1. **SkillsDB Context & Memory Engine (`v3.5.1`)**:
    - **On-Demand Micro-Skill Routing**: Replaces static plugin prompt bloat (~35,000 tokens/turn) with a compact (~450 token) routing directive and surgical SQLite FTS5 micro-skill retrieval (`--summary`, `--section`).
    - **Persistent Episodic Project Memory (`.agents/memory.db`)**: Automatically records architectural decisions, milestone snapshots, and workspace telemetry across sessions so every new conversation starts with full project context.
    - **Organic On-Demand Workspace Learning**: Ships with zero hardcoded paths or credentials. Automatically learns project paths as you work (`mem-init`, `mem-save-snapshot`, `gitea-init`) and discovers Antigravity IDE workspaces from `~/.gemini/config/projects/*.json` and `~/.gemini/antigravity/scratch`.
@@ -24,7 +24,7 @@ It bundles two tightly integrated systems into a single repository and installer
 
 ## 2. Measured Impact in Daily Development
 
-| Metric | Standard Antigravity Setup | AntiGraviton Suite (`v1.0.2`) | Real-World Improvement |
+| Metric | Standard Antigravity Setup | AntiGraviton Suite (`v1.0.3`) | Real-World Improvement |
 | :--- | :--- | :--- | :--- |
 | **System & Plugin Context Load** | ~35,000 tokens / turn | **~1,500 tokens / turn** | **~95% lower base overhead** |
 | **Token Consumption (60-Turn Session, benchmarked on Gemini 4 Argon High)** | ~3.39M input tokens | **~0.83M input tokens** | **~75.5% total token savings (4x session capacity)** |

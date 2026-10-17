@@ -16,8 +16,14 @@ REPO_ROOT = Path(__file__).parent.parent.resolve()
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from skillsdb.config import TIER_ULTRA, GEMINI_DIR
+from skillsdb.core.detector import detect_model_tier
 from skillsdb.core.guardrails import handle_pre_tool_guardrail_hook
-from skillsdb.memory.project_memory import handle_pre_invocation_hook
+from skillsdb.memory.project_memory import (
+    handle_pre_invocation_hook,
+    _is_protected_non_workspace,
+    find_project_root,
+)
 
 
 class TestGuardrailsAndHooks(unittest.TestCase):
@@ -48,6 +54,54 @@ class TestGuardrailsAndHooks(unittest.TestCase):
         finally:
             sys.stdin = old_stdin
             sys.stdout = old_stdout
+
+    def test_pre_invocation_hook_deduplication_by_conversation_id(self):
+        """PreInvocation hook must deduplicate per (conversationId, workspace) across tool steps."""
+        import uuid
+        cid = f"test-conv-{uuid.uuid4()}"
+        payload = {
+            "conversationId": cid,
+            "invocationNum": 1,
+            "workspacePaths": [],
+        }
+        old_stdin = sys.stdin
+        old_stdout = sys.stdout
+        try:
+            # Call 1 (initial model call for conversation): must inject
+            sys.stdin = io.StringIO(json.dumps(payload))
+            out1 = io.StringIO()
+            sys.stdout = out1
+            handle_pre_invocation_hook()
+            res1 = json.loads(out1.getvalue())
+            self.assertEqual(len(res1.get("injectSteps", [])), 1)
+
+            # Call 2 (subsequent tool step in same conversation/workspace): must return empty injectSteps
+            sys.stdin = io.StringIO(json.dumps(payload))
+            out2 = io.StringIO()
+            sys.stdout = out2
+            handle_pre_invocation_hook()
+            res2 = json.loads(out2.getvalue())
+            self.assertEqual(res2.get("injectSteps"), [])
+        finally:
+            sys.stdin = old_stdin
+            sys.stdout = old_stdout
+
+    def test_protected_non_workspace_boundary(self):
+        """System/profile directories (home, ~/.gemini, scratch root, temp root) must never be project workspaces."""
+        self.assertTrue(_is_protected_non_workspace(Path.home()))
+        self.assertTrue(_is_protected_non_workspace(GEMINI_DIR))
+        self.assertTrue(_is_protected_non_workspace(GEMINI_DIR / "antigravity" / "scratch"))
+        self.assertTrue(_is_protected_non_workspace(GEMINI_DIR / "config" / "plugins" / "customizations-db"))
+        self.assertTrue(_is_protected_non_workspace(Path(tempfile.gettempdir())))
+        # Actual repository directory must be allowed as a valid workspace
+        self.assertFalse(_is_protected_non_workspace(REPO_ROOT))
+        self.assertEqual(find_project_root(GEMINI_DIR / "config" / "plugins" / "customizations-db"), (GEMINI_DIR / "config" / "plugins" / "customizations-db").resolve())
+
+    def test_gemini_4_argon_model_detection(self):
+        """Gemini 4 Argon must be recognized as TIER_ULTRA."""
+        tier, desc = detect_model_tier(model_name_hint="Gemini 4 Argon")
+        self.assertEqual(tier, TIER_ULTRA)
+        self.assertIn("ULTRA", desc)
 
     def test_pre_tool_guardrail_hook_allow_clean_code(self):
         """PreToolUse hook must allow clean English code with standard ASCII hyphens."""

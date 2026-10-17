@@ -1,6 +1,6 @@
 ---
 name: install-antigraviton
-description: Automated installer and self-healing onboarding workflow for the AntiGraviton Complete Suite (SkillsDB v3.5.0 + Antigravity Gitea Service v1.1.1). Trigger this skill whenever the user asks to install, set up, configure, repair, or upgrade AntiGraviton, SkillsDB, or the local Gitea service.
+description: Automated installer and self-healing onboarding workflow for the AntiGraviton Complete Suite (SkillsDB v3.5.1 + Antigravity Gitea Service v1.1.1). Trigger this skill whenever the user asks to install, set up, configure, repair, or upgrade AntiGraviton, SkillsDB, or the local Gitea service.
 ---
 
 # AntiGraviton Complete Suite Onboarding Skill
@@ -39,22 +39,22 @@ skillsdb gitea-config
 skillsdb gitea-sync
 ```
 
-## 4. Mandatory Post-Install User Briefing ("Die volle Macht von AntiGraviton")
+## 4. Mandatory Post-Install User Briefing ("The Full Power of AntiGraviton")
 
-Immediately after the installation finishes, you **MUST** present a concise, well-structured overview to the user covering:
+Immediately after the installation finishes, you **MUST** present a concise, well-structured overview to the user (in their conversational language) covering:
 
-1. **Was jetzt aktiv ist (Kernfunktionen)**:
-   - **SkillsDB Context & Memory Engine (`v3.5.0`)**: ~95 % weniger Basis-Tokenverbrauch (~1.500 statt ~35.000 Tokens/Turn) durch On-Demand Micro-Skill-Routing (`--summary`, `--section`), FTS5-Suche mit Synonym-Synapsen und adaptivem Modellprofil (`ultra`, `standard`, `lean`, `local`).
-   - **Episodisches Projektgedächtnis (`.agents/memory.db`)**: Speichert Architekturentscheidungen (`mem-save-decision`), Projektfakten (`mem-save-fact`), Aufgaben (`mem-task-*`) und Meilenstein-Snapshots (`mem-save-snapshot`) dauerhaft über Sitzungen und `/compact` hinweg.
-   - **Lokaler Gitea-Backup-Service (`http://127.0.0.1:3000`)**: Jeder Meilenstein-Snapshot erzeugt automatisch einen Git-Commit und pusht ihn in `< 0.5s` auf den lokalen Gitea-Server - inklusive 3-stufiger Selbstheilung (Windows SCM + Non-Elevated Startrecht + Catch-Up-Sync bei Offline-Phasen).
-   - **Deterministische Guardrails**: Automatischer Schutz vor Secret-Leaks und Formatierungsfehlern (`skillsdb guardrail check --fix`).
+1. **Active Core Capabilities**:
+   - **SkillsDB Context & Memory Engine (`v3.5.1`)**: ~95% lower base token consumption (~1,500 instead of ~35,000 tokens/turn) via on-demand micro-skill routing (`--summary`, `--section`), FTS5 search with synonym expansion, and adaptive model concurrency profiles (`ultra`, `standard`, `lean`, `local`).
+   - **Episodic Project Memory (`.agents/memory.db`)**: Persists architectural decisions (`mem-save-decision`), project facts (`mem-save-fact`), tasks (`mem-task-*`), and milestone snapshots (`mem-save-snapshot`) across sessions and `/compact` boundaries.
+   - **Local Gitea Backup Service (`http://127.0.0.1:3000`)**: Every milestone snapshot automatically creates a Git commit and pushes it in `< 0.5s` to the local Gitea server, including 3-tier self-healing (Windows SCM + non-elevated service start permissions + catch-up sync after offline periods).
+   - **Deterministic Guardrails**: Automated protection against secret leaks and formatting violations (`skillsdb guardrail check --fix`).
 
-2. **Aktiver Benutzer- & Sicherheitsmodus (Standalone-Standard vs. Optionale Erweiterungen)**:
-   - Erkläre dem Benutzer, dass AntiGraviton und Gitea standardmäßig für einen **normalen Entwicklerrechner (Standalone Local User / Admin)** ohne Active Directory konfiguriert wurden (sein lokaler Windows-Benutzer `$env:USERNAME` wurde automatisch als lokaler Gitea-Admin mit eigenem API-Token eingerichtet).
-   - Weise den Benutzer aktiv darauf hin, dass **jederzeit auf Zuruf im Chat** folgende Erweiterungen eingerichtet werden können (dazu muss er nur kurz sagen, wie sein Benutzer agieren soll):
-     - **Optionale Active Directory / LDAP-Anbindung für Gitea**: Inklusive automatischer Synchronisation von AD-Profilbildern (`thumbnailPhoto`) und strikter Rechtetrennung (z. B. normaler Domänen-User arbeitet als Standardbenutzer, während ein separates Admin-Konto wie `User.adm` Gitea-Site-Admin wird).
-     - **Optionale unbeaufsichtigte DPAPI-Elevation**: Falls der Benutzer ein getrenntes Admin-Konto (`User.adm` oder lokaler Admin) besitzt und künftig auch System-/Dienstaufgaben komplett ohne UAC-Abfrage im Hintergrund ausführen lassen möchte.
-     - **Multi-Workspace- & Team-Synchronisation**: Automatische Spiegelung aller Antigravity-Projekte (`skillsdb gitea-sync --all`) oder Teilen gelernter Skills im Team (`skillsdb sync push/pull`).
+2. **Active User & Security Mode (Standalone Default vs. Optional Extensions)**:
+   - Explain that AntiGraviton and Gitea are configured by default for a **standalone developer workstation (Local User / Admin)** without Active Directory (the local Windows user `$env:USERNAME` is automatically provisioned as a local Gitea admin with a scoped API token).
+   - Proactively inform the user that the following extensions can be enabled **on demand via chat** at any time:
+     - **Optional Active Directory / LDAP Integration for Gitea**: Including automatic AD profile picture synchronization (`thumbnailPhoto`) and strict role separation (e.g. standard domain account operates as regular user while a separate admin account such as `User.adm` is granted Gitea site administrator privileges).
+     - **Optional Unattended DPAPI Elevation**: If the user has a separate admin account (`User.adm` or local admin) and wants background system/service tasks executed without interactive UAC prompts.
+     - **Multi-Workspace & Team Synchronization**: Automated mirroring of all Antigravity projects (`skillsdb gitea-sync --all`) or team skill sharing (`skillsdb sync push/pull`).
 
-3. **Angebot zur Vertiefung ("Volles Programm")**:
-   - Frage den Benutzer abschließend, ob er zu einem dieser Themenbereiche (z. B. alle CLI-Power-Kommandos, Umstellung auf Active Directory / `User.adm`-Rechtehandling, Memory- & Taskboard-Workflow oder Guardrails) das **"volle Programm"** mit allen Details wünscht.
+3. **Deep-Dive Offer ("Full Briefing")**:
+   - Ask the user whether they would like the complete in-depth guide on any of these areas (CLI power commands, Active Directory / `User.adm` role separation, episodic memory & taskboard workflow, or guardrails).
