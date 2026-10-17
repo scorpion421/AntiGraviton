@@ -810,7 +810,15 @@ def save_code_commit(
     # Build commit command with optional episodic trailers
     clean_msg = message.replace('"', '\\"').strip()
     commit_title = f"[SkillsDB] {clean_msg}" if not clean_msg.startswith("[SkillsDB]") else clean_msg
-    commit_cmd = ["git", "commit", "-m", commit_title]
+    commit_cmd = [
+        "git",
+        "-c", "user.name=Antigravity",
+        "-c", "user.email=antigravity@local.dev",
+        "commit",
+        "--author=Antigravity <antigravity@local.dev>",
+        "-m",
+        commit_title,
+    ]
 
     if trailers:
         trailer_lines = [f"{k}: {v}" for k, v in trailers.items() if v]
