@@ -13,7 +13,7 @@ from pathlib import Path
 from ..config import TIER_ULTRA, DB_PATH, GEMINI_DIR, __version__
 from ..core.detector import detect_model_tier
 from .writer_queue import get_writer_queue, flush_journals
-from .gitea_sync import _is_temp_workspace, save_code_commit, get_workspace_git_telemetry, learn_workspace, flush_all_pending_pushes
+from .gitea_sync import _is_temp_workspace, save_code_commit, get_workspace_git_telemetry, learn_workspace, flush_all_pending_pushes, setup_workspace_git
 from ..search.fts import detect_cwd_hints
 
 _HOOK_STATE_FILE = Path(tempfile.gettempdir()) / "skillsdb_hook_state.json"
@@ -201,6 +201,8 @@ def mem_init(project_root: Path = None):
     conn = get_project_connection(root)
     init_project_db(conn)
     conn.close()
+    if not _is_temp_workspace(root) and not (root / ".git" / "HEAD").exists():
+        setup_workspace_git(root, configure_remote=False)
     learn_workspace(root)
     print(f"Project memory database initialized at: {db_path}")
 
@@ -261,7 +263,7 @@ def mem_save_snapshot(conn: sqlite3.Connection, summary: str, conversation_id: s
             root = find_project_root()
 
         # Skip auto-commit in temporary unittest directories unless git was explicitly initialized there
-        should_commit = bool(root) and (not _is_temp_workspace(root) or (root / ".git").exists())
+        should_commit = bool(root) and (not _is_temp_workspace(root) or (root / ".git" / "HEAD").exists())
         if should_commit:
             learn_workspace(root)
             try:
@@ -883,14 +885,17 @@ def handle_pre_invocation_hook():
         lines.append("[SKILLSDB RUNTIME PROFILE: GEMINI ULTRA (16-thread high-concurrency mode)]")
         lines.append("Parallel batch fetching active: 'skillsdb get-skills <s1> <s2>' | Clusters: 'skillsdb get-cluster <domain>' | Parallel search: 'skillsdb search-multi <q1> <q2>' | Concurrent subagents: 8-16 parallel workers supported.\n")
 
-    # Auto-initialize project memory if a valid project workspace is open and has files
+    # Auto-initialize project memory and local Git repository if a valid project workspace is open and has files
     if has_valid_workspace and root_path and db_path:
-        if not db_path.exists() and root_path.exists():
+        if root_path.exists():
             try:
-                has_files = any(f for f in root_path.iterdir() if f.name != ".agents")
+                has_files = any(f for f in root_path.iterdir() if f.name not in (".agents", ".git"))
                 if has_files:
-                    conn = get_project_connection(root_path)
-                    conn.close()
+                    if not db_path.exists():
+                        conn = get_project_connection(root_path)
+                        conn.close()
+                    if not _is_temp_workspace(root_path) and not (root_path / ".git" / "HEAD").exists():
+                        setup_workspace_git(root_path, configure_remote=False)
             except Exception:
                 pass
 

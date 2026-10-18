@@ -61,7 +61,7 @@ def learn_workspace(project_root: Path, db_path: Path = DB_PATH) -> Optional[str
                 return None
             except ValueError:
                 pass
-        if not ((abs_root / ".agents").exists() or (abs_root / ".git").exists()):
+        if not ((abs_root / ".agents").exists() or (abs_root / ".git" / "HEAD").exists()):
             return None
         ws_key = f"workspace:{abs_root.name}"
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -312,7 +312,7 @@ def flush_all_pending_pushes(db_path: Path = DB_PATH) -> List[str]:
     for name, path_str in sorted(learned.items(), key=lambda x: x[0].lower()):
         try:
             ws_path = Path(path_str)
-            if ws_path.exists() and (ws_path / ".git").exists() and not _is_temp_workspace(ws_path):
+            if ws_path.exists() and (ws_path / ".git" / "HEAD").exists() and not _is_temp_workspace(ws_path):
                 if _has_unpushed_commits(ws_path):
                     if _push_to_origin(ws_path, async_push=False, _allow_retry=False):
                         flushed.append(name)
@@ -479,7 +479,7 @@ def get_workspace_git_telemetry(project_root: Path, flush_pending: bool = False)
     service if STOPPED, flushes any pending unpushed commits upon recovery or when
     flush_pending=True, and emits an unmissable alert if Gitea is offline.
     """
-    if not project_root or not (project_root / ".git").exists():
+    if not project_root or not (project_root / ".git" / "HEAD").exists():
         return None
     if not shutil.which("git"):
         return None
@@ -583,20 +583,54 @@ def _ensure_git_safe_directory(project_root: Path):
         )
 
 
+def _clear_readonly_in_git(dot_git: Path):
+    """Clears Windows ReadOnly file attributes inside a partial or corrupted .git directory so git init can heal it."""
+    import stat
+    if not dot_git.exists():
+        return
+    try:
+        for root_dir, dirs, files in os.walk(str(dot_git)):
+            for fname in files:
+                fpath = os.path.join(root_dir, fname)
+                try:
+                    os.chmod(fpath, stat.S_IWRITE | stat.S_IREAD)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
 def setup_workspace_git(
     project_root: Path,
     repo_name: Optional[str] = None,
     configure_remote: bool = True,
 ) -> bool:
-    """Initializes Git in the workspace, sets default gitignore, user info, and optional Gitea remote."""
+    """Initializes Git in the workspace, heals partial/corrupt .git directories, sets default gitignore, user info, and optional Gitea remote."""
     if not shutil.which("git"):
         return False
 
     name = repo_name or project_root.name
     dot_git = project_root / ".git"
 
-    # 1. Git init if necessary
-    if not dot_git.exists():
+    # 1. Check safe.directory first if .git exists
+    if dot_git.exists():
+        _ensure_git_safe_directory(project_root)
+
+    # 2. Verify whether Git recognizes project_root as a valid repository
+    needs_init = not (dot_git / "HEAD").exists()
+    if not needs_init:
+        chk = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+        )
+        if chk.returncode != 0:
+            needs_init = True
+
+    if needs_init:
+        if dot_git.exists():
+            _clear_readonly_in_git(dot_git)
         res = subprocess.run(
             ["git", "init", "-b", "main"],
             cwd=str(project_root),
@@ -604,10 +638,20 @@ def setup_workspace_git(
             text=True,
         )
         if res.returncode != 0:
-            return False
-
-    # 1.5 Auto-heal Git dubious ownership on secondary/exFAT drives
-    _ensure_git_safe_directory(project_root)
+            res = subprocess.run(
+                ["git", "init"],
+                cwd=str(project_root),
+                capture_output=True,
+                text=True,
+            )
+            if res.returncode != 0:
+                return False
+            subprocess.run(
+                ["git", "symbolic-ref", "HEAD", "refs/heads/main"],
+                cwd=str(project_root),
+                capture_output=True,
+            )
+        _ensure_git_safe_directory(project_root)
 
     # 2. Local config for commit author
     subprocess.run(
@@ -776,17 +820,20 @@ def save_code_commit(
 
     is_temp = _is_temp_workspace(project_root)
     dot_git = project_root / ".git"
-    if not dot_git.exists():
+    if not (dot_git / "HEAD").exists():
         setup_workspace_git(project_root, configure_remote=not is_temp)
 
-    # Check status (auto-healing dubious ownership if needed)
+    # Check status (auto-healing dubious ownership or uninitialized/corrupt .git if needed)
     st_res = subprocess.run(
         ["git", "status", "--porcelain"],
         cwd=str(project_root),
         capture_output=True,
         text=True,
     )
-    if st_res.returncode != 0 and "dubious ownership" in (st_res.stderr or ""):
+    err_lower = (st_res.stderr or "").lower()
+    if st_res.returncode != 0 and ("dubious ownership" in err_lower or "not a git repository" in err_lower):
+        if "not a git repository" in err_lower:
+            subprocess.run(["git", "init", "-b", "main"], cwd=str(project_root), capture_output=True)
         _ensure_git_safe_directory(project_root)
         setup_workspace_git(project_root, configure_remote=not is_temp)
         st_res = subprocess.run(
@@ -1003,7 +1050,7 @@ def discover_all_workspaces(base_dir: Optional[Path] = None, db_path: Path = DB_
             if norm_key in seen_resolved:
                 return
             has_agents = (abs_p / ".agents").exists()
-            has_git = (abs_p / ".git").exists()
+            has_git = (abs_p / ".git" / "HEAD").exists()
             has_files = any(f.is_file() for f in abs_p.iterdir())
             if has_agents or has_git or has_files:
                 seen_resolved.add(norm_key)

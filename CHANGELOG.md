@@ -5,6 +5,15 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.5] - 2026-10-18
+
+### Fixed
+- **Partial and uninitialized `.git` directory self-healing across all workspaces (`skillsdb/memory/gitea_sync.py`, `skillsdb/memory/project_memory.py`, `v3.5.3`)**:
+  - Fixed a bug where partial `.git` directory remnants on Windows (caused when read-only `.git/objects/pack/*.pack` files survive directory deletion while `.git/HEAD` is removed) caused `setup_workspace_git()` to skip `git init -b main` because `(project_root / ".git").exists()` evaluated to `True`, resulting in `fatal: not a git repository (or any of the parent directories): .git`.
+  - Updated `setup_workspace_git()`, `save_code_commit()`, `get_workspace_git_telemetry()`, `flush_all_pending_pushes()`, `learn_workspace()`, and `discover_all_workspaces()` to validate `(project_root / ".git" / "HEAD").exists()` and `git rev-parse --is-inside-work-tree`, automatically clearing Windows `ReadOnly` attributes (`_clear_readonly_in_git()`) and re-running `git init -b main` whenever a repository is missing or corrupted.
+  - Updated `handle_pre_invocation_hook()` and `mem_init()` to automatically initialize a local Git repository (`setup_workspace_git(root_path, configure_remote=False)`) whenever an uninitialized project workspace is opened in Antigravity IDE, preventing `fatal: not a git repository` errors when agents or IDE tools run `git status` before the first milestone commit.
+  - Added regression test `test_partial_or_broken_dot_git_auto_healing` in `tests/test_gitea_sync.py`.
+
 ## [1.0.4] - 2026-10-17
 
 ### Added

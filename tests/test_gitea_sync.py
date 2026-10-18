@@ -162,6 +162,25 @@ class TestGiteaSync(unittest.TestCase):
         self.assertTrue(health.get("online"))
         self.assertIn(health.get("service_status"), ["RUNNING", "START_PENDING"])
 
+    def test_partial_or_broken_dot_git_auto_healing(self):
+        """Verifies that a partial .git directory (e.g. read-only packfile remnant without HEAD) is automatically healed."""
+        import stat
+        pack_dir = self.test_dir / ".git" / "objects" / "pack"
+        pack_dir.mkdir(parents=True, exist_ok=True)
+        dummy_pack = pack_dir / "pack-readonly.pack"
+        dummy_pack.write_bytes(b"PACK")
+        os.chmod(str(dummy_pack), stat.S_IREAD)
+
+        # Telemetry should gracefully return None when .git/HEAD is missing
+        self.assertIsNone(get_workspace_git_telemetry(self.test_dir))
+
+        # Creating a file and calling save_code_commit should heal .git and commit cleanly
+        (self.test_dir / "shader.hlsl").write_text("float4 main() : SV_Target { return 0; }\n", encoding="utf-8")
+        res = save_code_commit(self.test_dir, message="Heal partial .git", push=False)
+        self.assertTrue(res.get("success"), f"Expected auto-healed commit to succeed, got: {res}")
+        self.assertTrue((self.test_dir / ".git" / "HEAD").exists())
+        self.assertTrue(res.get("committed"))
+
 
 if __name__ == "__main__":
     unittest.main()
