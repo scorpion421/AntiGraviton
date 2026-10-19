@@ -1,7 +1,7 @@
-# AntiGraviton complete suite (`v1.0.5`)
+# AntiGraviton complete suite (`v1.0.6`)
 
 **Turnkey agentic development environment for Google Antigravity IDE**  
-*Combining **SkillsDB (`v3.5.3`)** + **Antigravity Gitea Windows service (`v1.1.1`)** in a single one-command distribution.*
+*Combining **SkillsDB (`v3.5.4`)** + **Antigravity Gitea Windows service (`v1.1.1`)** in a single one-command distribution.*
 
 ---
 
@@ -11,7 +11,7 @@
 
 It bundles two tightly integrated systems into a single repository and installer:
 
-1. **SkillsDB context and memory engine (`v3.5.3`)**:
+1. **SkillsDB context and memory engine (`v3.5.4`)**:
    - **On-demand micro-skill routing**: Replaces static plugin prompt bloat (~35,000 tokens/turn) with a compact (~450 token) routing directive and surgical SQLite FTS5 micro-skill retrieval (`--summary`, `--section`).
    - **Persistent episodic project memory (`.agents/memory.db`)**: Automatically records architectural decisions, milestone snapshots, and workspace telemetry across sessions so every new conversation starts with full project context.
    - **Organic on-demand workspace learning**: Ships with zero hardcoded paths or credentials. Automatically learns project paths as you work (`mem-init`, `mem-save-snapshot`, `gitea-init`) and discovers Antigravity IDE workspaces from `~/.gemini/config/projects/*.json` and `~/.gemini/antigravity/scratch`.
@@ -24,7 +24,7 @@ It bundles two tightly integrated systems into a single repository and installer
 
 ## 2. Measured impact in daily development
 
-| Metric | Standard Antigravity setup | AntiGraviton suite (`v1.0.5`) | Real-world improvement |
+| Metric | Standard Antigravity setup | AntiGraviton suite (`v1.0.6`) | Real-world improvement |
 | :--- | :--- | :--- | :--- |
 | **System and plugin context load** | ~35,000 tokens / turn | **~1,500 tokens / turn** | **~95% lower base overhead** |
 | **Token consumption (60-turn session, benchmarked on Gemini 4 Argon High)** | ~3.39M input tokens | **~0.83M input tokens** | **~75.5% total token savings (4x session capacity)** |
@@ -103,7 +103,7 @@ powershell -ExecutionPolicy Bypass -File .\install-antigraviton.ps1
 
 ```text
 AntiGraviton/
-|-- VERSION                        # SemVer 2.0.0 suite release version (1.0.4)
+|-- VERSION                        # SemVer 2.0.0 suite release version (1.0.6)
 |-- CHANGELOG.md                   # SemVer release history
 |-- README.md                      # Suite documentation
 |-- install-antigraviton.ps1       # Unified 1-command installer (SkillsDB + Gitea + Auto-Token)
@@ -114,7 +114,7 @@ AntiGraviton/
 |   `-- skills/
 |       `-- install-antigraviton/
 |           `-- SKILL.md           # Antigravity IDE 1-prompt onboarding skill
-|-- skillsdb/                      # Modular Python package source (v3.5.2)
+|-- skillsdb/                      # Modular Python package source (v3.5.4)
 |   |-- config.py
 |   |-- schema.py
 |   |-- guardrails.py

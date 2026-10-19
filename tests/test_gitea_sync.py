@@ -181,6 +181,32 @@ class TestGiteaSync(unittest.TestCase):
         self.assertTrue((self.test_dir / ".git" / "HEAD").exists())
         self.assertTrue(res.get("committed"))
 
+    def test_prune_excluded_and_duplicate_workspaces_from_runtime_config(self):
+        """Verifies get_learned_workspaces automatically prunes legacy protected non-workspaces and case duplicates."""
+        import sqlite3
+        from skillsdb.memory.gitea_sync import get_learned_workspaces
+
+        temp_db = self.test_dir / "test_runtime.db"
+        conn = sqlite3.connect(temp_db)
+        conn.execute("CREATE TABLE runtime_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT);")
+        plugin_path = str(cfg.GEMINI_DIR / "config" / "plugins" / "customizations-db")
+        repo_root = str(Path(__file__).resolve().parent.parent)
+        conn.executemany(
+            "INSERT INTO runtime_config (key, value, updated_at) VALUES (?, ?, ?);",
+            [
+                ("workspace:customizations-db", plugin_path, "2026-10-15T10:00:00Z"),
+                ("workspace:antigraviton", repo_root, "2026-10-15T09:00:00Z"),
+                ("workspace:AntiGraviton", repo_root, "2026-10-16T10:00:00Z"),
+            ],
+        )
+        conn.commit()
+        conn.close()
+
+        learned = get_learned_workspaces(db_path=temp_db, prune_missing=True)
+        self.assertNotIn("customizations-db", learned)
+        self.assertIn("AntiGraviton", learned)
+        self.assertNotIn("antigraviton", learned)
+
 
 if __name__ == "__main__":
     unittest.main()

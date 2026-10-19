@@ -63,8 +63,12 @@ def deploy(source_dir: Path = None, target_dir: Path = None):
         pass
     print(f"      Global CLI wrapper deployed to: {cmd_path}")
 
-    # 3. Copy Plugin
+    # 3. Copy Plugin (and clean up any stray .agents/.git folders inside target_plugin)
     print("[3/5] Deploying plugin files...")
+    for stray in (".agents", ".git"):
+        stray_dir = target_plugin / stray
+        if stray_dir.exists():
+            shutil.rmtree(stray_dir, ignore_errors=True)
     shutil.copytree(source_dir / "plugin", target_plugin, dirs_exist_ok=True)
     print(f"      Plugin deployed to: {target_plugin}")
 

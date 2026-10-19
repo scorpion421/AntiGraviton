@@ -5,6 +5,15 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.6] - 2026-10-19
+
+### Fixed
+- **Automatic cleanup of legacy excluded non-workspaces and case duplicates during updates (`skillsdb/memory/gitea_sync.py`, `skillsdb/updater/merger.py`, `deploy.py`, `v3.5.4`)**:
+  - Added `_is_excluded_workspace_path()` to `get_learned_workspaces()` so legacy protected paths stored in `runtime_config` prior to `v1.0.3` (such as `~/.gemini/config/plugins/customizations-db`, `~`, `~/.gemini`, or temp folders) are automatically pruned from `runtime_config` and any stray `.agents` or `.git` folders inside `~/.gemini/config/plugins/*` are automatically removed during deployment and updates.
+  - Added case-insensitive workspace key deduplication (`workspace:<name>`) in `learn_workspace()` and `get_learned_workspaces()` on Windows so duplicate entries differing only in casing (e.g. `skillsdb` in `scratch` vs. `SkillsDB` in primary workspace) are automatically consolidated in favor of the primary project workspace.
+  - Updated `get_latest_release_info()` and `update_plugin()` in `skillsdb/updater/merger.py` to query `scorpion421/AntiGraviton` releases directly and run automatic workspace pruning during `skillsdb update`.
+  - Added regression test `test_prune_excluded_and_duplicate_workspaces_from_runtime_config` in `tests/test_gitea_sync.py`.
+
 ## [1.0.5] - 2026-10-18
 
 ### Fixed

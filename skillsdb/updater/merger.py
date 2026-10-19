@@ -25,7 +25,7 @@ from ..core.db import get_connection, init_db
 from ..core.detector import detect_model_tier
 from ..core.concurrency import fetch_single_skill
 from ..memory.project_memory import find_project_root
-from ..memory.gitea_sync import get_gitea_config, get_gitea_service_status, check_gitea_health
+from ..memory.gitea_sync import get_gitea_config, get_gitea_service_status, check_gitea_health, get_learned_workspaces
 from ..platform.windows_utf8 import check_windows_utf8
 
 
@@ -39,24 +39,28 @@ def find_repo_root() -> Path:
 
 
 def get_latest_release_info() -> dict:
-    """Queries GitHub API for the latest release of SkillsDB."""
-    url = "https://api.github.com/repos/scorpion421/skillsdb/releases/latest"
-    req = urllib.request.Request(
-        url,
-        headers={"User-Agent": f"SkillsDB-Updater/{__version__}", "Accept": "application/vnd.github.v3+json"}
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=5) as response:
-            if response.status == 200:
-                data = json.loads(response.read().decode("utf-8"))
-                return {
-                    "tag": data.get("tag_name", "").lstrip("v"),
-                    "name": data.get("name", ""),
-                    "published_at": data.get("published_at", "")[:10],
-                    "body": data.get("body", "")
-                }
-    except Exception:
-        pass
+    """Queries GitHub API for the latest release of AntiGraviton / SkillsDB."""
+    urls = [
+        "https://api.github.com/repos/scorpion421/AntiGraviton/releases/latest",
+        "https://api.github.com/repos/scorpion421/skillsdb/releases/latest",
+    ]
+    for url in urls:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": f"SkillsDB-Updater/{__version__}", "Accept": "application/vnd.github.v3+json"}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as response:
+                if response.status == 200:
+                    data = json.loads(response.read().decode("utf-8"))
+                    return {
+                        "tag": data.get("tag_name", "").lstrip("v"),
+                        "name": data.get("name", ""),
+                        "published_at": data.get("published_at", "")[:10],
+                        "body": data.get("body", "")
+                    }
+        except Exception:
+            continue
     return None
 
 
@@ -193,7 +197,7 @@ def update_plugin(force: bool = False):
             source_mgr = temp_dir / "db_manager.py"
             source_plugin = temp_dir / "plugin"
 
-            base_raw = "https://raw.githubusercontent.com/scorpion421/skillsdb/main"
+            base_raw = "https://raw.githubusercontent.com/scorpion421/AntiGraviton/main"
             download_file(f"{base_raw}/database/customizations.db", source_db, is_binary=True)
             download_file(f"{base_raw}/database/db_manager.py", source_mgr)
             download_file(f"{base_raw}/plugin/plugin.json", source_plugin / "plugin.json")
@@ -214,10 +218,17 @@ def update_plugin(force: bool = False):
         print("[4/4] Updating engine, hooks, and plugin files...")
         target_plugin = GLOBAL_PLUGINS_PATH / "customizations-db"
         target_plugin.mkdir(parents=True, exist_ok=True)
+        for stray in (".agents", ".git"):
+            stray_dir = target_plugin / stray
+            if stray_dir.exists():
+                shutil.rmtree(stray_dir, ignore_errors=True)
         shutil.copytree(source_plugin, target_plugin, dirs_exist_ok=True)
 
         if source_mgr.exists():
             shutil.copy2(source_mgr, DB_DIR / "db_manager.py")
+
+        # Automatically prune any legacy excluded non-workspace paths or case duplicates from runtime_config
+        get_learned_workspaces(db_path=DB_PATH, prune_missing=True)
 
         print("\n[OK] Safe update completed successfully! Project memory & learned rules remain intact.")
         print("Running system diagnostics:")

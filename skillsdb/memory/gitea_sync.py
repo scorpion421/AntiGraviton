@@ -36,6 +36,35 @@ def _is_temp_workspace(project_root: Path) -> bool:
         return False
 
 
+def _is_excluded_workspace_path(project_root: Path) -> bool:
+    """
+    Returns True if project_root is inside OS temp, user home root, or protected
+    ~/.gemini subdirectories (config, database, plugins_archive, or scratch root).
+    """
+    if not project_root or _is_temp_workspace(project_root):
+        return True
+    try:
+        abs_root = Path(os.path.abspath(str(project_root)))
+        home_abs = Path(os.path.abspath(str(Path.home())))
+        gemini_abs = Path(os.path.abspath(str(GEMINI_DIR)))
+        scratch_abs = gemini_abs / "antigravity" / "scratch"
+        if abs_root in (home_abs, gemini_abs, scratch_abs):
+            return True
+        for excluded_sub in (
+            gemini_abs / "config",
+            gemini_abs / "database",
+            gemini_abs / "plugins_archive",
+        ):
+            try:
+                abs_root.relative_to(excluded_sub)
+                return True
+            except ValueError:
+                pass
+        return False
+    except Exception:
+        return True
+
+
 def learn_workspace(project_root: Path, db_path: Path = DB_PATH) -> Optional[str]:
     """
     Organically learns and persists a project workspace path on demand into runtime_config.
@@ -43,24 +72,12 @@ def learn_workspace(project_root: Path, db_path: Path = DB_PATH) -> Optional[str
     updates 'workspace:<name>' to the new location. Also auto-learns Gitea credentials
     from .git/config if runtime_config is empty on a fresh machine.
     """
-    if not project_root or _is_temp_workspace(project_root):
+    if not project_root or _is_excluded_workspace_path(project_root):
         return None
     try:
         abs_root = Path(os.path.abspath(str(project_root)))
         if not abs_root.exists() or not abs_root.is_dir():
             return None
-        # Only learn valid project roots (containing .agents or .git) and never home/.gemini/scratch root
-        home_abs = Path(os.path.abspath(str(Path.home())))
-        gemini_abs = Path(os.path.abspath(str(GEMINI_DIR)))
-        scratch_abs = gemini_abs / "antigravity" / "scratch"
-        if abs_root in (home_abs, gemini_abs, scratch_abs):
-            return None
-        for excluded_sub in (gemini_abs / "config", gemini_abs / "database"):
-            try:
-                abs_root.relative_to(excluded_sub)
-                return None
-            except ValueError:
-                pass
         if not ((abs_root / ".agents").exists() or (abs_root / ".git" / "HEAD").exists()):
             return None
         ws_key = f"workspace:{abs_root.name}"
@@ -73,10 +90,34 @@ def learn_workspace(project_root: Path, db_path: Path = DB_PATH) -> Optional[str
             cur.execute(
                 "CREATE TABLE IF NOT EXISTS runtime_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT);"
             )
+            scratch_abs = Path(os.path.abspath(str(GEMINI_DIR / "antigravity" / "scratch")))
+            try:
+                abs_root.relative_to(scratch_abs)
+                new_is_scratch = True
+            except ValueError:
+                new_is_scratch = False
+
             cur.execute(
-                "INSERT OR REPLACE INTO runtime_config (key, value, updated_at) VALUES (?, ?, ?);",
-                (ws_key, str(abs_root), now_iso),
+                "SELECT key, value FROM runtime_config WHERE LOWER(key) = LOWER(?);",
+                (ws_key,),
             )
+            existing_rows = cur.fetchall()
+            skip_insert = False
+            for ex_key, ex_val in existing_rows:
+                if new_is_scratch and ex_val and Path(ex_val).exists():
+                    try:
+                        Path(os.path.abspath(str(ex_val))).relative_to(scratch_abs)
+                    except ValueError:
+                        skip_insert = True
+                        break
+                if ex_key != ws_key:
+                    cur.execute("DELETE FROM runtime_config WHERE key = ?;", (ex_key,))
+
+            if not skip_insert:
+                cur.execute(
+                    "INSERT OR REPLACE INTO runtime_config (key, value, updated_at) VALUES (?, ?, ?);",
+                    (ws_key, str(abs_root), now_iso),
+                )
 
             # If Gitea credentials are not yet learned on this machine, inspect .git/config
             cur.execute("SELECT COUNT(*) FROM runtime_config WHERE key = 'gitea_token';")
@@ -109,8 +150,10 @@ def learn_workspace(project_root: Path, db_path: Path = DB_PATH) -> Optional[str
 def get_learned_workspaces(db_path: Path = DB_PATH, prune_missing: bool = True) -> Dict[str, str]:
     """
     Returns all organically learned project workspaces (name -> path) from runtime_config.
-    Automatically prunes stale paths only if the parent drive/directory is reachable
-    and the specific project subfolder was deleted, protecting network shares during brief disconnects.
+    Automatically prunes:
+    1. Protected non-workspace paths (e.g. ~/.gemini/config/plugins/*, ~, temp dirs) left over from older versions
+    2. Case-insensitive duplicate workspace keys (keeping the most recently updated or primary workspace path)
+    3. Deleted project folders when the parent drive/directory is reachable
     """
     learned: Dict[str, str] = {}
     stale_keys: List[str] = []
@@ -120,17 +163,65 @@ def get_learned_workspaces(db_path: Path = DB_PATH, prune_missing: bool = True) 
     try:
         conn = sqlite3.connect(db_path, timeout=3.0)
         cur = conn.cursor()
-        cur.execute("SELECT key, value FROM runtime_config WHERE key LIKE 'workspace:%';")
-        for k, v in cur.fetchall():
+        cur.execute("SELECT key, value, updated_at FROM runtime_config WHERE key LIKE 'workspace:%' ORDER BY updated_at DESC;")
+        rows = cur.fetchall()
+        seen_lower: Dict[str, str] = {}
+        scratch_abs = Path(os.path.abspath(str(GEMINI_DIR / "antigravity" / "scratch")))
+
+        for k, v, _ in rows:
             name = k.split("workspace:", 1)[1]
             if not v:
+                stale_keys.append(k)
                 continue
             p = Path(v)
+            if _is_excluded_workspace_path(p):
+                stale_keys.append(k)
+                # Clean up any stray .agents folder created inside ~/.gemini/config/plugins/* by pre-v1.0.3 hooks
+                try:
+                    gemini_cfg = Path(os.path.abspath(str(GEMINI_DIR / "config")))
+                    Path(os.path.abspath(str(p))).relative_to(gemini_cfg)
+                    for stray_sub in (".agents", ".git"):
+                        stray_path = p / stray_sub
+                        if stray_path.exists():
+                            _clear_readonly_in_git(p)
+                            shutil.rmtree(stray_path, ignore_errors=True)
+                except Exception:
+                    pass
+                continue
+
             if p.exists():
+                lower_name = name.lower()
+                if lower_name in seen_lower:
+                    # If one entry is in scratch and the other is a full workspace, keep the non-scratch workspace
+                    existing_key = seen_lower[lower_name]
+                    existing_name = existing_key.split("workspace:", 1)[1]
+                    existing_path = Path(learned[existing_name])
+                    try:
+                        Path(os.path.abspath(str(existing_path))).relative_to(scratch_abs)
+                        existing_in_scratch = True
+                    except ValueError:
+                        existing_in_scratch = False
+                    try:
+                        Path(os.path.abspath(str(p))).relative_to(scratch_abs)
+                        current_in_scratch = True
+                    except ValueError:
+                        current_in_scratch = False
+
+                    if existing_in_scratch and not current_in_scratch:
+                        stale_keys.append(existing_key)
+                        del learned[existing_name]
+                        seen_lower[lower_name] = k
+                        learned[name] = v
+                    else:
+                        stale_keys.append(k)
+                    continue
+
+                seen_lower[lower_name] = k
                 learned[name] = v
             elif prune_missing and p.parent.exists():
                 # Parent directory is reachable, so the project folder itself was genuinely removed
                 stale_keys.append(k)
+
         if stale_keys:
             cur.executemany("DELETE FROM runtime_config WHERE key = ?;", [(sk,) for sk in stale_keys])
             conn.commit()

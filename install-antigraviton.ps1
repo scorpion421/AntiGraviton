@@ -1,10 +1,10 @@
 <#
 .SYNOPSIS
-    Unified One-Command Installer for the AntiGraviton Complete Suite (v1.0.3).
+    Unified One-Command Installer for the AntiGraviton Complete Suite (v1.0.6).
 
 .DESCRIPTION
     Deploys the complete AntiGraviton environment for Google Antigravity IDE:
-    1. SkillsDB Context & Memory Engine (v3.5.1) + customizations-db Plugin
+    1. SkillsDB Context & Memory Engine (v3.5.4) + customizations-db Plugin
     2. Non-destructive upgrade preservation of existing runtime_config, Gitea tokens, learned workspaces, and user-learned rules
     3. Antigravity Gitea Local Windows Service (v1.1.1) with 3-tier elevation handling (direct admin, optional DPAPI, or UAC), SCM auto-recovery, and non-elevated start/stop permissions
     4. Zero-touch local Gitea Admin user & API Token provisioning into SkillsDB (no Active Directory required by default)
@@ -54,7 +54,7 @@ $ErrorActionPreference = "Stop"
 
 $suiteRoot = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
 $versionFile = Join-Path $suiteRoot "VERSION"
-$suiteVersion = if (Test-Path $versionFile) { (Get-Content $versionFile -Raw).Trim() } else { "1.0.3" }
+$suiteVersion = if (Test-Path $versionFile) { (Get-Content $versionFile -Raw).Trim() } else { "1.0.6" }
 $userHome = if ($env:USERPROFILE) { $env:USERPROFILE } else { [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile) }
 $geminiDir = Join-Path $userHome ".gemini"
 $targetDbPath = Join-Path $geminiDir "database\customizations.db"
@@ -105,7 +105,7 @@ except Exception as e:
 # ---------------------------------------------------------------------------
 # STEP 2: Deploy SkillsDB Core & Antigravity Plugin
 # ---------------------------------------------------------------------------
-Write-Host "[2/5] Deploying SkillsDB Engine (v3.5.0) and customizations-db Plugin..."
+Write-Host "[2/5] Deploying SkillsDB Engine (v3.5.4) and customizations-db Plugin..."
 $deployPy = Join-Path $suiteRoot "deploy.py"
 $deployPs1 = Join-Path $suiteRoot "deploy.ps1"
 
@@ -330,7 +330,7 @@ Write-Host "============================================================" -Foreg
 Write-Host "AntiGraviton Complete Suite v$suiteVersion is active!" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host "1. Active Core Capabilities:" -ForegroundColor Green
-Write-Host "   - SkillsDB Engine (v3.5.0): ~95% token reduction via on-demand FTS5 micro-skills"
+Write-Host "   - SkillsDB Engine (v3.5.4): ~95% token reduction via on-demand FTS5 micro-skills"
 Write-Host "   - Episodic Project Memory : .agents/memory.db (decisions, facts, tasks, snapshots)"
 Write-Host "   - Local Gitea Service     : http://127.0.0.1:$GiteaPort (Owner: $GiteaAdminUser, auto-recovery active)"
 Write-Host "   - Deterministic Guardrails: Secret-leak prevention & formatting invariants"
