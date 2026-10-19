@@ -120,6 +120,36 @@ def check_text(text: str, filename: str = "<memory>") -> List[Dict[str, Any]]:
                     "snippet": pat.sub("[REDACTED]", line[:100]).strip(),
                 })
 
+        # 5. Keep a Changelog 1.1.0 invariant for CHANGELOG.md
+        if Path(filename).name.lower() == "changelog.md":
+            stripped = line.strip()
+            if stripped.startswith("### "):
+                if not re.match(r"^### (Added|Changed|Deprecated|Removed|Fixed|Security)$", stripped):
+                    violations.append({
+                        "file": filename,
+                        "line": idx,
+                        "rule": "keep-a-changelog",
+                        "severity": "CRITICAL",
+                        "message": (
+                            f"Invalid Keep a Changelog section '{stripped}'. "
+                            "Only '### Added', '### Changed', '### Deprecated', '### Removed', '### Fixed', or '### Security' are allowed (https://keepachangelog.com/en/1.1.0/)."
+                        ),
+                        "snippet": stripped[:100],
+                    })
+            elif stripped.startswith("## "):
+                if not re.match(r"^## \[(Unreleased|\d+\.\d+\.\d+(?:-[0-9A-Za-z.\-]+)?)\](?: - \d{4}-\d{2}-\d{2})?$", stripped):
+                    violations.append({
+                        "file": filename,
+                        "line": idx,
+                        "rule": "keep-a-changelog",
+                        "severity": "CRITICAL",
+                        "message": (
+                            f"Invalid Keep a Changelog version header '{stripped}'. "
+                            "Use '## [X.Y.Z] - YYYY-MM-DD' or '## [Unreleased]' (https://keepachangelog.com/en/1.1.0/)."
+                        ),
+                        "snippet": stripped[:100],
+                    })
+
     return violations
 
 
@@ -181,7 +211,17 @@ def check_file(file_path: Path) -> List[Dict[str, Any]]:
         return []
     try:
         content = file_path.read_text(encoding="utf-8", errors="replace")
-        return check_text(content, filename=file_path.name)
+        violations = check_text(content, filename=file_path.name)
+        if file_path.name.lower() == "changelog.md" and "keepachangelog.com" not in content.lower():
+            violations.append({
+                "file": file_path.name,
+                "line": 1,
+                "rule": "keep-a-changelog",
+                "severity": "CRITICAL",
+                "message": "CHANGELOG.md must reference https://keepachangelog.com/en/1.1.0/ and https://semver.org/ in its header.",
+                "snippet": content.splitlines()[0][:100] if content.splitlines() else "",
+            })
+        return violations
     except Exception as e:
         return [{
             "file": file_path.name,

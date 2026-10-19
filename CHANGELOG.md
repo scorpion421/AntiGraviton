@@ -5,6 +5,15 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.7] - 2026-10-19
+
+### Added
+- **Mandatory Keep a Changelog 1.1.0 enforcement and automated Gitea/GitHub release synchronization (`skillsdb/core/guardrails.py`, `skillsdb/memory/gitea_sync.py`, `skillsdb/memory/project_memory.py`, `plugin/rules/AGENTS.md`, `v3.5.5`)**:
+  - Anchored [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) alongside [Semantic Versioning 2.0.0](https://semver.org/) as a mandatory global rule across `customizations.db` (`semver-versioning`), `plugin/rules/AGENTS.md`, `plugin/skills/customizations-db/SKILL.md`, and the Turn-1 `PreInvocation` hook guardrail.
+  - Added deterministic `keep-a-changelog` guardrail validation in `skillsdb/core/guardrails.py` (`check_text()` and `check_file()`) enforcing `## [X.Y.Z] - YYYY-MM-DD` version headers and strictly official `### Added`, `### Changed`, `### Deprecated`, `### Removed`, `### Fixed`, and `### Security` category headings in `CHANGELOG.md`.
+  - Added `parse_keep_a_changelog()` and `sync_changelog_releases()` in `skillsdb/memory/gitea_sync.py` (integrated into `skillsdb gitea-sync [--releases] [--github]`) to automatically synchronize `CHANGELOG.md` entries as formal Releases on both Gitea and GitHub.
+  - Added regression test `test_keep_a_changelog_guardrail_and_parser` in `tests/test_gitea_sync.py`.
+
 ## [1.0.6] - 2026-10-19
 
 ### Fixed

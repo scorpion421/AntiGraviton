@@ -47,6 +47,7 @@ from .memory.gitea_sync import (
     gitea_config_summary,
     sync_workspace,
     sync_all_workspaces,
+    sync_changelog_releases,
     setup_workspace_git,
     set_gitea_config,
 )
@@ -353,10 +354,12 @@ def build_parser() -> argparse.ArgumentParser:
     # Gitea Service and Automated Commit Sync Commands
     subparsers.add_parser("gitea-status", help="Show status of Gitea service, API health, and repositories")
 
-    p_gitea_sync = subparsers.add_parser("gitea-sync", help="Synchronize workspace code history to Gitea")
+    p_gitea_sync = subparsers.add_parser("gitea-sync", help="Synchronize workspace code history and Keep a Changelog releases to Gitea")
     p_gitea_sync.add_argument("--message", "-m", default=None, help="Custom commit message")
     p_gitea_sync.add_argument("--no-push", action="store_true", help="Commit only, do not push to Gitea")
     p_gitea_sync.add_argument("--all", action="store_true", help="Synchronize all discovered Antigravity workspaces to Gitea")
+    p_gitea_sync.add_argument("--releases", action="store_true", help="Force sync all Keep a Changelog releases from CHANGELOG.md to Gitea (and GitHub if --github is set)")
+    p_gitea_sync.add_argument("--github", action="store_true", help="Also synchronize Keep a Changelog releases to GitHub via gh CLI")
     p_gitea_sync.add_argument("--project", default=None, help="Project root directory (optional)")
 
     p_gitea_init = subparsers.add_parser("gitea-init", help="Initialize Gitea repository and tracking for workspace")
@@ -562,7 +565,12 @@ def main(argv: list[str] = None):
             sync_all_workspaces()
         else:
             proj_root = Path(args.project) if getattr(args, "project", None) else find_project_root()
-            sync_workspace(proj_root, message=args.message, push=not getattr(args, "no_push", False))
+            sync_gh = getattr(args, "github", False)
+            sync_workspace(proj_root, message=args.message, push=not getattr(args, "no_push", False), sync_github=sync_gh)
+            if getattr(args, "releases", False):
+                tags = sync_changelog_releases(proj_root, sync_github=sync_gh, overwrite_existing=True)
+                if tags:
+                    print(f"  [OK] Force-synced Keep a Changelog releases: {', '.join(tags)}")
         return
     elif args.command == "gitea-init":
         if any(getattr(args, k, None) is not None for k in ("url", "user", "token", "workspaces_root")):

@@ -207,6 +207,39 @@ class TestGiteaSync(unittest.TestCase):
         self.assertIn("AntiGraviton", learned)
         self.assertNotIn("antigraviton", learned)
 
+    def test_keep_a_changelog_guardrail_and_parser(self):
+        """Verifies Keep a Changelog 1.1.0 guardrail validation and release section parsing."""
+        from skillsdb.core.guardrails import check_text
+        from skillsdb.memory.gitea_sync import parse_keep_a_changelog
+
+        bad_changelog = (
+            "# Changelog\n\n"
+            "## [1.0.6] - 2026-10-19\n"
+            "### Fixed & Improved\n"
+            "- Something custom\n"
+        )
+        violations = check_text(bad_changelog, filename="CHANGELOG.md")
+        self.assertTrue(any(v["rule"] == "keep-a-changelog" for v in violations))
+
+        good_changelog = (
+            "# Changelog\n\n"
+            "The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).\n\n"
+            "## [1.0.7] - 2026-10-19\n\n"
+            "### Added\n"
+            "- Enforced Keep a Changelog 1.1.0 across Gitea and GitHub.\n"
+        )
+        self.assertEqual(check_text(good_changelog, filename="CHANGELOG.md"), [])
+
+        cl_file = self.test_dir / "CHANGELOG.md"
+        cl_file.write_text(good_changelog, encoding="utf-8")
+        entries = parse_keep_a_changelog(cl_file)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["version"], "1.0.7")
+        self.assertEqual(entries[0]["tag"], "v1.0.7")
+        self.assertIn("## [1.0.7] - 2026-10-19", entries[0]["body"])
+        self.assertIn("### Added", entries[0]["body"])
+        self.assertIn("keepachangelog.com", entries[0]["body"])
+
 
 if __name__ == "__main__":
     unittest.main()

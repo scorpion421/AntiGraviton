@@ -141,9 +141,9 @@ SkillsDB includes built-in, zero-prompt integration with the local Gitea server 
   ```powershell
   skillsdb gitea-init "<target_directory>"
   ```
-* **Commit and push changes in an existing workspace to Gitea**:
+* **Commit, push changes, and auto-sync Keep a Changelog releases to Gitea (and GitHub)**:
   ```powershell
-  skillsdb gitea-sync -m "<commit message>" --project "<target_directory>"
+  skillsdb gitea-sync -m "<commit message>" --project "<target_directory>" [--releases] [--github]
   ```
 * **Synchronize all discovered workspaces to Gitea at once**:
   ```powershell
@@ -157,5 +157,6 @@ SkillsDB includes built-in, zero-prompt integration with the local Gitea server 
   ```powershell
   skillsdb gitea-config --auto-detect
   ```
+* **Mandatory Keep a Changelog 1.1.0 & SemVer 2.0.0 standard**: Every versioned project MUST maintain a `CHANGELOG.md` strictly formatted according to `https://keepachangelog.com/en/1.1.0/` (`## [X.Y.Z] - YYYY-MM-DD` with only `### Added`, `### Changed`, `### Deprecated`, `### Removed`, `### Fixed`, `### Security`) and `https://semver.org/`, and publish matching Releases on both Gitea and GitHub (`skillsdb gitea-sync --releases --github`).
 * **Formatting rule**: Always present Gitea (`http://localhost:3000/...`) and GitHub URLs as clickable Markdown links `[Label](url)`, never as inline code.
 
