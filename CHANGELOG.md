@@ -5,6 +5,24 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.8] - 2026-10-19
+
+### Added
+- **Gitea repository collision guard and telemetry (`skillsdb/memory/gitea_sync.py`, `skillsdb/cli.py`, `plugin/rules/AGENTS.md`, `v3.5.6`)**:
+  - Added `inspect_remote_repository()` and `init_workspace_gitea()` so `skillsdb gitea-init` and `skillsdb gitea-sync` automatically check whether a non-empty repository with the same name already exists on Gitea before linking or pushing an unlinked local folder.
+  - When a name collision is detected, SkillsDB halts with `[GITEA REPOSITORY COLLISION]` (and exit code `2`) and instructs the agent to ask the user whether to reuse the existing repository (`--use-existing`), create a repository under a new name (`--name <NewRepoName>`), or recreate it cleanly (`--overwrite`).
+  - Enhanced `get_workspace_git_telemetry()` (`skillsdb mem-get-context` and Turn-1 `PreInvocation` hook) to display the exact configured Gitea remote URL (`synced with Gitea: http://127.0.0.1:3000/<user>/<repo>`) or emit `[GITEA COLLISION ALERT]` if an unlinked local workspace shares its name with an existing Gitea repository.
+- **Dedicated release publishing command and ahead-of-tag reminder (`skillsdb/memory/gitea_sync.py`, `skillsdb/cli.py`)**:
+  - Added `publish_gitea_release()` and the `skillsdb gitea-release [vX.Y.Z] [--title] [--notes] [--github]` CLI subcommand to create or update annotated Git tags and Keep a Changelog releases on Gitea (and optionally GitHub).
+  - Updated `sync_workspace()` to emit a `[RELEASE REMINDER]` whenever `HEAD` has commits ahead of the latest release tag defined in `VERSION` / `CHANGELOG.md`.
+
+### Fixed
+- **Explicit commit message preservation after milestone snapshots (`skillsdb/memory/gitea_sync.py`)**:
+  - Fixed a race where running `skillsdb mem-save-snapshot "<summary>"` (which auto-commits with `[SkillsDB] <summary>`) immediately followed by `skillsdb gitea-sync -m "<explicit message>"` saw a clean working tree and ignored the explicit `-m` commit message. When `save_code_commit(..., explicit_message=True)` is called on a clean tree within 120 seconds of a snapshot commit, it now amends `HEAD` with the explicit commit message while preserving episodic trailers.
+- **Windows SCM auto-recovery on pre-existing `gitea` services and bot avatar email linking (`install-antigraviton.ps1`)**:
+  - Updated `install-antigraviton.ps1` to enforce `sc.exe failure gitea reset= 86400 actions= restart/5000/restart/10000/restart/30000` and `sc.exe failureflag gitea 1` even when an existing `gitea` Windows service is already registered on the machine, ensuring automatic service restart after unexpected process terminations (Event ID `7034`).
+  - Added automatic `email_address` linking for `antigravity@local.dev` on the `Antigravity` account in `gitea.db` so commits authored by `Antigravity <antigravity@local.dev>` always render the custom `Antigravity` profile avatar in Gitea.
+
 ## [1.0.7] - 2026-10-19
 
 ### Added

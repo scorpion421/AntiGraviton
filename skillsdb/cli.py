@@ -48,6 +48,8 @@ from .memory.gitea_sync import (
     sync_workspace,
     sync_all_workspaces,
     sync_changelog_releases,
+    init_workspace_gitea,
+    publish_gitea_release,
     setup_workspace_git,
     set_gitea_config,
 )
@@ -361,9 +363,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_gitea_sync.add_argument("--releases", action="store_true", help="Force sync all Keep a Changelog releases from CHANGELOG.md to Gitea (and GitHub if --github is set)")
     p_gitea_sync.add_argument("--github", action="store_true", help="Also synchronize Keep a Changelog releases to GitHub via gh CLI")
     p_gitea_sync.add_argument("--project", default=None, help="Project root directory (optional)")
+    p_gitea_sync.add_argument("--name", default=None, help="Target Gitea repository name (optional)")
+    p_gitea_sync.add_argument("--use-existing", action="store_true", help="Proceed if a repository with this name already exists on Gitea")
 
     p_gitea_init = subparsers.add_parser("gitea-init", help="Initialize Gitea repository and tracking for workspace")
     p_gitea_init.add_argument("path", nargs="?", default=".", help="Workspace path to initialize")
+    p_gitea_init.add_argument("--name", default=None, help="Custom Gitea repository name (default: folder name)")
+    p_gitea_init.add_argument("--use-existing", action="store_true", help="Use and update an existing Gitea repository with the same name")
+    p_gitea_init.add_argument("--overwrite", action="store_true", help="Delete and recreate an existing Gitea repository with the same name")
     p_gitea_init.add_argument("--url", default=None, help="Configure Gitea server URL in runtime_config")
     p_gitea_init.add_argument("--user", default=None, help="Configure Gitea repository owner in runtime_config")
     p_gitea_init.add_argument("--token", default=None, help="Configure Gitea API token in runtime_config")
@@ -376,6 +383,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_gitea_cfg.add_argument("--workspaces-root", default=None, help="Update primary workspaces root directory (auto-aligns remote_share_path)")
     p_gitea_cfg.add_argument("--remote-share", default=None, help="Update remote customizations.db share path")
     p_gitea_cfg.add_argument("--auto-detect", action="store_true", help="Automatically scan drives and registered projects to heal paths")
+
+    p_gitea_rel = subparsers.add_parser("gitea-release", help="Publish or update a Gitea release with Git tag and CHANGELOG.md notes")
+    p_gitea_rel.add_argument("tag", nargs="?", default=None, help="Version tag (e.g. v1.0.8; defaults to VERSION / CHANGELOG.md)")
+    p_gitea_rel.add_argument("--title", "-t", default=None, help="Release title (default: '<RepoName> <Tag>')")
+    p_gitea_rel.add_argument("--notes", "-n", default=None, help="Release notes body (default: auto-extracted from CHANGELOG.md)")
+    p_gitea_rel.add_argument("--project", default=None, help="Project root directory (optional)")
+    p_gitea_rel.add_argument("--name", default=None, help="Target Gitea repository name (optional)")
+    p_gitea_rel.add_argument("--prerelease", action="store_true", help="Mark release as pre-release")
+    p_gitea_rel.add_argument("--github", action="store_true", help="Also publish or update the release on GitHub via gh CLI")
 
     return parser
 
@@ -566,7 +582,16 @@ def main(argv: list[str] = None):
         else:
             proj_root = Path(args.project) if getattr(args, "project", None) else find_project_root()
             sync_gh = getattr(args, "github", False)
-            sync_workspace(proj_root, message=args.message, push=not getattr(args, "no_push", False), sync_github=sync_gh)
+            ok = sync_workspace(
+                proj_root,
+                message=args.message,
+                push=not getattr(args, "no_push", False),
+                sync_github=sync_gh,
+                repo_name=getattr(args, "name", None),
+                allow_existing=getattr(args, "use_existing", False),
+            )
+            if not ok:
+                sys.exit(2)
             if getattr(args, "releases", False):
                 tags = sync_changelog_releases(proj_root, sync_github=sync_gh, overwrite_existing=True)
                 if tags:
@@ -581,8 +606,14 @@ def main(argv: list[str] = None):
                 workspaces_root=getattr(args, "workspaces_root", None),
             )
         target_path = Path(os.path.abspath(str(args.path)))
-        setup_workspace_git(target_path)
-        sync_workspace(target_path, message="Initialize workspace on Gitea", push=True)
+        ok = init_workspace_gitea(
+            target_path,
+            repo_name=getattr(args, "name", None),
+            use_existing=getattr(args, "use_existing", False),
+            overwrite=getattr(args, "overwrite", False),
+        )
+        if not ok:
+            sys.exit(2)
         return
     elif args.command == "gitea-config":
         if any(getattr(args, k, None) is not None for k in ("url", "user", "token", "workspaces_root", "remote_share")):
@@ -594,6 +625,20 @@ def main(argv: list[str] = None):
                 remote_share=getattr(args, "remote_share", None),
             )
         gitea_config_summary(auto_detect=getattr(args, "auto_detect", False))
+        return
+    elif args.command == "gitea-release":
+        proj_root = Path(args.project) if getattr(args, "project", None) else find_project_root()
+        url = publish_gitea_release(
+            proj_root,
+            tag_name=getattr(args, "tag", None),
+            title=getattr(args, "title", None),
+            notes=getattr(args, "notes", None),
+            repo_name=getattr(args, "name", None),
+            prerelease=getattr(args, "prerelease", False),
+            sync_github=getattr(args, "github", False),
+        )
+        if not url:
+            sys.exit(2)
         return
 
     # Route project memory commands directly to project database

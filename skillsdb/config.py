@@ -14,7 +14,7 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-__version__ = "3.5.5"
+__version__ = "3.5.6"
 
 # Model capability tiers
 TIER_LEAN = "lean"          # Gemini Flash, Flash-Lite, micro-skills, minimal token footprint

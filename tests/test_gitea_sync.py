@@ -240,6 +240,41 @@ class TestGiteaSync(unittest.TestCase):
         self.assertIn("### Added", entries[0]["body"])
         self.assertIn("keepachangelog.com", entries[0]["body"])
 
+    def test_explicit_message_amends_snapshot_commit(self):
+        """Verifies that an explicit commit message right after a snapshot auto-commit amends HEAD instead of being dropped."""
+        import subprocess
+        setup_workspace_git(self.test_dir, configure_remote=False)
+        (self.test_dir / "scroll.cpp").write_text("int scroll = 1;\n", encoding="utf-8")
+
+        # Simulate mem_save_snapshot auto-commit
+        res1 = save_code_commit(self.test_dir, message="Milestone: Smooth scroll v1.0.0", push=False, explicit_message=False)
+        self.assertTrue(res1.get("committed"))
+
+        # Immediately call save_code_commit with explicit_message=True on clean tree
+        res2 = save_code_commit(self.test_dir, message="feat(smooth-scroll): add v1.0.0 implementation", push=False, explicit_message=True)
+        self.assertTrue(res2.get("committed"))
+        self.assertTrue(res2.get("amended"))
+
+        # Check git log -1 subject
+        subj = subprocess.run(
+            ["git", "log", "-1", "--format=%s"],
+            cwd=str(self.test_dir),
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        self.assertEqual(subj, "feat(smooth-scroll): add v1.0.0 implementation")
+
+    def test_gitea_collision_detection_and_telemetry(self):
+        """Verifies inspect_remote_repository and init_workspace_gitea halt when a non-empty repo already exists on Gitea."""
+        from skillsdb.memory.gitea_sync import inspect_remote_repository, init_workspace_gitea
+        info = inspect_remote_repository("AntiGraviton")
+        if info.get("exists") and not info.get("empty"):
+            setup_workspace_git(self.test_dir, configure_remote=False)
+            (self.test_dir / "main.py").write_text("print(1)\n", encoding="utf-8")
+            # Calling init_workspace_gitea with an existing non-empty repo name and without --use-existing/--overwrite must halt
+            ok = init_workspace_gitea(self.test_dir, repo_name="AntiGraviton", use_existing=False, overwrite=False)
+            self.assertFalse(ok, "init_workspace_gitea must return False and halt on repository name collision")
+
 
 if __name__ == "__main__":
     unittest.main()

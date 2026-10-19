@@ -1,10 +1,10 @@
 <#
 .SYNOPSIS
-    Unified One-Command Installer for the AntiGraviton Complete Suite (v1.0.7).
+    Unified One-Command Installer for the AntiGraviton Complete Suite (v1.0.8).
 
 .DESCRIPTION
     Deploys the complete AntiGraviton environment for Google Antigravity IDE:
-    1. SkillsDB Context & Memory Engine (v3.5.5) + customizations-db Plugin
+    1. SkillsDB Context & Memory Engine (v3.5.6) + customizations-db Plugin
     2. Non-destructive upgrade preservation of existing runtime_config, Gitea tokens, learned workspaces, and user-learned rules
     3. Antigravity Gitea Local Windows Service (v1.1.1) with 3-tier elevation handling (direct admin, optional DPAPI, or UAC), SCM auto-recovery, and non-elevated start/stop permissions
     4. Zero-touch local Gitea Admin user & API Token provisioning into SkillsDB (no Active Directory required by default)
@@ -54,7 +54,7 @@ $ErrorActionPreference = "Stop"
 
 $suiteRoot = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
 $versionFile = Join-Path $suiteRoot "VERSION"
-$suiteVersion = if (Test-Path $versionFile) { (Get-Content $versionFile -Raw).Trim() } else { "1.0.7" }
+$suiteVersion = if (Test-Path $versionFile) { (Get-Content $versionFile -Raw).Trim() } else { "1.0.8" }
 $userHome = if ($env:USERPROFILE) { $env:USERPROFILE } else { [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile) }
 $geminiDir = Join-Path $userHome ".gemini"
 $targetDbPath = Join-Path $geminiDir "database\customizations.db"
@@ -105,7 +105,7 @@ except Exception as e:
 # ---------------------------------------------------------------------------
 # STEP 2: Deploy SkillsDB Core & Antigravity Plugin
 # ---------------------------------------------------------------------------
-Write-Host "[2/5] Deploying SkillsDB Engine (v3.5.5) and customizations-db Plugin..."
+Write-Host "[2/5] Deploying SkillsDB Engine (v3.5.6) and customizations-db Plugin..."
 $deployPy = Join-Path $suiteRoot "deploy.py"
 $deployPs1 = Join-Path $suiteRoot "deploy.ps1"
 
@@ -205,6 +205,8 @@ if (-not $SkipGiteaService) {
     }
 
     if ($existingSvc) {
+        & sc.exe failure gitea reset= 86400 actions= restart/5000/restart/10000/restart/30000 2>$null | Out-Null
+        & sc.exe failureflag gitea 1 2>$null | Out-Null
         if ($existingSvc.Status -ne "Running") {
             Write-Host "      Starting existing 'gitea' Windows service..."
             try {
@@ -278,12 +280,12 @@ print("True" if row and row[0] else "False")
 $hasTokenOut = ($checkTokenPy | & python - $targetDbPath | Out-String)
 $hasToken = if ($hasTokenOut) { $hasTokenOut.Trim() } else { "False" }
 
-if ($hasToken -ne "True" -and -not $SkipGiteaService) {
+if (-not $SkipGiteaService) {
     $giteaExe = Join-Path $GiteaInstallPath "gitea.exe"
     $giteaIni = Join-Path $GiteaInstallPath "custom\conf\app.ini"
     $giteaDb  = Join-Path $GiteaInstallPath "data\gitea.db"
 
-    if ((Test-Path $giteaExe) -and (Test-Path $giteaIni)) {
+    if ($hasToken -ne "True" -and (Test-Path $giteaExe) -and (Test-Path $giteaIni)) {
         Write-Host "      Provisioning local Gitea admin user '$GiteaAdminUser' and scoped API token..."
         try {
             # Ensure SQLite schema is initialized on brand-new installations
@@ -308,6 +310,34 @@ if ($hasToken -ne "True" -and -not $SkipGiteaService) {
         } catch {
             Write-Host "      Notice: Automatic token generation skipped (configure manually via 'skillsdb gitea-config')."
         }
+    } else {
+        & python $targetMgrPath gitea-config
+    }
+
+    # Ensure Antigravity bot user (if present in gitea.db) has antigravity@local.dev linked for commit avatar resolution
+    if (Test-Path $giteaDb) {
+        $linkBotEmailPy = @"
+import sqlite3, sys
+db_path = sys.argv[1]
+try:
+    conn = sqlite3.connect(db_path, timeout=5.0)
+    cur = conn.cursor()
+    row = cur.execute("SELECT id FROM user WHERE lower_name='antigravity'").fetchone()
+    if row:
+        uid = row[0]
+        cur.execute("UPDATE user SET email='antigravity@local.dev', keep_email_private=0 WHERE id=?", (uid,))
+        cur.execute("UPDATE email_address SET is_primary=0 WHERE uid=?", (uid,))
+        cur.execute(
+            "INSERT INTO email_address (uid, email, lower_email, is_activated, is_primary) VALUES (?, 'antigravity@local.dev', 'antigravity@local.dev', 1, 1) "
+            "ON CONFLICT(lower_email) DO UPDATE SET uid=excluded.uid, is_activated=1, is_primary=1",
+            (uid,)
+        )
+        conn.commit()
+    conn.close()
+except Exception:
+    pass
+"@
+        $linkBotEmailPy | & python - $giteaDb 2>$null | Out-Null
     }
 } else {
     & python $targetMgrPath gitea-config
@@ -330,7 +360,7 @@ Write-Host "============================================================" -Foreg
 Write-Host "AntiGraviton Complete Suite v$suiteVersion is active!" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host "1. Active Core Capabilities:" -ForegroundColor Green
-Write-Host "   - SkillsDB Engine (v3.5.5): ~95% token reduction via on-demand FTS5 micro-skills"
+Write-Host "   - SkillsDB Engine (v3.5.6): ~95% token reduction via on-demand FTS5 micro-skills"
 Write-Host "   - Episodic Project Memory : .agents/memory.db (decisions, facts, tasks, snapshots)"
 Write-Host "   - Local Gitea Service     : http://127.0.0.1:$GiteaPort (Owner: $GiteaAdminUser, auto-recovery active)"
 Write-Host "   - Deterministic Guardrails: Secret-leak prevention & formatting invariants"

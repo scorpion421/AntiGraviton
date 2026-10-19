@@ -4,6 +4,7 @@ Seamlessly integrates Antigravity workspaces with local Gitea service.
 """
 
 import os
+import re
 import time
 import json
 import shutil
@@ -465,6 +466,47 @@ def ensure_gitea_online(
     }
 
 
+def inspect_remote_repository(repo_name: str) -> Dict[str, Any]:
+    """Checks whether a repository with repo_name already exists on Gitea and returns its metadata."""
+    config = get_gitea_config()
+    token = config["token"]
+    user = config["user"]
+    base_url = config["url"]
+    default_html = f"{base_url}/{user}/{repo_name}" if user else base_url
+    result = {
+        "exists": False,
+        "empty": True,
+        "name": repo_name,
+        "full_name": f"{user}/{repo_name}" if user else repo_name,
+        "html_url": default_html,
+        "clone_url": None,
+    }
+    if not token or not user:
+        return result
+
+    check_url = f"{base_url}/api/v1/repos/{user}/{repo_name}"
+    req = urllib.request.Request(
+        check_url,
+        headers={
+            "Authorization": f"token {token}",
+            "User-Agent": "SkillsDB-GiteaSync/1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
+            if resp.status == 200:
+                data = json.loads(resp.read().decode("utf-8"))
+                result["exists"] = True
+                result["empty"] = bool(data.get("empty", False))
+                result["name"] = data.get("name") or repo_name
+                result["full_name"] = data.get("full_name") or result["full_name"]
+                result["html_url"] = data.get("html_url") or default_html
+                result["clone_url"] = _build_auth_clone_url(data.get("clone_url"), user, token)
+    except Exception:
+        pass
+    return result
+
+
 def ensure_remote_repository(repo_name: str, description: Optional[str] = None) -> Optional[str]:
     """Ensures repository exists in Gitea; creates it if missing and returns authenticated clone URL."""
     config = get_gitea_config()
@@ -476,24 +518,9 @@ def ensure_remote_repository(repo_name: str, description: Optional[str] = None) 
         return None
 
     # 1. Check if repository already exists
-    check_url = f"{base_url}/api/v1/repos/{user}/{repo_name}"
-    req = urllib.request.Request(
-        check_url,
-        headers={
-            "Authorization": f"token {token}",
-            "User-Agent": "SkillsDB-GiteaSync/1.0",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=5.0) as resp:
-            if resp.status == 200:
-                data = json.loads(resp.read().decode("utf-8"))
-                return _build_auth_clone_url(data.get("clone_url"), user, token)
-    except urllib.error.HTTPError as e:
-        if e.code != 404:
-            return None
-    except Exception:
-        return None
+    info = inspect_remote_repository(repo_name)
+    if info.get("exists") and info.get("clone_url"):
+        return info["clone_url"]
 
     # 2. Create repository if not found
     create_urls = []
@@ -564,11 +591,30 @@ def _build_auth_clone_url(clone_url: Optional[str], user: str, token: str) -> Op
     return clone_url
 
 
+def _get_configured_gitea_repo_url(project_root: Path) -> Optional[str]:
+    """Inspects .git/config to see if origin or gitea remote points to the local Gitea server and returns its clean browser URL."""
+    git_cfg = project_root / ".git" / "config"
+    if not git_cfg.exists():
+        return None
+    try:
+        raw = git_cfg.read_text(encoding="utf-8", errors="ignore")
+        cfg = get_gitea_config()
+        base_url = cfg.get("url", "http://localhost:3000").rstrip("/")
+        for m in re.finditer(r"url\s*=\s*(https?://(?:[^@/\s]+@)?([^/\s]+)/([^/\s]+)/([^\s/]+?)(?:\.git)?)\s*$", raw, re.MULTILINE):
+            _, host_port, owner, rname = m.groups()
+            if "localhost:3000" in host_port or "127.0.0.1:3000" in host_port or host_port in base_url:
+                return f"{base_url}/{owner}/{rname}"
+    except Exception:
+        pass
+    return None
+
+
 def get_workspace_git_telemetry(project_root: Path, flush_pending: bool = False) -> Optional[str]:
     """
     Returns a compact Git & Gitea status string (~20 tokens), auto-recovers the Gitea
     service if STOPPED, flushes any pending unpushed commits upon recovery or when
-    flush_pending=True, and emits an unmissable alert if Gitea is offline.
+    flush_pending=True, and emits an unmissable alert if Gitea is offline or if a repository
+    name collision exists on Gitea.
     """
     if not project_root or not (project_root / ".git" / "HEAD").exists():
         return None
@@ -576,10 +622,12 @@ def get_workspace_git_telemetry(project_root: Path, flush_pending: bool = False)
         return None
 
     extra_notices: List[str] = []
+    gitea_online = False
     if not _is_temp_workspace(project_root):
         try:
             health = ensure_gitea_online(auto_recover=True, flush_pending=flush_pending)
-            if not health.get("online"):
+            gitea_online = bool(health.get("online"))
+            if not gitea_online:
                 svc_st = health.get("service_status", "STOPPED")
                 extra_notices.append(
                     f"[CRITICAL GITEA ALERT]: Local Gitea server (http://127.0.0.1:3000) is OFFLINE (Service: {svc_st}) and could not be auto-started (fileserver or service unreachable). Commits are saved locally only. YOU MUST IMMEDIATELY WARN THE USER IN YOUR RESPONSE THAT GITEA IS CURRENTLY OFFLINE!"
@@ -612,6 +660,8 @@ def get_workspace_git_telemetry(project_root: Path, flush_pending: bool = False)
         sync_state = "synced"
         dirty_files = []
 
+        configured_gitea_url = _get_configured_gitea_repo_url(project_root)
+
         for line in lines:
             if line.startswith("## "):
                 header = line[3:].strip()
@@ -620,18 +670,25 @@ def get_workspace_git_telemetry(project_root: Path, flush_pending: bool = False)
                     branch_info = branch_part.strip()
                     if "[" in rest and "]" in rest:
                         bracket = rest[rest.find("[") + 1 : rest.find("]")]
-                        sync_state = bracket
+                        sync_state = f"{bracket} | {configured_gitea_url}" if configured_gitea_url else bracket
                     else:
-                        sync_state = "synced with Gitea"
+                        sync_state = f"synced with Gitea: {configured_gitea_url}" if configured_gitea_url else "synced with Gitea"
                 else:
                     branch_info = header.split()[0] if header else "main"
-                    sync_state = "local only"
+                    sync_state = f"Gitea remote: {configured_gitea_url}" if configured_gitea_url else "local only"
             else:
                 if len(line) > 3:
                     fpath = line[3:].strip().strip('"')
                     if " -> " in fpath:
                         fpath = fpath.split(" -> ")[-1]
                     dirty_files.append(Path(fpath).name)
+
+        if not _is_temp_workspace(project_root) and gitea_online and not configured_gitea_url:
+            rem_info = inspect_remote_repository(project_root.name)
+            if rem_info.get("exists"):
+                extra_notices.append(
+                    f"[GITEA COLLISION ALERT]: Local workspace is not yet linked to Gitea, but a repository named '{rem_info['full_name']}' ALREADY EXISTS on Gitea ({rem_info['html_url']}). Ask the user how to proceed before linking or pushing!"
+                )
 
         rev_res = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
@@ -898,6 +955,7 @@ def save_code_commit(
     async_push: bool = False,
     files: Optional[List[str]] = None,
     trailers: Optional[Dict[str, str]] = None,
+    explicit_message: bool = False,
 ) -> Dict[str, Any]:
     """
     Stages changes, creates a Git commit with optional episodic trailers, and pushes to Gitea.
@@ -949,7 +1007,14 @@ def save_code_commit(
                 raw_path = raw_path.split(" -> ")[-1]
             changed_files.append(raw_path)
 
-    # If working tree is clean, check if any prior local commits still need to be pushed
+    clean_msg = message.replace('"', '\\"').strip()
+    if explicit_message or clean_msg.startswith("[SkillsDB]"):
+        commit_title = clean_msg
+    else:
+        commit_title = f"[SkillsDB] {clean_msg}"
+
+    # If working tree is clean, check if an explicit -m message should amend a just-created snapshot commit,
+    # or if any prior local commits still need to be pushed
     if not status_lines:
         head_res = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -958,6 +1023,53 @@ def save_code_commit(
             text=True,
         )
         current_hash = head_res.stdout.strip() if head_res.returncode == 0 else ""
+
+        if explicit_message and current_hash:
+            log_res = subprocess.run(
+                ["git", "log", "-1", "--format=%ct%n%s%n%b"],
+                cwd=str(project_root),
+                capture_output=True,
+                text=True,
+            )
+            if log_res.returncode == 0:
+                log_lines = log_res.stdout.splitlines()
+                if len(log_lines) >= 2:
+                    try:
+                        commit_ts = int(log_lines[0].strip())
+                    except ValueError:
+                        commit_ts = 0
+                    prev_subject = log_lines[1].strip()
+                    prev_body = "\n".join(log_lines[2:]).strip()
+                    if (time.time() - commit_ts) <= 120 and prev_subject != commit_title:
+                        amend_cmd = [
+                            "git",
+                            "-c", "user.name=Antigravity",
+                            "-c", "user.email=antigravity@local.dev",
+                            "commit", "--amend",
+                            "--author=Antigravity <antigravity@local.dev>",
+                            "-m", commit_title,
+                        ]
+                        if prev_body:
+                            amend_cmd.extend(["-m", prev_body])
+                        am_res = subprocess.run(amend_cmd, cwd=str(project_root), capture_output=True, text=True)
+                        if am_res.returncode == 0:
+                            rev2 = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(project_root), capture_output=True, text=True)
+                            new_h = rev2.stdout.strip() if rev2.returncode == 0 else current_hash
+                            pushed_am = False
+                            if push:
+                                p_res = subprocess.run(["git", "push", "--force-with-lease", "origin", "main"], cwd=str(project_root), capture_output=True, text=True, timeout=60)
+                                pushed_am = (p_res.returncode == 0)
+                            return {
+                                "success": True,
+                                "committed": True,
+                                "amended": True,
+                                "commit_hash": new_h,
+                                "files_changed": 0,
+                                "changed_files": [],
+                                "pushed": pushed_am,
+                                "message": commit_title,
+                            }
+
         pushed_pending = False
         if push and current_hash and _has_unpushed_commits(project_root):
             pushed_pending = _push_to_origin(project_root, async_push=async_push)
@@ -979,8 +1091,6 @@ def save_code_commit(
         subprocess.run(["git", "add", "-A"], cwd=str(project_root), capture_output=True)
 
     # Build commit command with optional episodic trailers
-    clean_msg = message.replace('"', '\\"').strip()
-    commit_title = f"[SkillsDB] {clean_msg}" if not clean_msg.startswith("[SkillsDB]") else clean_msg
     commit_cmd = [
         "git",
         "-c", "user.name=Antigravity",
@@ -1094,6 +1204,50 @@ def gitea_status_summary():
     print("=" * 60)
 
 
+def _print_collision_prompt(project_root: Path, rem_info: Dict[str, Any]):
+    """Prints an unmissable repository collision warning instructing the agent to ask the user how to proceed."""
+    print(f"  [GITEA REPOSITORY COLLISION] Hold on! A repository named '{rem_info['full_name']}' already exists on Gitea ({rem_info['html_url']}).")
+    print("  STOP and ask the user how to proceed before pushing:")
+    print(f"    1. Use and update the existing repository:  skillsdb gitea-init \"{project_root}\" --use-existing")
+    print(f"    2. Create a repository under a new name:    skillsdb gitea-init \"{project_root}\" --name \"<new_repo_name>\"")
+    print(f"    3. Recreate/overwrite from scratch:         skillsdb gitea-init \"{project_root}\" --overwrite")
+
+
+def init_workspace_gitea(
+    project_root: Path,
+    repo_name: Optional[str] = None,
+    use_existing: bool = False,
+    overwrite: bool = False,
+) -> bool:
+    """
+    Initializes a workspace for Gitea with explicit repository collision detection.
+    If a non-empty repository with the target name already exists on Gitea and neither
+    use_existing nor overwrite was specified, halts and prompts the agent/user for a decision.
+    """
+    target_name = repo_name or project_root.name
+    print(f"Initializing Gitea repository '{target_name}' for workspace: {project_root}")
+
+    rem_info = inspect_remote_repository(target_name)
+    if rem_info.get("exists") and not rem_info.get("empty"):
+        if overwrite:
+            delete_remote_repository(target_name)
+            print(f"  [OK] Deleted existing repository '{rem_info['full_name']}' for clean re-initialization.")
+        elif not use_existing:
+            _print_collision_prompt(project_root, rem_info)
+            return False
+
+    setup_workspace_git(project_root, repo_name=target_name, configure_remote=True)
+    learn_workspace(project_root)
+    sync_workspace(
+        project_root,
+        message=f"Initialize {target_name} on Gitea",
+        push=True,
+        repo_name=target_name,
+        allow_existing=True,
+    )
+    return True
+
+
 def parse_keep_a_changelog(changelog_path: Path) -> List[Dict[str, str]]:
     """
     Parses a CHANGELOG.md formatted according to Keep a Changelog 1.1.0 (https://keepachangelog.com/en/1.1.0/).
@@ -1146,6 +1300,206 @@ def parse_keep_a_changelog(changelog_path: Path) -> List[Dict[str, str]]:
 
     _flush()
     return entries
+
+
+def _extract_changelog_section(
+    project_root: Path,
+    target_version: Optional[str] = None,
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    Reads VERSION and CHANGELOG.md in project_root and extracts:
+    (normalized_tag, release_title, markdown_body).
+    """
+    raw_ver = target_version.strip() if target_version else None
+    if not raw_ver:
+        ver_file = project_root / "VERSION"
+        if ver_file.exists():
+            try:
+                v_txt = ver_file.read_text(encoding="utf-8", errors="ignore").strip()
+                if v_txt and len(v_txt) <= 32:
+                    raw_ver = v_txt
+            except Exception:
+                pass
+
+    changelog_file = project_root / "CHANGELOG.md"
+    entries = parse_keep_a_changelog(changelog_file) if changelog_file.exists() else []
+    clean_target = raw_ver.lstrip("vV") if raw_ver else None
+
+    for entry in entries:
+        if clean_target is None or entry["version"] == clean_target:
+            tag_name = entry["tag"]
+            title = f"{project_root.name} {tag_name}"
+            return tag_name, title, entry["body"]
+
+    if not raw_ver:
+        return None, None, None
+
+    tag_name = raw_ver if raw_ver.startswith("v") else f"v{raw_ver}"
+    title = f"{project_root.name} {tag_name}"
+    return tag_name, title, None
+
+
+def publish_gitea_release(
+    project_root: Path,
+    tag_name: Optional[str] = None,
+    title: Optional[str] = None,
+    notes: Optional[str] = None,
+    repo_name: Optional[str] = None,
+    prerelease: bool = False,
+    sync_first: bool = True,
+    sync_github: bool = False,
+) -> Optional[str]:
+    """
+    Creates or updates a full Gitea release (with Git tag and CHANGELOG.md notes) for a workspace.
+    Returns the HTML URL of the published Gitea release, or None on failure.
+    """
+    target_name = repo_name or project_root.name
+    auto_tag, auto_title, auto_notes = _extract_changelog_section(project_root, tag_name)
+    final_tag = (tag_name.strip() if tag_name else auto_tag)
+    if not final_tag:
+        print("  [ERROR] Could not determine version tag (pass a tag or create VERSION / CHANGELOG.md).")
+        return None
+    if not final_tag.startswith("v") and re.match(r"^[0-9]+\.", final_tag):
+        final_tag = f"v{final_tag}"
+
+    if auto_tag != final_tag:
+        _, _, matched_notes = _extract_changelog_section(project_root, final_tag)
+        if matched_notes:
+            auto_notes = matched_notes
+
+    final_title = (title.strip() if title else None) or auto_title or f"{target_name} {final_tag}"
+    final_notes = (notes.strip() if notes else None) or auto_notes
+
+    if sync_first:
+        sync_workspace(
+            project_root,
+            message=f"chore(release): {final_tag}",
+            push=True,
+            repo_name=target_name,
+            allow_existing=True,
+            _skip_auto_release=True,
+        )
+
+    if not final_notes:
+        log_res = subprocess.run(
+            ["git", "log", "-5", "--pretty=format:- %s (%h)"],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+        )
+        final_notes = log_res.stdout.strip() if log_res.returncode == 0 else f"Release {final_tag}"
+
+    footer = "\n\n---\n*Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).*"
+    if "keepachangelog.com" not in final_notes:
+        final_notes += footer
+
+    # Create/update annotated Git tag locally and push to origin
+    subprocess.run(
+        [
+            "git",
+            "-c", "user.name=Antigravity",
+            "-c", "user.email=antigravity@local.dev",
+            "tag", "-f", "-a", final_tag, "-m", final_title,
+        ],
+        cwd=str(project_root),
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "push", "-f", "origin", final_tag],
+        cwd=str(project_root),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    config = get_gitea_config()
+    token = config.get("token", "")
+    user = config.get("user", "")
+    base_url = config.get("url", "http://localhost:3000").rstrip("/")
+    if not token or not user:
+        return None
+
+    headers = {
+        "Authorization": f"token {token}",
+        "Content-Type": "application/json",
+        "User-Agent": "SkillsDB-GiteaSync/1.0",
+    }
+
+    existing_rel = None
+    try:
+        list_req = urllib.request.Request(
+            f"{base_url}/api/v1/repos/{user}/{target_name}/releases?limit=50",
+            headers=headers,
+        )
+        with urllib.request.urlopen(list_req, timeout=5.0) as resp:
+            rels = json.loads(resp.read().decode("utf-8"))
+            for r in rels:
+                if r.get("tag_name") == final_tag:
+                    existing_rel = r
+                    break
+    except Exception:
+        pass
+
+    payload_dict = {
+        "tag_name": final_tag,
+        "target_commitish": "main",
+        "name": final_title,
+        "body": final_notes,
+        "draft": False,
+        "prerelease": bool(prerelease),
+    }
+
+    html_url = None
+    if existing_rel and existing_rel.get("id"):
+        rel_id = existing_rel["id"]
+        try:
+            patch_req = urllib.request.Request(
+                f"{base_url}/api/v1/repos/{user}/{target_name}/releases/{rel_id}",
+                data=json.dumps(payload_dict).encode("utf-8"),
+                method="PATCH",
+                headers=headers,
+            )
+            with urllib.request.urlopen(patch_req, timeout=8.0) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                html_url = data.get("html_url") or f"{base_url}/{user}/{target_name}/releases/tag/{final_tag}"
+                print(f"  [OK] Updated Gitea Release {final_tag}: {html_url}")
+        except Exception:
+            pass
+
+    if not html_url:
+        try:
+            post_req = urllib.request.Request(
+                f"{base_url}/api/v1/repos/{user}/{target_name}/releases",
+                data=json.dumps(payload_dict).encode("utf-8"),
+                method="POST",
+                headers=headers,
+            )
+            with urllib.request.urlopen(post_req, timeout=8.0) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                html_url = data.get("html_url") or f"{base_url}/{user}/{target_name}/releases/tag/{final_tag}"
+                print(f"  [OK] Published Gitea Release {final_tag}: {html_url}")
+        except Exception as e:
+            print(f"  [WARN] Could not publish Gitea release {final_tag}: {e}")
+            return None
+
+    if sync_github and shutil.which("gh"):
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as tf:
+                tf.write(final_notes)
+                tmp_path = tf.name
+            try:
+                chk = subprocess.run(["gh", "release", "view", final_tag], cwd=str(project_root), capture_output=True, text=True, timeout=15)
+                if chk.returncode == 0:
+                    subprocess.run(["gh", "release", "edit", final_tag, "--title", final_title, "--notes-file", tmp_path], cwd=str(project_root), capture_output=True, timeout=20)
+                else:
+                    subprocess.run(["gh", "release", "create", final_tag, "--title", final_title, "--notes-file", tmp_path], cwd=str(project_root), capture_output=True, timeout=20)
+            finally:
+                Path(tmp_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    return html_url
 
 
 def sync_changelog_releases(
@@ -1262,7 +1616,6 @@ def sync_changelog_releases(
     # 2. Optional GitHub Release sync (if sync_github=True and gh CLI is available)
     if sync_github and shutil.which("gh"):
         try:
-            import tempfile
             for entry in reversed(entries):
                 tag = entry["tag"]
                 body = entry["body"]
@@ -1301,19 +1654,43 @@ def sync_changelog_releases(
     return synced_tags
 
 
-def sync_workspace(project_root: Path, message: Optional[str] = None, push: bool = True, sync_github: bool = False):
-    """Initializes, learns, and synchronizes a specific workspace (including Keep a Changelog releases) to Gitea."""
+def sync_workspace(
+    project_root: Path,
+    message: Optional[str] = None,
+    push: bool = True,
+    sync_github: bool = False,
+    repo_name: Optional[str] = None,
+    allow_existing: bool = False,
+    _skip_auto_release: bool = False,
+) -> bool:
+    """Initializes, learns, and synchronizes a specific workspace (including Keep a Changelog releases and collision checks) to Gitea."""
+    has_explicit_msg = bool(message and message.strip() and message != "Synchronize workspace code history")
     msg = message or "Synchronize workspace code history"
+    target_name = repo_name or project_root.name
     print(f"Synchronizing workspace: {project_root.name} ({project_root})")
-    setup_workspace_git(project_root)
+
+    configured_url = _get_configured_gitea_repo_url(project_root)
+    if not configured_url and push and not allow_existing and not _is_temp_workspace(project_root):
+        rem_info = inspect_remote_repository(target_name)
+        if rem_info.get("exists") and not rem_info.get("empty"):
+            setup_workspace_git(project_root, repo_name=target_name, configure_remote=False)
+            learn_workspace(project_root)
+            _print_collision_prompt(project_root, rem_info)
+            return False
+
+    setup_workspace_git(project_root, repo_name=target_name)
     learn_workspace(project_root)
-    result = save_code_commit(project_root, message=msg, push=push)
+    result = save_code_commit(project_root, message=msg, push=push, explicit_message=has_explicit_msg)
     config = get_gitea_config()
-    repo_url = f"{config['url']}/{config['user']}/{project_root.name}" if config.get("user") else config["url"]
+    repo_url = _get_configured_gitea_repo_url(project_root) or (
+        f"{config['url']}/{config['user']}/{target_name}" if config.get("user") else config["url"]
+    )
     if result.get("success"):
         if result.get("committed"):
-            print(f"  [OK] Commit created: {result.get('commit_hash', '')[:7]}")
-            print(f"  [OK] Files tracked:  {result.get('files_changed', 0)}")
+            action_lbl = "Commit amended" if result.get("amended") else "Commit created"
+            print(f"  [OK] {action_lbl}: {result.get('commit_hash', '')[:7]}")
+            if not result.get("amended"):
+                print(f"  [OK] Files tracked:  {result.get('files_changed', 0)}")
             if result.get("pushed"):
                 print(f"  [OK] Pushed successfully to Gitea ({repo_url})")
             else:
@@ -1323,12 +1700,32 @@ def sync_workspace(project_root: Path, message: Optional[str] = None, push: bool
                 print(f"  [OK] Flushed pending commits to Gitea (HEAD: {result.get('commit_hash', '')[:7]} | {repo_url})")
             else:
                 print(f"  [OK] Already up to date (HEAD: {result.get('commit_hash', '')[:7]} | {repo_url})")
-        if push and (project_root / "CHANGELOG.md").exists():
+
+        if push and not _skip_auto_release and not _is_temp_workspace(project_root) and (project_root / "CHANGELOG.md").exists():
             rel_tags = sync_changelog_releases(project_root, sync_github=sync_github)
             if rel_tags:
                 print(f"  [OK] Synced Keep a Changelog releases: {', '.join(rel_tags)}")
+            auto_tag, _, _ = _extract_changelog_section(project_root)
+            if auto_tag:
+                ahead_chk = subprocess.run(
+                    ["git", "rev-list", "--count", f"{auto_tag}..HEAD"],
+                    cwd=str(project_root),
+                    capture_output=True,
+                    text=True,
+                )
+                try:
+                    ahead_cnt = int(ahead_chk.stdout.strip()) if ahead_chk.returncode == 0 else 0
+                except ValueError:
+                    ahead_cnt = 0
+                if ahead_cnt > 0:
+                    print(
+                        f"  [RELEASE REMINDER] HEAD is {ahead_cnt} commit(s) ahead of release {auto_tag}. "
+                        f"Increment VERSION + CHANGELOG.md and run 'skillsdb gitea-release' to publish a new release."
+                    )
+        return True
     else:
         print(f"  [ERROR] {result.get('error')}")
+        return False
 
 
 def discover_all_workspaces(base_dir: Optional[Path] = None, db_path: Path = DB_PATH) -> List[Path]:
