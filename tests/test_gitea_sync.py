@@ -69,7 +69,8 @@ class TestGiteaSync(unittest.TestCase):
         clone_url = ensure_remote_repository(repo_name, description="Automated test repo")
         self.assertIsNotNone(clone_url)
         self.assertIn(repo_name, clone_url)
-        self.assertTrue("@127.0.0.1:3000" in clone_url or "@localhost:3000" in clone_url)
+        self.assertTrue("127.0.0.1:3000" in clone_url or "localhost:3000" in clone_url)
+        self.assertNotIn("@", clone_url, "Clone URL must be free of embedded plaintext credentials")
 
     def test_setup_workspace_commit_and_telemetry(self):
         """Verifies workspace git initialization, commit creation, trailers, and zero-turn telemetry."""
@@ -275,6 +276,35 @@ class TestGiteaSync(unittest.TestCase):
             ok = init_workspace_gitea(self.test_dir, repo_name="AntiGraviton", use_existing=False, overwrite=False)
             self.assertFalse(ok, "init_workspace_gitea must return False and halt on repository name collision")
 
+
+    def test_token_free_git_config_and_credential_scrubbing(self):
+        """Verifies that legacy embedded tokens in .git/config are automatically scrubbed and transient auth headers are generated."""
+        from skillsdb.memory.gitea_config import (
+            _strip_credentials_from_url,
+            _scrub_workspace_git_config_credentials,
+            _get_git_auth_cmd_prefix,
+        )
+        raw_url = "http://MIckyFoley:secret123456@127.0.0.1:3000/MIckyFoley/SampleRepo.git"
+        self.assertEqual(
+            _strip_credentials_from_url(raw_url),
+            "http://127.0.0.1:3000/MIckyFoley/SampleRepo.git",
+        )
+
+        setup_workspace_git(self.test_dir, configure_remote=False)
+        git_cfg = self.test_dir / ".git" / "config"
+        git_cfg.write_text(
+            '[core]\n\trepositoryformatversion = 0\n[remote "origin"]\n\turl = http://MIckyFoley:secret123456@127.0.0.1:3000/MIckyFoley/SampleRepo.git\n',
+            encoding="utf-8",
+        )
+        scrubbed = _scrub_workspace_git_config_credentials(self.test_dir, db_path=self.db_path)
+        self.assertTrue(scrubbed)
+        cleaned_text = git_cfg.read_text(encoding="utf-8")
+        self.assertNotIn("secret123456", cleaned_text)
+        self.assertIn("url = http://127.0.0.1:3000/MIckyFoley/SampleRepo.git", cleaned_text)
+
+        prefix = _get_git_auth_cmd_prefix()
+        self.assertEqual(prefix[0], "git")
+        self.assertIn("http.extraHeader=Authorization: Basic ", " ".join(prefix))
 
     def test_cross_platform_python_installer_helpers(self):
         """Verifies Linux/macOS/Windows URL resolution, systemd user unit, launchd plist, and app.ini generation in install_antigraviton.py."""

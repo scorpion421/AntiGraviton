@@ -52,6 +52,7 @@ from .memory.gitea_sync import (
     publish_gitea_release,
     setup_workspace_git,
     set_gitea_config,
+    gitea_credential_helper,
 )
 from .platform.mcp_server import run_mcp_server
 from .search.synonyms import init_synonyms
@@ -393,6 +394,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_gitea_rel.add_argument("--prerelease", action="store_true", help="Mark release as pre-release")
     p_gitea_rel.add_argument("--github", action="store_true", help="Also publish or update the release on GitHub via gh CLI")
 
+    p_gitea_cred = subparsers.add_parser("gitea-credential-helper", help="Git credential helper for token-free .git/config authentication")
+    p_gitea_cred.add_argument("action", nargs="?", default="get", help="Git credential helper action (get, store, erase)")
+
     return parser
 
 
@@ -625,6 +629,9 @@ def main(argv: list[str] = None):
                 remote_share=getattr(args, "remote_share", None),
             )
         gitea_config_summary(auto_detect=getattr(args, "auto_detect", False))
+        return
+    elif args.command == "gitea-credential-helper":
+        gitea_credential_helper(getattr(args, "action", "get"))
         return
     elif args.command == "gitea-release":
         proj_root = Path(args.project) if getattr(args, "project", None) else find_project_root()

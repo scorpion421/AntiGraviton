@@ -21,6 +21,9 @@ MODULE_ORDER = [
     "platform/windows_utf8.py",
     "platform/mcp_server.py",
     "search/fts.py",
+    "memory/gitea_config.py",
+    "memory/gitea_service.py",
+    "memory/gitea_releases.py",
     "memory/gitea_sync.py",
     "memory/project_memory.py",
     "memory/handoff.py",
@@ -47,6 +50,7 @@ import re
 import json
 import time
 import queue
+import base64
 import shutil
 import sqlite3
 import tempfile
@@ -136,7 +140,7 @@ def bundle():
                 continue
 
             # Skip standard library imports already in header
-            if re.match(r"^(import|from)\s+(os|sys|re|json|time|queue|shutil|sqlite3|tempfile|argparse|threading|subprocess|urllib|concurrent|pathlib|datetime)\b", stripped):
+            if re.match(r"^(import|from)\s+(os|sys|re|json|time|queue|base64|shutil|sqlite3|tempfile|argparse|threading|subprocess|urllib|concurrent|pathlib|datetime)\b", stripped):
                 if "(" in stripped and ")" not in stripped:
                     in_multiline_skip = True
                 continue
