@@ -8,7 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.1.0] - 2026-10-21
 
 ### Added
-- **Unified multi-scenario installer and automatic runtime bootstrap (`install-antigraviton.ps1`, `.agents/skills/install-antigraviton/SKILL.md`, `gitea-service/scripts/backup-gitea.ps1`)**:
+- **Cross-platform Python installer for Linux/macOS/Windows (`install_antigraviton.py`, `skillsdb/memory/gitea_sync.py`)**:
+  - Added `install_antigraviton.py` (`stdlib` only) supporting rootless `systemd --user` service and timer registration on Linux, `launchd` LaunchAgent provisioning on macOS, automatic CPU architecture detection (`amd64` / `arm64`), and cross-platform `app.ini` generation.
+  - Extended `get_gitea_service_status()` and `ensure_gitea_online()` in `skillsdb/memory/gitea_sync.py` to detect and auto-recover `systemd --user` and `launchd` Gitea services on Linux and macOS alongside Windows `sc.exe`.
+- **Unified multi-scenario PowerShell installer and automatic runtime bootstrap (`install-antigraviton.ps1`, `.agents/skills/install-antigraviton/SKILL.md`, `gitea-service/scripts/backup-gitea.ps1`)**:
   - Added automatic Step 0 runtime bootstrap in `install-antigraviton.ps1` that ensures PowerShell 7 (`pwsh.exe`) is installed via `winget`, configures `pwsh.exe` as the default terminal profile in Windows Terminal and Antigravity IDE, and automatically bootstraps standalone Python 3.12 via `uv` into `~/.local/bin` when Python 3 is missing or shadowed by the Windows 11 Microsoft Store alias stub.
   - Added `-GiteaAdminPassword` to `install-antigraviton.ps1` to support explicit administrator passwords on initial user creation or password updates on existing accounts (while preserving `--random-password` when omitted).
   - Added `-ServiceAccount` and `-ServicePassword` pass-through parameters for enterprise domain/UNC service deployments.

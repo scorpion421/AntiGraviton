@@ -2453,23 +2453,49 @@ def check_gitea_health(timeout: float = 3.0) -> Tuple[bool, Dict[str, Any]]:
 
 
 def get_gitea_service_status() -> str:
-    """Checks Windows Service state for Gitea via sc.exe."""
+    """Checks service state for Gitea across Windows (sc.exe), Linux (systemd/pgrep), and macOS (launchctl/pgrep)."""
     config = get_gitea_config()
     svc_name = config["service_name"]
+    if os.name == "nt":
+        try:
+            proc = subprocess.run(
+                ["sc.exe", "query", svc_name],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            for line in proc.stdout.splitlines():
+                if "STATE" in line:
+                    parts = line.strip().split()
+                    if len(parts) >= 4:
+                        return parts[3]  # e.g., RUNNING, STOPPED
+                    return line.strip()
+            return "NOT_FOUND" if proc.returncode != 0 else "UNKNOWN"
+        except Exception:
+            return "UNKNOWN"
+
     try:
-        proc = subprocess.run(
-            ["sc.exe", "query", svc_name],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        for line in proc.stdout.splitlines():
-            if "STATE" in line:
-                parts = line.strip().split()
-                if len(parts) >= 4:
-                    return parts[3]  # e.g., RUNNING, STOPPED
-                return line.strip()
-        return "NOT_FOUND" if proc.returncode != 0 else "UNKNOWN"
+        if sys.platform.startswith("linux") and shutil.which("systemctl"):
+            for cmd in (
+                ["systemctl", "--user", "is-active", svc_name],
+                ["systemctl", "is-active", svc_name],
+            ):
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+                state = proc.stdout.strip().lower()
+                if state == "active":
+                    return "RUNNING"
+                if state in ("activating", "reloading"):
+                    return "START_PENDING"
+                if state in ("inactive", "failed", "deactivating"):
+                    user_unit = Path.home() / ".config" / "systemd" / "user" / f"{svc_name}.service"
+                    sys_unit = Path(f"/etc/systemd/system/{svc_name}.service")
+                    if user_unit.exists() or sys_unit.exists():
+                        return "STOPPED"
+        if shutil.which("pgrep"):
+            pg = subprocess.run(["pgrep", "-f", "gitea.*web"], capture_output=True, text=True, timeout=3)
+            if pg.returncode == 0 and pg.stdout.strip():
+                return "RUNNING"
+        return "NOT_FOUND"
     except Exception:
         return "UNKNOWN"
 
@@ -2509,30 +2535,56 @@ def ensure_gitea_online(
     recovered = False
     flushed_repos: List[str] = []
 
-    if auto_recover and os.name == "nt" and (not online or svc_status in ("STOPPED", "STOP_PENDING")):
+    if auto_recover and (not online or svc_status in ("STOPPED", "STOP_PENDING")):
         config = get_gitea_config(db_path=db_path)
         svc_name = config["service_name"]
-        try:
-            if svc_status in ("STOPPED", "STOP_PENDING") and online:
-                # An orphaned manual gitea.exe process is holding the port while the service is STOPPED
-                subprocess.run(["taskkill", "/F", "/IM", "gitea.exe"], capture_output=True, timeout=5)
-                time.sleep(0.5)
-            start_res = subprocess.run(
-                ["sc.exe", "start", svc_name],
-                capture_output=True,
-                text=True,
-                timeout=8,
-            )
-            if start_res.returncode == 0 or "1056" in start_res.stdout:
-                for _ in range(6):
-                    time.sleep(0.8)
-                    online, v_info = check_gitea_health(timeout=1.0)
-                    if online:
-                        recovered = True
-                        break
-                svc_status = get_gitea_service_status()
-        except Exception:
-            pass
+        if os.name == "nt":
+            try:
+                if svc_status in ("STOPPED", "STOP_PENDING") and online:
+                    subprocess.run(["taskkill", "/F", "/IM", "gitea.exe"], capture_output=True, timeout=5)
+                    time.sleep(0.5)
+                start_res = subprocess.run(
+                    ["sc.exe", "start", svc_name],
+                    capture_output=True,
+                    text=True,
+                    timeout=8,
+                )
+                if start_res.returncode == 0 or "1056" in start_res.stdout:
+                    for _ in range(6):
+                        time.sleep(0.8)
+                        online, v_info = check_gitea_health(timeout=1.0)
+                        if online:
+                            recovered = True
+                            break
+                    svc_status = get_gitea_service_status()
+            except Exception:
+                pass
+        else:
+            try:
+                started = False
+                if sys.platform.startswith("linux") and shutil.which("systemctl"):
+                    res = subprocess.run(
+                        ["systemctl", "--user", "start", svc_name],
+                        capture_output=True,
+                        text=True,
+                        timeout=8,
+                    )
+                    started = res.returncode == 0
+                elif sys.platform == "darwin" and shutil.which("launchctl"):
+                    plist = Path.home() / "Library" / "LaunchAgents" / "dev.local.antigraviton.gitea.plist"
+                    if plist.exists():
+                        res = subprocess.run(["launchctl", "load", "-w", str(plist)], capture_output=True, text=True, timeout=8)
+                        started = res.returncode == 0
+                if started:
+                    for _ in range(6):
+                        time.sleep(0.8)
+                        online, v_info = check_gitea_health(timeout=1.0)
+                        if online:
+                            recovered = True
+                            break
+                    svc_status = get_gitea_service_status()
+            except Exception:
+                pass
 
     if online and (flush_pending or recovered):
         flushed_repos = flush_all_pending_pushes(db_path=db_path)

@@ -276,5 +276,37 @@ class TestGiteaSync(unittest.TestCase):
             self.assertFalse(ok, "init_workspace_gitea must return False and halt on repository name collision")
 
 
+    def test_cross_platform_python_installer_helpers(self):
+        """Verifies Linux/macOS/Windows URL resolution, systemd user unit, launchd plist, and app.ini generation in install_antigraviton.py."""
+        import install_antigraviton as ia
+        self.assertIn("linux-amd64", ia.get_gitea_download_url("1.22.6", "linux", "x86_64"))
+        self.assertIn("linux-arm64", ia.get_gitea_download_url("1.22.6", "linux", "aarch64"))
+        self.assertIn("darwin-10.12-arm64", ia.get_gitea_download_url("1.22.6", "darwin", "arm64"))
+        self.assertIn("windows-4.0-amd64.exe", ia.get_gitea_download_url("1.22.6", "win32", "AMD64"))
+
+        unit = ia.generate_systemd_user_unit(self.test_dir, self.test_dir / "gitea", self.test_dir / "custom/conf/app.ini")
+        self.assertIn("Restart=on-failure", unit)
+        self.assertIn("WantedBy=default.target", unit)
+
+        plist = ia.generate_launchd_plist(self.test_dir, self.test_dir / "gitea", self.test_dir / "custom/conf/app.ini")
+        self.assertIn("dev.local.antigraviton.gitea", plist)
+        self.assertIn("<key>KeepAlive</key>", plist)
+
+        tpl = Path(__file__).parent.parent / "gitea-service" / "custom" / "conf" / "app.example.ini"
+        ini = ia.generate_gitea_app_ini(
+            tpl.read_text(encoding="utf-8"),
+            self.test_dir,
+            3000,
+            "micky",
+            "sec123",
+            "tok123",
+            "jwt123",
+            "/usr/bin/git",
+        )
+        self.assertIn("RUN_USER = micky", ini)
+        self.assertIn("SECRET_KEY = sec123", ini)
+        self.assertIn("TYPE = immediate", ini)
+
+
 if __name__ == "__main__":
     unittest.main()
