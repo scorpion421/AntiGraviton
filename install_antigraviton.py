@@ -29,6 +29,7 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 from datetime import datetime, timezone
+from typing import Dict, Any
 
 GITEA_VERSION = "1.22.6"
 
