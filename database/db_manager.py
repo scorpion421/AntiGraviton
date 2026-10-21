@@ -45,7 +45,7 @@ if sys.platform == "win32":
 # SECTION: skillsdb.config
 # =====================================================================
 # Ensure UTF-8 output encoding across Windows PowerShell and CMD
-__version__ = "3.5.6"
+__version__ = "3.6.0"
 
 # Model capability tiers
 TIER_LEAN = "lean"          # Gemini Flash, Flash-Lite, micro-skills, minimal token footprint
@@ -1284,6 +1284,16 @@ def handle_pre_tool_guardrail_hook():
     tool_call = payload.get("toolCall", {})
     args = tool_call.get("args", {})
     target_file = args.get("TargetFile", "<tool_input>")
+
+    cmd_line = args.get("CommandLine", "")
+    if isinstance(cmd_line, str) and re.search(r"\bgit\s+tag\s+(?:-f|--force)\s+v?\d+\.\d+\.\d+\b", cmd_line):
+        reason = (
+            "SkillsDB Guardrail Blocked Command (semver-immutability): "
+            "Never overwrite an already published release tag in place (git tag -f is forbidden by SemVer 2.0.0 rule). "
+            "Increment VERSION and CHANGELOG.md to a new MAJOR.MINOR.PATCH version and publish a new release instead."
+        )
+        print(json.dumps({"decision": "deny", "reason": reason}))
+        return
 
     content_items = []
     if "CodeContent" in args and isinstance(args["CodeContent"], str):
@@ -3953,11 +3963,15 @@ def publish_gitea_release(
     prerelease: bool = False,
     sync_first: bool = True,
     sync_github: bool = False,
+    target_commit: Optional[str] = None,
 ) -> Optional[str]:
     """
     Creates or updates a full Gitea release (with Git tag and CHANGELOG.md notes) for a workspace.
+    Enforces SemVer 2.0.0 immutability: refuses to move an already published release tag to a newer HEAD
+    unless an explicit historical target_commit is specified.
     Returns the HTML URL of the published Gitea release, or None on failure.
     """
+    project_root = Path(project_root)
     target_name = repo_name or project_root.name
     auto_tag, auto_title, auto_notes = _extract_changelog_section(project_root, tag_name)
     final_tag = (tag_name.strip() if tag_name else auto_tag)
@@ -3975,7 +3989,34 @@ def publish_gitea_release(
     final_title = (title.strip() if title else None) or auto_title or f"{target_name} {final_tag}"
     final_notes = (notes.strip() if notes else None) or auto_notes
 
-    if sync_first:
+    # SemVer 2.0.0 immutability check: prevent overwriting an existing release tag onto a different HEAD commit
+    head_res = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(project_root),
+        capture_output=True,
+        text=True,
+    )
+    head_sha = head_res.stdout.strip() if head_res.returncode == 0 else ""
+    existing_tag_res = subprocess.run(
+        ["git", "rev-list", "-n", "1", final_tag],
+        cwd=str(project_root),
+        capture_output=True,
+        text=True,
+    )
+    existing_tag_sha = existing_tag_res.stdout.strip() if existing_tag_res.returncode == 0 else ""
+
+    if not target_commit and existing_tag_sha and head_sha and existing_tag_sha != head_sha:
+        print(
+            f"  [SEMVER IMMUTABILITY ERROR] Release tag '{final_tag}' already exists at commit {existing_tag_sha[:7]} "
+            f"(current HEAD is {head_sha[:7]})."
+        )
+        print(
+            "  Never overwrite an already published release version in place! "
+            "Increment VERSION and CHANGELOG.md to a new SemVer version (MAJOR.MINOR.PATCH) and publish a new release."
+        )
+        return None
+
+    if sync_first and not target_commit:
         sync_workspace(
             project_root,
             message=f"chore(release): {final_tag}",
@@ -3998,13 +4039,17 @@ def publish_gitea_release(
     if "keepachangelog.com" not in final_notes:
         final_notes += footer
 
+    tag_cmd = [
+        "git",
+        "-c", "user.name=Antigravity",
+        "-c", "user.email=antigravity@local.dev",
+        "tag", "-f", "-a", final_tag, "-m", final_title,
+    ]
+    if target_commit:
+        tag_cmd.append(target_commit)
+
     subprocess.run(
-        [
-            "git",
-            "-c", "user.name=Antigravity",
-            "-c", "user.email=antigravity@local.dev",
-            "tag", "-f", "-a", final_tag, "-m", final_title,
-        ],
+        tag_cmd,
         cwd=str(project_root),
         capture_output=True,
         text=True,
@@ -4047,7 +4092,7 @@ def publish_gitea_release(
 
     payload_dict = {
         "tag_name": final_tag,
-        "target_commitish": "main",
+        "target_commitish": target_commit or "main",
         "name": final_title,
         "body": final_notes,
         "draft": False,
@@ -6571,6 +6616,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_gitea_rel.add_argument("--notes", "-n", default=None, help="Release notes body (default: auto-extracted from CHANGELOG.md)")
     p_gitea_rel.add_argument("--project", default=None, help="Project root directory (optional)")
     p_gitea_rel.add_argument("--name", default=None, help="Target Gitea repository name (optional)")
+    p_gitea_rel.add_argument("--commit", default=None, help="Explicit commit SHA for pinning a historical release tag")
     p_gitea_rel.add_argument("--prerelease", action="store_true", help="Mark release as pre-release")
     p_gitea_rel.add_argument("--github", action="store_true", help="Also publish or update the release on GitHub via gh CLI")
 
@@ -6824,6 +6870,7 @@ def main(argv: list[str] = None):
             repo_name=getattr(args, "name", None),
             prerelease=getattr(args, "prerelease", False),
             sync_github=getattr(args, "github", False),
+            target_commit=getattr(args, "commit", None),
         )
         if not url:
             sys.exit(2)

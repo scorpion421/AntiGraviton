@@ -395,5 +395,55 @@ class TestGiteaSync(unittest.TestCase):
         self.assertEqual(args_flags.rationale, "Prevents handle leaks on Windows")
 
 
+    def test_semver_immutability_guard(self):
+        """Verifies that publish_gitea_release and PreToolUse guardrails block overwriting an existing release tag."""
+        import subprocess
+        from skillsdb.memory.gitea_sync import publish_gitea_release
+        from skillsdb.core.guardrails import handle_pre_tool_guardrail_hook
+
+        repo_dir = self.test_dir / "semver_repo"
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-b", "main"], cwd=str(repo_dir), check=True, capture_output=True)
+        (repo_dir / "VERSION").write_text("1.1.0\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=str(repo_dir), check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=t@t.dev", "commit", "-m", "v1.1.0 commit"],
+            cwd=str(repo_dir),
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=t@t.dev", "tag", "-a", "v1.1.0", "-m", "v1.1.0"],
+            cwd=str(repo_dir),
+            check=True,
+            capture_output=True,
+        )
+
+        # Advance HEAD without incrementing VERSION
+        (repo_dir / "feature.txt").write_text("new feature\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=str(repo_dir), check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=t@t.dev", "commit", "-m", "new feature without version bump"],
+            cwd=str(repo_dir),
+            check=True,
+            capture_output=True,
+        )
+
+        res = publish_gitea_release(str(repo_dir), tag_name="v1.1.0", sync_first=False)
+        self.assertIsNone(res)
+
+        # Verify PreToolUse hook blocks git tag -f v1.1.0
+        import io
+        import json
+        from unittest.mock import patch
+        fake_stdin = io.StringIO(json.dumps({"toolCall": {"args": {"CommandLine": "git tag -f v1.1.0"}}}))
+        fake_stdout = io.StringIO()
+        with patch("sys.stdin", fake_stdin), patch("sys.stdout", fake_stdout):
+            handle_pre_tool_guardrail_hook()
+        hook_res = json.loads(fake_stdout.getvalue())
+        self.assertEqual(hook_res.get("decision"), "deny")
+        self.assertIn("semver-immutability", hook_res.get("reason", ""))
+
+
 if __name__ == "__main__":
     unittest.main()

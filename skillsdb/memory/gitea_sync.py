@@ -733,11 +733,15 @@ def publish_gitea_release(
     prerelease: bool = False,
     sync_first: bool = True,
     sync_github: bool = False,
+    target_commit: Optional[str] = None,
 ) -> Optional[str]:
     """
     Creates or updates a full Gitea release (with Git tag and CHANGELOG.md notes) for a workspace.
+    Enforces SemVer 2.0.0 immutability: refuses to move an already published release tag to a newer HEAD
+    unless an explicit historical target_commit is specified.
     Returns the HTML URL of the published Gitea release, or None on failure.
     """
+    project_root = Path(project_root)
     target_name = repo_name or project_root.name
     auto_tag, auto_title, auto_notes = _extract_changelog_section(project_root, tag_name)
     final_tag = (tag_name.strip() if tag_name else auto_tag)
@@ -755,7 +759,34 @@ def publish_gitea_release(
     final_title = (title.strip() if title else None) or auto_title or f"{target_name} {final_tag}"
     final_notes = (notes.strip() if notes else None) or auto_notes
 
-    if sync_first:
+    # SemVer 2.0.0 immutability check: prevent overwriting an existing release tag onto a different HEAD commit
+    head_res = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(project_root),
+        capture_output=True,
+        text=True,
+    )
+    head_sha = head_res.stdout.strip() if head_res.returncode == 0 else ""
+    existing_tag_res = subprocess.run(
+        ["git", "rev-list", "-n", "1", final_tag],
+        cwd=str(project_root),
+        capture_output=True,
+        text=True,
+    )
+    existing_tag_sha = existing_tag_res.stdout.strip() if existing_tag_res.returncode == 0 else ""
+
+    if not target_commit and existing_tag_sha and head_sha and existing_tag_sha != head_sha:
+        print(
+            f"  [SEMVER IMMUTABILITY ERROR] Release tag '{final_tag}' already exists at commit {existing_tag_sha[:7]} "
+            f"(current HEAD is {head_sha[:7]})."
+        )
+        print(
+            "  Never overwrite an already published release version in place! "
+            "Increment VERSION and CHANGELOG.md to a new SemVer version (MAJOR.MINOR.PATCH) and publish a new release."
+        )
+        return None
+
+    if sync_first and not target_commit:
         sync_workspace(
             project_root,
             message=f"chore(release): {final_tag}",
@@ -778,13 +809,17 @@ def publish_gitea_release(
     if "keepachangelog.com" not in final_notes:
         final_notes += footer
 
+    tag_cmd = [
+        "git",
+        "-c", "user.name=Antigravity",
+        "-c", "user.email=antigravity@local.dev",
+        "tag", "-f", "-a", final_tag, "-m", final_title,
+    ]
+    if target_commit:
+        tag_cmd.append(target_commit)
+
     subprocess.run(
-        [
-            "git",
-            "-c", "user.name=Antigravity",
-            "-c", "user.email=antigravity@local.dev",
-            "tag", "-f", "-a", final_tag, "-m", final_title,
-        ],
+        tag_cmd,
         cwd=str(project_root),
         capture_output=True,
         text=True,
@@ -827,7 +862,7 @@ def publish_gitea_release(
 
     payload_dict = {
         "tag_name": final_tag,
-        "target_commitish": "main",
+        "target_commitish": target_commit or "main",
         "name": final_title,
         "body": final_notes,
         "draft": False,

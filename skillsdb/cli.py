@@ -395,6 +395,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_gitea_rel.add_argument("--notes", "-n", default=None, help="Release notes body (default: auto-extracted from CHANGELOG.md)")
     p_gitea_rel.add_argument("--project", default=None, help="Project root directory (optional)")
     p_gitea_rel.add_argument("--name", default=None, help="Target Gitea repository name (optional)")
+    p_gitea_rel.add_argument("--commit", default=None, help="Explicit commit SHA for pinning a historical release tag")
     p_gitea_rel.add_argument("--prerelease", action="store_true", help="Mark release as pre-release")
     p_gitea_rel.add_argument("--github", action="store_true", help="Also publish or update the release on GitHub via gh CLI")
 
@@ -648,6 +649,7 @@ def main(argv: list[str] = None):
             repo_name=getattr(args, "name", None),
             prerelease=getattr(args, "prerelease", False),
             sync_github=getattr(args, "github", False),
+            target_commit=getattr(args, "commit", None),
         )
         if not url:
             sys.exit(2)

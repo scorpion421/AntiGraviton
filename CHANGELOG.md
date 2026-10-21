@@ -5,6 +5,35 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-10-21
+
+### Added
+- **Hard SemVer immutability enforcement for published releases (`skillsdb/memory/gitea_sync.py`, `skillsdb/core/guardrails.py`, `skillsdb/cli.py`, `v3.6.0`)**:
+  - Updated `publish_gitea_release()` to check whether the target release tag (`vX.Y.Z`) already exists at an older commit than `HEAD`; if so (and `--commit` is not explicitly targeting a historical milestone), SkillsDB halts with `[SEMVER IMMUTABILITY ERROR]` and refuses to overwrite or move an already published release tag.
+  - Added `--commit <sha>` to `skillsdb gitea-release` to support pinning historical release tags to specific milestone commits without mutating newer releases.
+  - Extended `handle_pre_tool_guardrail_hook()` in `skillsdb/core/guardrails.py` to block `git tag -f vX.Y.Z` commands that attempt to overwrite existing semantic version tags.
+
+### Changed
+- **Enterprise SQLite connection lifecycle, WAL/mmap tuning, and zero-lock schema checks (`skillsdb/core/db.py`, `skillsdb/memory/writer_queue.py`, `skillsdb/memory/project_memory.py`, `skillsdb/memory/gitea_config.py`, `deploy.py`, `skillsdb/cli.py`)**:
+  - Added `managed_connection()` and `execute_with_retry()` in `skillsdb/core/db.py` with consistent `30000 ms` `busy_timeout`, `64 MB` `mmap_size`, `temp_store = MEMORY`, and deterministic `conn.close()` on context exit to prevent Windows file-handle leaks.
+  - Added fast read-only `sqlite_master` verification (`_central_schema_ready()` and `_project_schema_ready()`) in `init_db()` and `init_project_db()` so read invocations (`get-skill`, `suggest`, `mem-get-context`, `PreInvocation` hook) acquire zero write locks.
+  - Registered `atexit` queue draining and passive WAL checkpointing in `WriterQueue` (`skillsdb/memory/writer_queue.py`).
+  - Added `safe_deploy_database()` in `deploy.py` using in-place `ATTACH DATABASE` differential merges and online `sqlite3.Connection.backup()` instead of raw `shutil.copy2` file overwrites on active WAL databases.
+  - Added fault-tolerant CLI flag aliases (`--title`/`--topic`, `--content`/`--decision`, `--rationale`/`--context`/`--reason` on `mem-save-decision`, `--rationale`/`--context` on `mem-save-fact`, and `--service` on `gitea-config`).
+
+## [1.2.0] - 2026-10-21
+
+### Security
+- **Token-free `.git/config` remotes, transient in-memory Git auth, and automatic credential scrubbing (`skillsdb/memory/gitea_config.py`, `skillsdb/cli.py`)**:
+  - Eliminated plaintext Gitea API tokens from `.git/config` remote URLs across all workspaces (`http://localhost:3000/<user>/<repo>.git` instead of `http://<user>:<token>@...`).
+  - Added `_get_git_auth_cmd_prefix()` to pass transient `http.extraHeader=Authorization: Basic <base64>` headers during `skillsdb` Git pushes and tag syncs without writing credentials to disk.
+  - Added `skillsdb gitea-credential-helper` and `register_git_credential_helper()` so manual `git push` / `git pull` terminal operations authenticate dynamically from `~/.gemini/database/customizations.db`.
+  - Added `_scrub_workspace_git_config_credentials()` to automatically migrate and strip legacy embedded tokens from existing `.git/config` files.
+
+### Changed
+- **Modular decomposition of Gitea synchronization engine (`skillsdb/memory/gitea_config.py`, `skillsdb/memory/gitea_service.py`, `skillsdb/memory/gitea_releases.py`, `skillsdb/memory/gitea_sync.py`, `build.py`)**:
+  - Split the 1,870-line `gitea_sync.py` monolith into four focused modules (`gitea_config.py`, `gitea_service.py`, `gitea_releases.py`, and `gitea_sync.py`) with full backward-compatible symbol re-exports and single-file bundling in `build.py`.
+
 ## [1.1.0] - 2026-10-21
 
 ### Added
@@ -17,23 +46,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added `-ServiceAccount` and `-ServicePassword` pass-through parameters for enterprise domain/UNC service deployments.
   - Added `gitea-service/scripts/backup-gitea.ps1` and optional `-BackupTargetPath` / `-BackupTime` parameters in `install-antigraviton.ps1` to register a daily `03:00` online `gitea.exe dump` Windows Scheduled Task (`Antigravity-Gitea-Backup`) with automated archive retention pruning.
   - Added a strict Step 5 verification gate in `install-antigraviton.ps1` that verifies `customizations.db`, the `gitea` Windows service state, and the local HTTP REST API before outputting the completion banner.
-
-### Security
-- **Token-free `.git/config` remotes, transient in-memory Git auth, and automatic credential scrubbing (`skillsdb/memory/gitea_config.py`, `skillsdb/cli.py`)**:
-  - Eliminated plaintext Gitea API tokens from `.git/config` remote URLs across all workspaces (`http://localhost:3000/<user>/<repo>.git` instead of `http://<user>:<token>@...`).
-  - Added `_get_git_auth_cmd_prefix()` to pass transient `http.extraHeader=Authorization: Basic <base64>` headers during `skillsdb` Git pushes and tag syncs without writing credentials to disk.
-  - Added `skillsdb gitea-credential-helper` and `register_git_credential_helper()` so manual `git push` / `git pull` terminal operations authenticate dynamically from `~/.gemini/database/customizations.db`.
-  - Added `_scrub_workspace_git_config_credentials()` to automatically migrate and strip legacy embedded tokens from existing `.git/config` files.
-
-### Changed
-- **Modular decomposition of Gitea synchronization engine (`skillsdb/memory/gitea_config.py`, `skillsdb/memory/gitea_service.py`, `skillsdb/memory/gitea_releases.py`, `skillsdb/memory/gitea_sync.py`, `build.py`)**:
-  - Split the 1,870-line `gitea_sync.py` monolith into four focused modules (`gitea_config.py`, `gitea_service.py`, `gitea_releases.py`, and `gitea_sync.py`) with full backward-compatible symbol re-exports and single-file bundling in `build.py`.
-- **Enterprise SQLite connection lifecycle, WAL/mmap tuning, and zero-lock schema checks (`skillsdb/core/db.py`, `skillsdb/memory/writer_queue.py`, `skillsdb/memory/project_memory.py`, `skillsdb/memory/gitea_config.py`, `deploy.py`, `skillsdb/cli.py`)**:
-  - Added `managed_connection()` and `execute_with_retry()` in `skillsdb/core/db.py` with consistent `30000 ms` `busy_timeout`, `64 MB` `mmap_size`, `temp_store = MEMORY`, and deterministic `conn.close()` on context exit to prevent Windows file-handle leaks.
-  - Added fast read-only `sqlite_master` verification (`_central_schema_ready()` and `_project_schema_ready()`) in `init_db()` and `init_project_db()` so read invocations (`get-skill`, `suggest`, `mem-get-context`, `PreInvocation` hook) acquire zero write locks.
-  - Registered `atexit` queue draining and passive WAL checkpointing in `WriterQueue` (`skillsdb/memory/writer_queue.py`).
-  - Added `safe_deploy_database()` in `deploy.py` using in-place `ATTACH DATABASE` differential merges and online `sqlite3.Connection.backup()` instead of raw `shutil.copy2` file overwrites on active WAL databases.
-  - Added fault-tolerant CLI flag aliases (`--title`/`--topic`, `--content`/`--decision`, `--rationale`/`--context`/`--reason` on `mem-save-decision`, `--rationale`/`--context` on `mem-save-fact`, and `--service` on `gitea-config`).
 
 ### Fixed
 - **PowerShell 5.1 service installer parameter syntax, secondary drive NTFS ACLs, and native download speed (`gitea-service/scripts/deploy-gitea.ps1`, `install-antigraviton.ps1`, `deploy.py`)**:

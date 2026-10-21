@@ -427,6 +427,16 @@ def handle_pre_tool_guardrail_hook():
     args = tool_call.get("args", {})
     target_file = args.get("TargetFile", "<tool_input>")
 
+    cmd_line = args.get("CommandLine", "")
+    if isinstance(cmd_line, str) and re.search(r"\bgit\s+tag\s+(?:-f|--force)\s+v?\d+\.\d+\.\d+\b", cmd_line):
+        reason = (
+            "SkillsDB Guardrail Blocked Command (semver-immutability): "
+            "Never overwrite an already published release tag in place (git tag -f is forbidden by SemVer 2.0.0 rule). "
+            "Increment VERSION and CHANGELOG.md to a new MAJOR.MINOR.PATCH version and publish a new release instead."
+        )
+        print(json.dumps({"decision": "deny", "reason": reason}))
+        return
+
     content_items = []
     if "CodeContent" in args and isinstance(args["CodeContent"], str):
         content_items.append(("CodeContent", args["CodeContent"]))
