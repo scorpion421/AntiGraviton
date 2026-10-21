@@ -31,6 +31,13 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import Dict, Any
 
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 GITEA_VERSION = "1.22.6"
 
 
@@ -324,7 +331,7 @@ def install_antigraviton(
 ) -> None:
     suite_root = Path(__file__).parent.resolve()
     version_file = suite_root / "VERSION"
-    suite_version = version_file.read_text(encoding="utf-8").strip() if version_file.exists() else "1.1.0"
+    suite_version = version_file.read_text(encoding="utf-8-sig").strip() if version_file.exists() else "1.1.0"
     user_home = Path.home()
     gemini_dir = user_home / ".gemini"
     target_db_path = gemini_dir / "database" / "customizations.db"
