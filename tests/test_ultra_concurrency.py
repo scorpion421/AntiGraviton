@@ -47,7 +47,7 @@ class TestUltraConcurrency(unittest.TestCase):
         self.assertEqual(mode.lower(), "wal")
         cursor.execute("PRAGMA busy_timeout;")
         timeout = cursor.fetchone()[0]
-        self.assertEqual(timeout, 5000)
+        self.assertEqual(timeout, 30000)
         t_conn.close()
 
     def test_model_tier_env_override(self):
