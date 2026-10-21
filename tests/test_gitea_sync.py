@@ -302,7 +302,8 @@ class TestGiteaSync(unittest.TestCase):
         self.assertNotIn("secret123456", cleaned_text)
         self.assertIn("url = http://127.0.0.1:3000/MIckyFoley/SampleRepo.git", cleaned_text)
 
-        with unittest.mock.patch(
+        from unittest.mock import patch
+        with patch(
             "skillsdb.memory.gitea_config.get_gitea_config",
             return_value={"url": "http://127.0.0.1:3000", "user": "MIckyFoley", "token": "secret123456", "service_name": "gitea"},
         ):
