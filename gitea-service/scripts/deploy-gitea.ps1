@@ -5,7 +5,7 @@
 .DESCRIPTION
     Installs Gitea as an isolated local Windows Service on loopback (127.0.0.1:3000),
     configures environment variables to prevent DFS traversal issues, ensures UNC paths
-    for Session 0 compatibility, provisions SQLite storage, and starts the service.
+    for Session 0 compatibility, provisions SQLite storage and local drive ACLs, and starts the service.
 
 .PARAMETER InstallPath
     The directory containing gitea.exe and configuration.
@@ -53,6 +53,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
 
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host "Antigravity Gitea Windows Service Deployment" -ForegroundColor Cyan
@@ -104,7 +105,7 @@ if (-not (Test-Path $configPath)) {
     $examplePath = Join-Path $resolvedPath "custom\conf\app.example.ini"
     if (Test-Path $examplePath) {
         $content = Get-Content $examplePath -Raw
-        $content = $content -replace "C:\\Gitea", $resolvedPath
+        $content = $content.Replace("C:\Gitea", $resolvedPath)
         $content = $content -replace "HTTP_PORT = 3000", "HTTP_PORT = $HttpPort"
         $content = $content -replace "ROOT_URL = http://localhost:3000/", "ROOT_URL = http://localhost:$HttpPort/"
 
@@ -159,21 +160,33 @@ if (-not (Test-Path $configPath)) {
     }
 }
 
+# Grant standard local users Modify permissions on local drive installations (e.g. C:\Gitea, D:\Gitea)
+# so non-elevated CLI user/token provisioning and hook execution never hit NTFS ownership locks.
+if ($resolvedPath -match '^[A-Za-z]:\\') {
+    & icacls.exe $resolvedPath /grant "*S-1-5-32-545:(OI)(CI)M" /T /C /Q 2>$null | Out-Null
+}
+
 # 5. Windows Service creation or update
 Write-Host "[5/6] Configuring Windows Service '$ServiceName'..."
 $workPath = $resolvedPath
 $binPathCmd = "`"$binaryPath`" web --config `"$configPath`" --work-path `"$workPath`""
 
 $serviceExists = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-& icacls.exe $resolvedPath /grant "*S-1-5-32-545:(OI)(CI)M" /T /C /Q | Out-Null
 if ($serviceExists) {
-    Write-Host "  Service '$ServiceName' already exists. Updating binary path..."
+    Write-Host "  Service '$ServiceName' already exists. Updating service configuration..."
     Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
     & sc.exe delete $ServiceName | Out-Null
     Start-Sleep -Seconds 1
 }
-Write-Host "  Creating service '$ServiceName'..."
-New-Service -Name $ServiceName -BinaryPathName $binPathCmd -DisplayName $ServiceDisplayName -Description "Antigravity Local Git and SkillsDB Synchronization Engine" -StartupType Automatic | Out-Null
+
+Write-Host "  Registering service '$ServiceName'..."
+if ($ServiceAccount -ne "NT AUTHORITY\SYSTEM" -and $ServicePassword) {
+    $secPwd = ConvertTo-SecureString $ServicePassword -AsPlainText -Force
+    $svcCred = New-Object System.Management.Automation.PSCredential ($ServiceAccount, $secPwd)
+    New-Service -Name $ServiceName -BinaryPathName $binPathCmd -DisplayName $ServiceDisplayName -Description "Antigravity Local Git and SkillsDB Synchronization Engine" -StartupType Automatic -Credential $svcCred | Out-Null
+} else {
+    New-Service -Name $ServiceName -BinaryPathName $binPathCmd -DisplayName $ServiceDisplayName -Description "Antigravity Local Git and SkillsDB Synchronization Engine" -StartupType Automatic | Out-Null
+}
 & sc.exe config $ServiceName start= delayed-auto depend= LanmanWorkstation | Out-Null
 
 # Set service description, auto-recovery actions (15s/30s/60s), and interactive user start/stop permissions
@@ -198,4 +211,3 @@ Write-Host "============================================================" -Foreg
 Write-Host "Deployment completed." -ForegroundColor Cyan
 Write-Host "Service URL: http://127.0.0.1:$HttpPort" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
-

@@ -5,14 +5,22 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.9] - 2026-10-21
+## [1.1.0] - 2026-10-21
+
+### Added
+- **Unified multi-scenario installer and automatic runtime bootstrap (`install-antigraviton.ps1`, `.agents/skills/install-antigraviton/SKILL.md`, `gitea-service/scripts/backup-gitea.ps1`)**:
+  - Added automatic Step 0 runtime bootstrap in `install-antigraviton.ps1` that ensures PowerShell 7 (`pwsh.exe`) is installed via `winget`, configures `pwsh.exe` as the default terminal profile in Windows Terminal and Antigravity IDE, and automatically bootstraps standalone Python 3.12 via `uv` into `~/.local/bin` when Python 3 is missing or shadowed by the Windows 11 Microsoft Store alias stub.
+  - Added `-GiteaAdminPassword` to `install-antigraviton.ps1` to support explicit administrator passwords on initial user creation or password updates on existing accounts (while preserving `--random-password` when omitted).
+  - Added `-ServiceAccount` and `-ServicePassword` pass-through parameters for enterprise domain/UNC service deployments.
+  - Added `gitea-service/scripts/backup-gitea.ps1` and optional `-BackupTargetPath` / `-BackupTime` parameters in `install-antigraviton.ps1` to register a daily `03:00` online `gitea.exe dump` Windows Scheduled Task (`Antigravity-Gitea-Backup`) with automated archive retention pruning.
+  - Added a strict Step 5 verification gate in `install-antigraviton.ps1` that verifies `customizations.db`, the `gitea` Windows service state, and the local HTTP REST API before outputting the completion banner.
 
 ### Fixed
-- **PowerShell 5.1 service installer parameter syntax and Win32 service quoting (`gitea-service/scripts/deploy-gitea.ps1`)**:
-  - Wrapped `(Split-Path -Parent $PSScriptRoot)` in parentheses inside the `param(...)` block to prevent `MissingEndParenthesisInFunctionParameterList` parser errors when invoking `deploy-gitea.ps1` via elevated `powershell.exe -File`.
-  - Replaced native `sc.exe create` quoting with `New-Service` and added `icacls.exe` directory permission grants so `gitea.exe` service binary paths with arguments and SQLite database permissions work reliably across standard and elevated sessions.
-- **Resilient plugin archiving when MCP sidecar processes are active (`deploy.py`)**:
-  - Wrapped legacy plugin directory moves in `try...except` so active MCP sidecar processes (such as `biomolecular_structure_viewer`) do not interrupt `config.json` and global `.gitignore_global` deployment.
+- **PowerShell 5.1 service installer parameter syntax, secondary drive NTFS ACLs, and native download speed (`gitea-service/scripts/deploy-gitea.ps1`, `install-antigraviton.ps1`, `deploy.py`)**:
+  - Wrapped `(Split-Path -Parent $PSScriptRoot)` in parentheses inside `deploy-gitea.ps1` and `backup-gitea.ps1` `param(...)` blocks to prevent `MissingEndParenthesisInFunctionParameterList` parser errors under `powershell.exe -File`.
+  - Added pre-service `app.ini` / `gitea.db` initialization and `icacls.exe` local drive Modify permission grants (`*S-1-5-32-545:(OI)(CI)M`) so installations on secondary drives (such as `D:\Gitea`) never fail with `SYSTEM`-only `SQLite` ownership locks during non-elevated user and token provisioning.
+  - Enabled `$ProgressPreference = "SilentlyContinue"` and PowerShell 7 `HttpClient` downloads so `Invoke-WebRequest` downloads `gitea.exe` at native wire speed without requiring `curl.exe`.
+  - Wrapped legacy plugin archiving moves in `deploy.py` in `try...except` so active MCP sidecar processes (`biomolecular_structure_viewer`) do not interrupt `config.json` and `.gitignore_global` deployment.
 
 ## [1.0.8] - 2026-10-19
 
