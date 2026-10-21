@@ -96,6 +96,8 @@ def ensure_gitea_online(
                     ["sc.exe", "start", svc_name],
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=8,
                 )
                 if start_res.returncode == 0 or "1056" in start_res.stdout:

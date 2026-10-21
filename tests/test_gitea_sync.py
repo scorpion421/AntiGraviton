@@ -302,9 +302,13 @@ class TestGiteaSync(unittest.TestCase):
         self.assertNotIn("secret123456", cleaned_text)
         self.assertIn("url = http://127.0.0.1:3000/MIckyFoley/SampleRepo.git", cleaned_text)
 
-        prefix = _get_git_auth_cmd_prefix()
-        self.assertEqual(prefix[0], "git")
-        self.assertIn("http.extraHeader=Authorization: Basic ", " ".join(prefix))
+        with unittest.mock.patch(
+            "skillsdb.memory.gitea_config.get_gitea_config",
+            return_value={"url": "http://127.0.0.1:3000", "user": "MIckyFoley", "token": "secret123456", "service_name": "gitea"},
+        ):
+            prefix = _get_git_auth_cmd_prefix()
+            self.assertEqual(prefix[0], "git")
+            self.assertIn("http.extraHeader=Authorization: Basic ", " ".join(prefix))
 
     def test_cross_platform_python_installer_helpers(self):
         """Verifies Linux/macOS/Windows URL resolution, systemd user unit, launchd plist, and app.ini generation in install_antigraviton.py."""

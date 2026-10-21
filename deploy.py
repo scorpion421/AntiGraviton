@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Cross-platform deployment script for Antigravity Customizations Database.
 Deploys customizations.db, db_manager.py, and the customizations-db plugin
@@ -42,9 +42,54 @@ def deploy(source_dir: Path = None, target_dir: Path = None):
     target_plugins_dir.mkdir(parents=True, exist_ok=True)
     target_plugin.mkdir(parents=True, exist_ok=True)
 
-    # 2. Copy Database & CLI Manager
+    # 2. Copy Database & CLI Manager (preserving existing runtime_config and token_savings_log)
     print("[2/5] Deploying database and management CLI...")
-    shutil.copy2(source_dir / "database" / "customizations.db", target_db_dir / "customizations.db")
+    target_db_file = target_db_dir / "customizations.db"
+    preserved_runtime = []
+    preserved_savings = []
+    if target_db_file.exists():
+        try:
+            import sqlite3
+            with sqlite3.connect(str(target_db_file)) as old_conn:
+                cur = old_conn.cursor()
+                cur.execute(
+                    "SELECT key, value, updated_at FROM runtime_config WHERE key != 'schema_version'"
+                )
+                preserved_runtime = cur.fetchall()
+                cur.execute(
+                    "SELECT conversation_id, model_tier, step_count, turns_counted, baseline_tokens_per_turn, "
+                    "compact_tokens_per_turn, micro_skill_tokens_loaded, tokens_saved, estimated_cost_saved_usd, updated_at "
+                    "FROM token_savings_log"
+                )
+                preserved_savings = cur.fetchall()
+        except Exception:
+            pass
+
+    shutil.copy2(source_dir / "database" / "customizations.db", target_db_file)
+
+    if preserved_runtime or preserved_savings:
+        try:
+            import sqlite3
+            with sqlite3.connect(str(target_db_file)) as new_conn:
+                cur = new_conn.cursor()
+                for k, v, ts in preserved_runtime:
+                    if v is not None and str(v).strip() != "":
+                        cur.execute(
+                            "INSERT OR REPLACE INTO runtime_config (key, value, updated_at) VALUES (?, ?, ?)",
+                            (k, v, ts),
+                        )
+                for row in preserved_savings:
+                    cur.execute(
+                        "INSERT OR REPLACE INTO token_savings_log "
+                        "(conversation_id, model_tier, step_count, turns_counted, baseline_tokens_per_turn, "
+                        "compact_tokens_per_turn, micro_skill_tokens_loaded, tokens_saved, estimated_cost_saved_usd, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        row,
+                    )
+                new_conn.commit()
+        except Exception:
+            pass
+
     shutil.copy2(source_dir / "database" / "db_manager.py", target_db_dir / "db_manager.py")
     if (source_dir / "skillsdb").exists():
         shutil.copytree(source_dir / "skillsdb", target_db_dir / "skillsdb", dirs_exist_ok=True)

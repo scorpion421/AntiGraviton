@@ -2618,6 +2618,16 @@ def check_gitea_health(timeout: float = 3.0) -> Tuple[bool, Dict[str, Any]]:
                 data = json.loads(resp.read().decode("utf-8"))
                 return True, data
     except Exception as e:
+        healthz_url = f"{config['url']}/api/healthz"
+        try:
+            h_req = urllib.request.Request(healthz_url, headers={"User-Agent": "SkillsDB-GiteaSync/1.0"})
+            with urllib.request.urlopen(h_req, timeout=timeout) as h_resp:
+                if h_resp.status == 200:
+                    h_data = json.loads(h_resp.read().decode("utf-8"))
+                    if h_data.get("status") == "pass":
+                        return True, {"version": h_data.get("description", "online"), "status": "pass"}
+        except Exception:
+            pass
         return False, {"error": str(e)}
     return False, {"error": "Unknown status"}
 
@@ -2632,6 +2642,8 @@ def get_gitea_service_status() -> str:
                 ["sc.exe", "query", svc_name],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=5,
             )
             for line in proc.stdout.splitlines():
@@ -3115,6 +3127,8 @@ def ensure_gitea_online(
                     ["sc.exe", "start", svc_name],
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=8,
                 )
                 if start_res.returncode == 0 or "1056" in start_res.stdout:
