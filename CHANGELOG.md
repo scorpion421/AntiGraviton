@@ -5,6 +5,15 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.9] - 2026-10-21
+
+### Fixed
+- **PowerShell 5.1 service installer parameter syntax and Win32 service quoting (`gitea-service/scripts/deploy-gitea.ps1`)**:
+  - Wrapped `(Split-Path -Parent $PSScriptRoot)` in parentheses inside the `param(...)` block to prevent `MissingEndParenthesisInFunctionParameterList` parser errors when invoking `deploy-gitea.ps1` via elevated `powershell.exe -File`.
+  - Replaced native `sc.exe create` quoting with `New-Service` and added `icacls.exe` directory permission grants so `gitea.exe` service binary paths with arguments and SQLite database permissions work reliably across standard and elevated sessions.
+- **Resilient plugin archiving when MCP sidecar processes are active (`deploy.py`)**:
+  - Wrapped legacy plugin directory moves in `try...except` so active MCP sidecar processes (such as `biomolecular_structure_viewer`) do not interrupt `config.json` and global `.gitignore_global` deployment.
+
 ## [1.0.8] - 2026-10-19
 
 ### Added
