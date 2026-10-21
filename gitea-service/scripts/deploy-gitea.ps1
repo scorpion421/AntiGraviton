@@ -31,7 +31,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $false)]
-    [string]$InstallPath = $PSScriptRoot | Split-Path -Parent,
+    [string]$InstallPath = (Split-Path -Parent $PSScriptRoot),
 
     [Parameter(Mandatory = $false)]
     [string]$ServiceAccount = "NT AUTHORITY\SYSTEM",
@@ -165,17 +165,16 @@ $workPath = $resolvedPath
 $binPathCmd = "`"$binaryPath`" web --config `"$configPath`" --work-path `"$workPath`""
 
 $serviceExists = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+& icacls.exe $resolvedPath /grant "*S-1-5-32-545:(OI)(CI)M" /T /C /Q | Out-Null
 if ($serviceExists) {
     Write-Host "  Service '$ServiceName' already exists. Updating binary path..."
-    & sc.exe config $ServiceName binPath= $binPathCmd start= delayed-auto depend= LanmanWorkstation | Out-Null
-} else {
-    Write-Host "  Creating new service '$ServiceName'..."
-    if ($ServiceAccount -ne "NT AUTHORITY\SYSTEM" -and $ServicePassword) {
-        & sc.exe create $ServiceName binPath= $binPathCmd start= delayed-auto depend= LanmanWorkstation DisplayName= $ServiceDisplayName obj= $ServiceAccount password= $ServicePassword | Out-Null
-    } else {
-        & sc.exe create $ServiceName binPath= $binPathCmd start= delayed-auto depend= LanmanWorkstation DisplayName= $ServiceDisplayName obj= $ServiceAccount | Out-Null
-    }
+    Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
+    & sc.exe delete $ServiceName | Out-Null
+    Start-Sleep -Seconds 1
 }
+Write-Host "  Creating service '$ServiceName'..."
+New-Service -Name $ServiceName -BinaryPathName $binPathCmd -DisplayName $ServiceDisplayName -Description "Antigravity Local Git and SkillsDB Synchronization Engine" -StartupType Automatic | Out-Null
+& sc.exe config $ServiceName start= delayed-auto depend= LanmanWorkstation | Out-Null
 
 # Set service description, auto-recovery actions (15s/30s/60s), and interactive user start/stop permissions
 & sc.exe description $ServiceName "Antigravity Local Git & SkillsDB Synchronization Engine" | Out-Null
@@ -199,3 +198,4 @@ Write-Host "============================================================" -Foreg
 Write-Host "Deployment completed." -ForegroundColor Cyan
 Write-Host "Service URL: http://127.0.0.1:$HttpPort" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
+
