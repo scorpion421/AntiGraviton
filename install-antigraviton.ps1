@@ -602,8 +602,8 @@ if (-not $SkipGiteaService) {
     $apiOnline = $false
     for ($attempt = 1; $attempt -le 5; $attempt++) {
         try {
-            $verResp = Invoke-RestMethod -Uri "http://127.0.0.1:$GiteaPort/api/v1/version" -TimeoutSec 3 -ErrorAction Stop
-            if ($verResp.version) {
+            $healthResp = Invoke-RestMethod -Uri "http://127.0.0.1:$GiteaPort/api/healthz" -TimeoutSec 3 -ErrorAction Stop
+            if ($healthResp.status -eq "pass") {
                 $apiOnline = $true
                 break
             }
@@ -612,7 +612,7 @@ if (-not $SkipGiteaService) {
         }
     }
     if (-not $apiOnline) {
-        throw "Verification failed: Gitea service is running but HTTP API at http://127.0.0.1:$GiteaPort/api/v1/version did not respond."
+        throw "Verification failed: Gitea service is running but HTTP health check at http://127.0.0.1:$GiteaPort/api/healthz did not pass."
     }
 }
 
