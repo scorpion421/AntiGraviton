@@ -18,6 +18,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added `gitea-service/scripts/backup-gitea.ps1` and optional `-BackupTargetPath` / `-BackupTime` parameters in `install-antigraviton.ps1` to register a daily `03:00` online `gitea.exe dump` Windows Scheduled Task (`Antigravity-Gitea-Backup`) with automated archive retention pruning.
   - Added a strict Step 5 verification gate in `install-antigraviton.ps1` that verifies `customizations.db`, the `gitea` Windows service state, and the local HTTP REST API before outputting the completion banner.
 
+### Security
+- **Token-free `.git/config` remotes, transient in-memory Git auth, and automatic credential scrubbing (`skillsdb/memory/gitea_config.py`, `skillsdb/cli.py`)**:
+  - Eliminated plaintext Gitea API tokens from `.git/config` remote URLs across all workspaces (`http://localhost:3000/<user>/<repo>.git` instead of `http://<user>:<token>@...`).
+  - Added `_get_git_auth_cmd_prefix()` to pass transient `http.extraHeader=Authorization: Basic <base64>` headers during `skillsdb` Git pushes and tag syncs without writing credentials to disk.
+  - Added `skillsdb gitea-credential-helper` and `register_git_credential_helper()` so manual `git push` / `git pull` terminal operations authenticate dynamically from `~/.gemini/database/customizations.db`.
+  - Added `_scrub_workspace_git_config_credentials()` to automatically migrate and strip legacy embedded tokens from existing `.git/config` files.
+
+### Changed
+- **Modular decomposition of Gitea synchronization engine (`skillsdb/memory/gitea_config.py`, `skillsdb/memory/gitea_service.py`, `skillsdb/memory/gitea_releases.py`, `skillsdb/memory/gitea_sync.py`, `build.py`)**:
+  - Split the 1,870-line `gitea_sync.py` monolith into four focused modules (`gitea_config.py`, `gitea_service.py`, `gitea_releases.py`, and `gitea_sync.py`) with full backward-compatible symbol re-exports and single-file bundling in `build.py`.
+
 ### Fixed
 - **PowerShell 5.1 service installer parameter syntax, secondary drive NTFS ACLs, and native download speed (`gitea-service/scripts/deploy-gitea.ps1`, `install-antigraviton.ps1`, `deploy.py`)**:
   - Wrapped `(Split-Path -Parent $PSScriptRoot)` in parentheses inside `deploy-gitea.ps1` and `backup-gitea.ps1` `param(...)` blocks to prevent `MissingEndParenthesisInFunctionParameterList` parser errors under `powershell.exe -File`.
