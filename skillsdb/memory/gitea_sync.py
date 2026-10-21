@@ -612,7 +612,7 @@ def save_code_commit(
                     head_ts = int(log_lines[1].strip()) if len(log_lines) >= 2 and log_lines[1].strip().isdigit() else 0
                     head_body = "\n".join(log_lines[2:]).strip() if len(log_lines) > 2 else ""
                     age_sec = abs(time.time() - head_ts)
-                    if head_subj.startswith("[SkillsDB] ") and age_sec <= 120:
+                    if head_subj.startswith(("[SkillsDB]", "Milestone:", "Synchronize workspace")) and age_sec <= 120:
                         existing_trailers = [
                             tl for tl in head_body.splitlines()
                             if re.match(r"^(Conversation-ID|Snapshot-ID|Next-Steps):\s+", tl)
