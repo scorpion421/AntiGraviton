@@ -21,7 +21,7 @@ from ..config import (
     DEFAULT_REMOTE_SHARE,
     estimate_tokens,
 )
-from ..core.db import get_connection, init_db
+from ..core.db import get_connection, init_db, managed_connection
 from ..core.detector import detect_model_tier
 from ..core.concurrency import fetch_single_skill
 from ..memory.project_memory import find_project_root
@@ -102,45 +102,48 @@ def check_update(quiet: bool = False) -> dict:
 
 
 def merge_upstream_database(local_db_path: Path, upstream_db_path: Path) -> dict:
-    """Non-destructive differential merge preserving all user-learned rules."""
-    conn = sqlite3.connect(local_db_path)
-    cur = conn.cursor()
+    """Non-destructive differential merge preserving all user-learned rules and runtime configuration."""
+    with managed_connection(local_db_path) as conn:
+        cur = conn.cursor()
 
-    cur.execute("SELECT COUNT(*) FROM rules WHERE category = 'learned';")
-    learned_before = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM rules WHERE category = 'learned';")
+        learned_before = cur.fetchone()[0]
 
-    cur.execute(f"ATTACH DATABASE ? AS upstream;", (str(upstream_db_path),))
+        cur.execute("ATTACH DATABASE ? AS upstream;", (str(upstream_db_path),))
 
-    cur.execute("""
-    INSERT OR REPLACE INTO skills (name, plugin_name, category, is_active, description, content, token_estimate, updated_at)
-    SELECT name, plugin_name, category, is_active, description, content, token_estimate, updated_at
-    FROM upstream.skills;
-    """)
-    merged_skills = cur.rowcount
+        cur.execute("""
+        INSERT OR REPLACE INTO skills (name, plugin_name, category, is_active, description, content, token_estimate, updated_at)
+        SELECT name, plugin_name, category, is_active, description, content, token_estimate, updated_at
+        FROM upstream.skills;
+        """)
+        merged_skills = cur.rowcount
 
-    cur.execute("""
-    INSERT OR REPLACE INTO rules (key, name, category, scope, is_active, summary, content, token_estimate, updated_at)
-    SELECT key, name, category, scope, is_active, summary, content, token_estimate, updated_at
-    FROM upstream.rules
-    WHERE category != 'learned';
-    """)
-    merged_rules = cur.rowcount
+        cur.execute("""
+        INSERT OR REPLACE INTO rules (key, name, category, scope, is_active, summary, content, token_estimate, updated_at)
+        SELECT key, name, category, scope, is_active, summary, content, token_estimate, updated_at
+        FROM upstream.rules
+        WHERE category != 'learned';
+        """)
+        merged_rules = cur.rowcount
 
-    cur.execute("INSERT INTO rules_fts(rules_fts) VALUES ('rebuild');")
-    cur.execute("INSERT INTO skills_fts(skills_fts) VALUES ('rebuild');")
+        cur.execute("INSERT INTO rules_fts(rules_fts) VALUES ('rebuild');")
+        cur.execute("INSERT INTO skills_fts(skills_fts) VALUES ('rebuild');")
 
-    conn.commit()
-    cur.execute("DETACH DATABASE upstream;")
+        conn.commit()
+        cur.execute("DETACH DATABASE upstream;")
 
-    cur.execute("SELECT COUNT(*) FROM rules WHERE category = 'learned';")
-    learned_after = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM rules WHERE category = 'learned';")
+        learned_after = cur.fetchone()[0]
 
-    if learned_after < learned_before:
-        conn.rollback()
-        conn.close()
-        raise RuntimeError("Differential merge aborted: User-learned rules count dropped! Rolled back.")
+        if learned_after < learned_before:
+            conn.rollback()
+            raise RuntimeError("Differential merge aborted: User-learned rules count dropped! Rolled back.")
 
-    conn.close()
+        try:
+            conn.execute("PRAGMA wal_checkpoint(PASSIVE);")
+        except sqlite3.Error:
+            pass
+
     return {
         "merged_skills": merged_skills,
         "merged_rules": merged_rules,
@@ -450,15 +453,14 @@ def doctor(conn: sqlite3.Connection):
     proj_db = proj_root / ".agents" / "memory.db"
     if proj_db.exists():
         try:
-            pconn = sqlite3.connect(proj_db)
-            pcur = pconn.cursor()
-            pcur.execute("SELECT COUNT(*) FROM session_snapshots;")
-            snaps = pcur.fetchone()[0]
-            pcur.execute("SELECT COUNT(*) FROM project_decisions;")
-            decs = pcur.fetchone()[0]
-            pcur.execute("SELECT COUNT(*) FROM project_facts;")
-            facts = pcur.fetchone()[0]
-            pconn.close()
+            with managed_connection(proj_db, is_project_db=True) as pconn:
+                pcur = pconn.cursor()
+                pcur.execute("SELECT COUNT(*) FROM session_snapshots;")
+                snaps = pcur.fetchone()[0]
+                pcur.execute("SELECT COUNT(*) FROM project_decisions;")
+                decs = pcur.fetchone()[0]
+                pcur.execute("SELECT COUNT(*) FROM project_facts;")
+                facts = pcur.fetchone()[0]
             print(f"[OK] Project Memory: Active in {proj_root} ({facts} facts, {decs} decisions, {snaps} snapshots)")
         except Exception as e:
             print(f"[WARN] Project Memory DB present but error reading: {e}")

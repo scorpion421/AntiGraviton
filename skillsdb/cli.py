@@ -253,8 +253,11 @@ def build_parser() -> argparse.ArgumentParser:
     mem_init_parser.add_argument("--project", default=None, help="Project root directory (optional)")
 
     mem_dec_parser = subparsers.add_parser("mem-save-decision", help="Save an architectural or setup decision")
-    mem_dec_parser.add_argument("title", help="Decision title")
-    mem_dec_parser.add_argument("content", help="Decision content/rationale")
+    mem_dec_parser.add_argument("title", nargs="?", default=None, help="Decision title")
+    mem_dec_parser.add_argument("content", nargs="?", default=None, help="Decision content/rationale")
+    mem_dec_parser.add_argument("--title", "--topic", dest="opt_title", default=None, help="Decision title (flag alias)")
+    mem_dec_parser.add_argument("--content", "--decision", dest="opt_content", default=None, help="Decision content (flag alias)")
+    mem_dec_parser.add_argument("--rationale", "--context", "--reason", dest="rationale", default=None, help="Optional rationale or context to append")
     mem_dec_parser.add_argument("--category", default="architecture", help="Category (default: architecture)")
     mem_dec_parser.add_argument("--project", default=None, help="Project root directory (optional)")
 
@@ -269,7 +272,7 @@ def build_parser() -> argparse.ArgumentParser:
     mem_fact_parser = subparsers.add_parser("mem-save-fact", help="Save a key-value fact or configuration")
     mem_fact_parser.add_argument("key", help="Fact key")
     mem_fact_parser.add_argument("value", help="Fact value")
-    mem_fact_parser.add_argument("--reason", default=None, help="Reason if updating/superseding an existing fact")
+    mem_fact_parser.add_argument("--reason", "--rationale", "--context", dest="reason", default=None, help="Reason if updating/superseding an existing fact")
     mem_fact_parser.add_argument("--project", default=None, help="Project root directory (optional)")
 
     mem_dep_fact_parser = subparsers.add_parser("mem-deprecate-fact", help="Tombstone a fact so it no longer pollutes LLM context")
@@ -381,6 +384,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_gitea_cfg.add_argument("--url", default=None, help="Update Gitea server URL")
     p_gitea_cfg.add_argument("--user", default=None, help="Update Gitea repository owner")
     p_gitea_cfg.add_argument("--token", default=None, help="Update Gitea API token")
+    p_gitea_cfg.add_argument("--service", default=None, help="Update Gitea service name (default: gitea)")
     p_gitea_cfg.add_argument("--workspaces-root", default=None, help="Update primary workspaces root directory (auto-aligns remote_share_path)")
     p_gitea_cfg.add_argument("--remote-share", default=None, help="Update remote customizations.db share path")
     p_gitea_cfg.add_argument("--auto-detect", action="store_true", help="Automatically scan drives and registered projects to heal paths")
@@ -620,13 +624,14 @@ def main(argv: list[str] = None):
             sys.exit(2)
         return
     elif args.command == "gitea-config":
-        if any(getattr(args, k, None) is not None for k in ("url", "user", "token", "workspaces_root", "remote_share")):
+        if any(getattr(args, k, None) is not None for k in ("url", "user", "token", "workspaces_root", "remote_share", "service")):
             set_gitea_config(
                 url=getattr(args, "url", None),
                 user=getattr(args, "user", None),
                 token=getattr(args, "token", None),
                 workspaces_root=getattr(args, "workspaces_root", None),
                 remote_share=getattr(args, "remote_share", None),
+                service=getattr(args, "service", None),
             )
         gitea_config_summary(auto_detect=getattr(args, "auto_detect", False))
         return
@@ -656,110 +661,121 @@ def main(argv: list[str] = None):
             return
 
         pconn = get_project_connection(proj_root)
-        init_project_db(pconn)
-
-        if args.command == "mem-save-decision":
-            mem_save_decision(pconn, args.title, args.content, args.category)
-        elif args.command == "mem-save-snapshot":
-            mem_save_snapshot(
-                pconn,
-                args.summary,
-                conversation_id=args.cid,
-                next_steps=args.next_steps,
-                files_touched=args.files,
-                auto_commit=not getattr(args, "no_commit", False),
-            )
-        elif args.command == "mem-save-fact":
-            mem_save_fact(pconn, args.key, args.value, reason=args.reason)
-        elif args.command == "mem-deprecate-fact":
-            mem_deprecate_fact(pconn, args.key, reason=args.reason)
-        elif args.command == "mem-fact-history":
-            mem_fact_history(pconn, key=args.key)
-        elif args.command == "mem-reconcile":
-            mem_reconcile(pconn)
-        elif args.command == "mem-task-add":
-            mem_task_add(pconn, args.title, description=args.desc, priority=args.priority, status=args.status)
-        elif args.command == "mem-task-update":
-            mem_task_update(pconn, args.id, status=args.status, priority=args.priority, title=args.title, description=args.desc)
-        elif args.command == "mem-task-list":
-            mem_task_list(pconn, status=args.status, as_json=args.json)
-        elif args.command == "mem-task-clear":
-            mem_task_clear(pconn, only_completed=not getattr(args, "all", False))
-        elif args.command == "mem-compact":
-            mem_compact(pconn, summary=args.summary, next_steps=args.next_steps, archive_completed=not getattr(args, "keep_completed", False), project_root=proj_root)
-        elif args.command == "mem-get-context":
-            mem_get_context(pconn, project_root=proj_root)
-        elif args.command == "mem-search":
-            mem_search(pconn, args.query)
-        elif args.command == "mem-prune":
-            mem_prune(pconn, max_snapshots=args.max_snapshots, max_age_days=args.max_age)
-
-        stop_all_writer_queues()
-        pconn.close()
+        try:
+            if args.command == "mem-save-decision":
+                dec_title = getattr(args, "opt_title", None) or getattr(args, "title", None)
+                dec_content = getattr(args, "opt_content", None) or getattr(args, "content", None)
+                if not dec_title or not dec_content:
+                    print("Error: mem-save-decision requires both title and content (positional or via --title/--content).")
+                    sys.exit(1)
+                mem_save_decision(
+                    pconn,
+                    dec_title,
+                    dec_content,
+                    args.category,
+                    rationale=getattr(args, "rationale", None),
+                )
+            elif args.command == "mem-save-snapshot":
+                mem_save_snapshot(
+                    pconn,
+                    args.summary,
+                    conversation_id=args.cid,
+                    next_steps=args.next_steps,
+                    files_touched=args.files,
+                    auto_commit=not getattr(args, "no_commit", False),
+                )
+            elif args.command == "mem-save-fact":
+                mem_save_fact(pconn, args.key, args.value, reason=args.reason)
+            elif args.command == "mem-deprecate-fact":
+                mem_deprecate_fact(pconn, args.key, reason=args.reason)
+            elif args.command == "mem-fact-history":
+                mem_fact_history(pconn, key=args.key)
+            elif args.command == "mem-reconcile":
+                mem_reconcile(pconn)
+            elif args.command == "mem-task-add":
+                mem_task_add(pconn, args.title, description=args.desc, priority=args.priority, status=args.status)
+            elif args.command == "mem-task-update":
+                mem_task_update(pconn, args.id, status=args.status, priority=args.priority, title=args.title, description=args.desc)
+            elif args.command == "mem-task-list":
+                mem_task_list(pconn, status=args.status, as_json=args.json)
+            elif args.command == "mem-task-clear":
+                mem_task_clear(pconn, only_completed=not getattr(args, "all", False))
+            elif args.command == "mem-compact":
+                mem_compact(pconn, summary=args.summary, next_steps=args.next_steps, archive_completed=not getattr(args, "keep_completed", False), project_root=proj_root)
+            elif args.command == "mem-get-context":
+                mem_get_context(pconn, project_root=proj_root)
+            elif args.command == "mem-search":
+                mem_search(pconn, args.query)
+            elif args.command == "mem-prune":
+                mem_prune(pconn, max_snapshots=args.max_snapshots, max_age_days=args.max_age)
+        finally:
+            stop_all_writer_queues()
+            pconn.close()
         return
 
     # Route central DB commands
     conn = get_connection(DB_PATH)
-    init_db(conn)
-    init_synonyms(conn)
+    try:
+        init_db(conn)
+        init_synonyms(conn)
 
-    if args.command == "import-all" or not args.command:
-        import_from_plugins(conn)
-    elif args.command == "get-active-rules":
-        get_active_rules(conn)
-    elif args.command == "get-rule":
-        get_rule(conn, args.key)
-    elif args.command == "get-skill":
-        get_skill(conn, args.name, summary=getattr(args, "summary", False), section=getattr(args, "section", None))
-    elif args.command == "learn-rule":
-        learn_rule(conn, args.key, args.name, args.content, category=args.category, scope=args.scope)
-    elif args.command == "doctor":
-        doctor(conn)
-    elif args.command == "fix-utf8":
-        fix_utf8(check_only=getattr(args, "check", False))
-    elif args.command == "check-update":
-        check_update()
-    elif args.command == "update":
-        if getattr(args, "check", False):
+        if args.command == "import-all" or not args.command:
+            import_from_plugins(conn)
+        elif args.command == "get-active-rules":
+            get_active_rules(conn)
+        elif args.command == "get-rule":
+            get_rule(conn, args.key)
+        elif args.command == "get-skill":
+            get_skill(conn, args.name, summary=getattr(args, "summary", False), section=getattr(args, "section", None))
+        elif args.command == "learn-rule":
+            learn_rule(conn, args.key, args.name, args.content, category=args.category, scope=args.scope)
+        elif args.command == "doctor":
+            doctor(conn)
+        elif args.command == "fix-utf8":
+            fix_utf8(check_only=getattr(args, "check", False))
+        elif args.command == "check-update":
             check_update()
-        else:
-            update_plugin(force=getattr(args, "force", False))
-    elif args.command == "search":
-        search(conn, args.query)
-    elif args.command == "suggest":
-        suggest_skills(conn, args.task, as_json=args.json, cwd_path=Path(args.cwd) if getattr(args, "cwd", None) else None)
-    elif args.command == "import-file":
-        import_file(conn, args.file_path)
-    elif args.command == "remove":
-        remove_item(conn, args.type, args.name)
-    elif args.command == "sync":
-        sync_database(conn, args.direction, args.remote)
-    elif args.command == "list":
-        list_all(conn)
-    elif args.command == "stats":
-        stats(conn, show_savings=getattr(args, "savings", False))
-    elif args.command == "export-skill":
-        export_skill(conn, args.name, args.target)
-    elif args.command == "profile":
-        if args.action == "set":
-            if not args.tier:
-                print("Error: Specify tier to set (ultra, standard, lean, local, offline). Example: skillsdb profile set local")
+        elif args.command == "update":
+            if getattr(args, "check", False):
+                check_update()
             else:
-                set_profile(args.tier, db_path=DB_PATH)
-        elif args.action == "auto":
-            set_profile("auto", db_path=DB_PATH)
-        else:
-            get_profile()
-    elif args.command == "get-skills":
-        get_skills_parallel(args.names, max_workers=args.workers, as_json=args.json, summary=args.summary, db_path=DB_PATH)
-    elif args.command == "search-multi":
-        search_multi_parallel(args.queries, max_workers=args.workers, limit_per_query=args.limit, as_json=args.json, db_path=DB_PATH)
-    elif args.command == "get-cluster":
-        get_cluster(args.domain, max_workers=args.workers, as_json=args.json, summary=args.summary, db_path=DB_PATH)
-    elif args.command == "benchmark-concurrency":
-        benchmark_concurrency(num_queries=args.queries, max_workers=args.workers, db_path=DB_PATH)
-
-    conn.close()
+                update_plugin(force=getattr(args, "force", False))
+        elif args.command == "search":
+            search(conn, args.query)
+        elif args.command == "suggest":
+            suggest_skills(conn, args.task, as_json=args.json, cwd_path=Path(args.cwd) if getattr(args, "cwd", None) else None)
+        elif args.command == "import-file":
+            import_file(conn, args.file_path)
+        elif args.command == "remove":
+            remove_item(conn, args.type, args.name)
+        elif args.command == "sync":
+            sync_database(conn, args.direction, args.remote)
+        elif args.command == "list":
+            list_all(conn)
+        elif args.command == "stats":
+            stats(conn, show_savings=getattr(args, "savings", False))
+        elif args.command == "export-skill":
+            export_skill(conn, args.name, args.target)
+        elif args.command == "profile":
+            if args.action == "set":
+                if not args.tier:
+                    print("Error: Specify tier to set (ultra, standard, lean, local, offline). Example: skillsdb profile set local")
+                else:
+                    set_profile(args.tier, db_path=DB_PATH)
+            elif args.action == "auto":
+                set_profile("auto", db_path=DB_PATH)
+            else:
+                get_profile()
+        elif args.command == "get-skills":
+            get_skills_parallel(args.names, max_workers=args.workers, as_json=args.json, summary=args.summary, db_path=DB_PATH)
+        elif args.command == "search-multi":
+            search_multi_parallel(args.queries, max_workers=args.workers, limit_per_query=args.limit, as_json=args.json, db_path=DB_PATH)
+        elif args.command == "get-cluster":
+            get_cluster(args.domain, max_workers=args.workers, as_json=args.json, summary=args.summary, db_path=DB_PATH)
+        elif args.command == "benchmark-concurrency":
+            benchmark_concurrency(num_queries=args.queries, max_workers=args.workers, db_path=DB_PATH)
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":

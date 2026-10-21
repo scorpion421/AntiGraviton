@@ -1,15 +1,19 @@
 """
 Multi-agent asynchronous SQLite writer queue and append-only journal buffer.
-Eliminates database lock contention during concurrent subagent swarming.
+Eliminates database lock contention during concurrent subagent swarming with
+deterministic queue draining, exponential lock backoff, and atexit cleanup.
 """
 
 import os
 import json
 import time
 import queue
+import random
+import atexit
 import sqlite3
 import threading
 from pathlib import Path
+from ..core.db import get_connection
 
 # Map of db_path -> WriterQueue instance
 _QUEUES: dict[str, "WriterQueue"] = {}
@@ -23,29 +27,49 @@ class WriterQueue:
         self.db_path = Path(db_path)
         self.queue = queue.Queue()
         self._stop_event = threading.Event()
-        self._thread = threading.Thread(target=self._worker, daemon=True, name=f"WriterQueue-{self.db_path.name}")
+        self._thread = threading.Thread(
+            target=self._worker,
+            daemon=True,
+            name=f"WriterQueue-{self.db_path.name}",
+        )
         self._thread.start()
 
-    def execute_write(self, write_func, timeout: float = 10.0):
+    def execute_write(self, write_func, timeout: float = 15.0):
         """
         Submits a write callable: write_func(cursor) to the queue and waits for completion.
-        Raises any exception raised by write_func.
+        Retries transient SQLite busy/lock states automatically and raises any fatal exception.
         """
         result_holder = []
         done_event = threading.Event()
 
-        def task(conn):
+        def task(conn: sqlite3.Connection):
+            max_retries = 4
             try:
-                cursor = conn.cursor()
-                res = write_func(cursor)
-                conn.commit()
-                result_holder.append((True, res))
-            except Exception as e:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-                result_holder.append((False, e))
+                for attempt in range(max_retries + 1):
+                    try:
+                        cursor = conn.cursor()
+                        res = write_func(cursor)
+                        conn.commit()
+                        result_holder.append((True, res))
+                        break
+                    except sqlite3.OperationalError as op_err:
+                        try:
+                            conn.rollback()
+                        except sqlite3.Error:
+                            pass
+                        msg = str(op_err).lower()
+                        if ("locked" in msg or "busy" in msg) and attempt < max_retries:
+                            time.sleep(0.04 * (2 ** attempt) + random.uniform(0.0, 0.02))
+                            continue
+                        result_holder.append((False, op_err))
+                        break
+                    except Exception as e:
+                        try:
+                            conn.rollback()
+                        except sqlite3.Error:
+                            pass
+                        result_holder.append((False, e))
+                        break
             finally:
                 done_event.set()
 
@@ -59,31 +83,36 @@ class WriterQueue:
         return val
 
     def _worker(self):
-        conn = sqlite3.connect(self.db_path, timeout=30.0)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode = WAL;")
-        conn.execute("PRAGMA busy_timeout = 5000;")
-        conn.execute("PRAGMA synchronous = NORMAL;")
+        conn = get_connection(self.db_path, is_project_db=True)
 
-        while not self._stop_event.is_set():
+        while not self._stop_event.is_set() or not self.queue.empty():
             try:
-                task = self.queue.get(timeout=0.2)
-                task(conn)
-                self.queue.task_done()
+                task = self.queue.get(timeout=0.15)
+                try:
+                    task(conn)
+                finally:
+                    self.queue.task_done()
             except queue.Empty:
                 continue
             except Exception:
                 pass
 
         try:
-            conn.close()
-        except Exception:
+            if conn.in_transaction:
+                conn.commit()
+            conn.execute("PRAGMA wal_checkpoint(PASSIVE);")
+        except sqlite3.Error:
             pass
+        finally:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
 
     def stop(self):
         self._stop_event.set()
         if self._thread.is_alive():
-            self._thread.join(timeout=2.0)
+            self._thread.join(timeout=3.0)
 
 
 def get_writer_queue(db_path: Path) -> WriterQueue:
@@ -100,19 +129,24 @@ def stop_writer_queue(db_path: Path):
     key = os.path.abspath(str(db_path))
     with _LOCK:
         wq = _QUEUES.pop(key, None)
-        if wq:
-            wq.stop()
+    if wq:
+        wq.stop()
 
 
 def stop_all_writer_queues():
-    """Stops all active WriterQueues and joins worker threads."""
+    """Stops all active WriterQueues, drains pending writes, and joins worker threads."""
     with _LOCK:
-        for wq in list(_QUEUES.values()):
-            try:
-                wq.stop()
-            except Exception:
-                pass
+        active_queues = list(_QUEUES.values())
         _QUEUES.clear()
+    for wq in active_queues:
+        try:
+            wq.stop()
+        except Exception:
+            pass
+
+
+# Guarantee clean SQLite connection shutdown and WAL checkpoint on process exit
+atexit.register(stop_all_writer_queues)
 
 
 def write_journal_entry(project_root: Path, entry_type: str, data: dict, worker_id: str = None) -> Path:
@@ -128,14 +162,14 @@ def write_journal_entry(project_root: Path, entry_type: str, data: dict, worker_
     record = {
         "timestamp": time.time(),
         "type": entry_type,
-        "data": data
+        "data": data,
     }
     with open(journal_file, "a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
     return journal_file
 
 
-def flush_journals(project_root: Path, conn: sqlite3.Connection):
+def flush_journals(project_root: Path, conn: sqlite3.Connection) -> int:
     """Atomically consolidates all pending journal files into memory.db and removes flushed files."""
     journal_dir = project_root / ".agents" / "journal"
     if not journal_dir.exists():
@@ -158,20 +192,33 @@ def flush_journals(project_root: Path, conn: sqlite3.Connection):
                     etype = rec.get("type")
                     data = rec.get("data", {})
                     if etype == "fact":
-                        cursor.execute("""
-                        INSERT OR REPLACE INTO project_facts (key, value, updated_at)
-                        VALUES (?, ?, ?);
-                        """, (data.get("key"), data.get("value"), data.get("updated_at", "")))
+                        cursor.execute(
+                            """
+                            INSERT OR REPLACE INTO project_facts (key, value, updated_at)
+                            VALUES (?, ?, ?);
+                            """,
+                            (data.get("key"), data.get("value"), data.get("updated_at", "")),
+                        )
                         flushed_count += 1
                     elif etype == "decision":
-                        cursor.execute("""
-                        INSERT INTO project_decisions (title, content, category, is_active, created_at, updated_at)
-                        VALUES (?, ?, ?, 1, ?, ?);
-                        """, (data.get("title"), data.get("content"), data.get("category", "architecture"), data.get("now", ""), data.get("now", "")))
+                        cursor.execute(
+                            """
+                            INSERT INTO project_decisions (title, content, category, is_active, created_at, updated_at)
+                            VALUES (?, ?, ?, 1, ?, ?);
+                            """,
+                            (
+                                data.get("title"),
+                                data.get("content"),
+                                data.get("category", "architecture"),
+                                data.get("now", ""),
+                                data.get("now", ""),
+                            ),
+                        )
                         flushed_count += 1
             jf.unlink(missing_ok=True)
         except Exception:
             pass
 
-    conn.commit()
+    if flushed_count > 0:
+        conn.commit()
     return flushed_count

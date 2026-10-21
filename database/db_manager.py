@@ -93,28 +93,149 @@ def estimate_tokens(text: str) -> int:
 # =====================================================================
 # SECTION: skillsdb.core.db
 # =====================================================================
-def get_connection(db_path: Path = DB_PATH) -> sqlite3.Connection:
-    """Primary connection configured with SQLite WAL mode and busy timeout."""
-    conn = sqlite3.connect(db_path, timeout=30.0)
+import random
+import contextlib
+from typing import Iterator, Optional, Set, Dict, Any
+
+# Process-local cache of verified database file paths to avoid redundant DDL checks
+_VERIFIED_CENTRAL_DBS: Set[str] = set()
+
+_REQUIRED_CENTRAL_TABLES = frozenset({
+    "rules",
+    "skills",
+    "runtime_config",
+    "synonym_synapses",
+    "rules_fts",
+    "skills_fts",
+    "synonym_fts",
+})
+
+
+def _apply_pragmas(conn: sqlite3.Connection, is_project_db: bool = False) -> None:
+    """Applies enterprise SQLite pragmas for concurrent WAL readers, memory-mapped I/O, and lock resilience."""
+    try:
+        conn.execute("PRAGMA busy_timeout = 30000;")
+    except sqlite3.Error:
+        pass
+    try:
+        conn.execute("PRAGMA journal_mode = WAL;")
+    except sqlite3.Error:
+        pass
+    try:
+        conn.execute("PRAGMA synchronous = NORMAL;")
+        conn.execute("PRAGMA temp_store = MEMORY;")
+        conn.execute("PRAGMA mmap_size = 67108864;")
+        conn.execute("PRAGMA foreign_keys = ON;")
+        if is_project_db:
+            conn.execute("PRAGMA auto_vacuum = INCREMENTAL;")
+    except sqlite3.Error:
+        pass
+
+
+def get_connection(db_path: Path = DB_PATH, is_project_db: bool = False) -> sqlite3.Connection:
+    """Primary SQLite connection configured with WAL mode, 64MB mmap, and 30s busy timeout."""
+    target = Path(db_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(target), timeout=30.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode = WAL;")
-    conn.execute("PRAGMA busy_timeout = 5000;")
-    conn.execute("PRAGMA synchronous = NORMAL;")
+    _apply_pragmas(conn, is_project_db=is_project_db)
     return conn
 
 
 def get_thread_connection(db_path: Path = DB_PATH) -> sqlite3.Connection:
     """Thread-safe SQLite connection configured for concurrent readers under WAL mode."""
-    conn = sqlite3.connect(db_path, timeout=30.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode = WAL;")
-    conn.execute("PRAGMA busy_timeout = 5000;")
-    conn.execute("PRAGMA synchronous = NORMAL;")
-    return conn
+    return get_connection(db_path=db_path, is_project_db=False)
 
 
-def init_db(conn: sqlite3.Connection):
-    """Initializes tables and FTS5 virtual tables in customizations.db."""
+@contextlib.contextmanager
+def managed_connection(
+    db_path: Path = DB_PATH,
+    init_schema: bool = False,
+    is_project_db: bool = False,
+) -> Iterator[sqlite3.Connection]:
+    """
+    Deterministic SQLite context manager that commits pending transactions on success,
+    rolls back on exception, and always closes the underlying file handle on exit.
+    """
+    conn = get_connection(db_path=db_path, is_project_db=is_project_db)
+    if init_schema and not is_project_db:
+        init_db(conn)
+    try:
+        yield conn
+        if conn.in_transaction:
+            conn.commit()
+    except Exception:
+        try:
+            if conn.in_transaction:
+                conn.rollback()
+        except sqlite3.Error:
+            pass
+        raise
+    finally:
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
+
+
+def execute_with_retry(
+    target: Any,
+    sql: str,
+    params: tuple = (),
+    max_retries: int = 5,
+    base_delay: float = 0.04,
+):
+    """Executes a SQL statement with exponential backoff + jitter on transient SQLite lock errors."""
+    last_err: Optional[Exception] = None
+    for attempt in range(max_retries + 1):
+        try:
+            return target.execute(sql, params)
+        except sqlite3.OperationalError as err:
+            msg = str(err).lower()
+            if ("locked" in msg or "busy" in msg) and attempt < max_retries:
+                last_err = err
+                sleep_sec = base_delay * (2 ** attempt) + random.uniform(0.0, 0.02)
+                time.sleep(sleep_sec)
+                continue
+            raise
+    if last_err:
+        raise last_err
+
+
+def _central_schema_ready(conn: sqlite3.Connection) -> bool:
+    """Checks whether all required central tables exist without acquiring a write lock."""
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND name IN "
+            "('rules', 'skills', 'runtime_config', 'synonym_synapses', 'rules_fts', 'skills_fts', 'synonym_fts');"
+        )
+        found = {row[0] for row in cur.fetchall()}
+        return _REQUIRED_CENTRAL_TABLES.issubset(found)
+    except sqlite3.Error:
+        return False
+
+
+def init_db(conn: sqlite3.Connection) -> None:
+    """
+    Ensures tables and FTS5 virtual tables exist in customizations.db.
+    Performs a fast read-only check first so read invocations acquire zero write locks.
+    """
+    db_key = None
+    try:
+        row = conn.execute("PRAGMA database_list;").fetchone()
+        if row and row[2]:
+            db_key = f"{os.path.abspath(row[2])}:{os.path.getsize(row[2]) if os.path.exists(row[2]) else 0}"
+            if db_key in _VERIFIED_CENTRAL_DBS:
+                return
+    except sqlite3.Error:
+        pass
+
+    if _central_schema_ready(conn):
+        if db_key:
+            _VERIFIED_CENTRAL_DBS.add(db_key)
+        return
+
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -198,6 +319,21 @@ def init_db(conn: sqlite3.Connection):
     """)
 
     conn.commit()
+    if db_key:
+        _VERIFIED_CENTRAL_DBS.add(db_key)
+
+
+def checkpoint_wal(db_path: Path = DB_PATH, mode: str = "PASSIVE") -> bool:
+    """Safely checkpoints the WAL file for the specified SQLite database."""
+    if not db_path or not Path(db_path).exists():
+        return False
+    mode_clean = mode.upper() if mode.upper() in ("PASSIVE", "FULL", "RESTART", "TRUNCATE") else "PASSIVE"
+    try:
+        with managed_connection(db_path) as conn:
+            conn.execute(f"PRAGMA wal_checkpoint({mode_clean});")
+        return True
+    except sqlite3.Error:
+        return False
 
 
 # =====================================================================
@@ -1286,6 +1422,9 @@ def format_fim_block(fim_dict: Dict[str, Any]) -> str:
 # =====================================================================
 # SECTION: skillsdb.memory.writer_queue
 # =====================================================================
+import random
+import atexit
+
 # Map of db_path -> WriterQueue instance
 _QUEUES: dict[str, "WriterQueue"] = {}
 _LOCK = threading.Lock()
@@ -1298,29 +1437,49 @@ class WriterQueue:
         self.db_path = Path(db_path)
         self.queue = queue.Queue()
         self._stop_event = threading.Event()
-        self._thread = threading.Thread(target=self._worker, daemon=True, name=f"WriterQueue-{self.db_path.name}")
+        self._thread = threading.Thread(
+            target=self._worker,
+            daemon=True,
+            name=f"WriterQueue-{self.db_path.name}",
+        )
         self._thread.start()
 
-    def execute_write(self, write_func, timeout: float = 10.0):
+    def execute_write(self, write_func, timeout: float = 15.0):
         """
         Submits a write callable: write_func(cursor) to the queue and waits for completion.
-        Raises any exception raised by write_func.
+        Retries transient SQLite busy/lock states automatically and raises any fatal exception.
         """
         result_holder = []
         done_event = threading.Event()
 
-        def task(conn):
+        def task(conn: sqlite3.Connection):
+            max_retries = 4
             try:
-                cursor = conn.cursor()
-                res = write_func(cursor)
-                conn.commit()
-                result_holder.append((True, res))
-            except Exception as e:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-                result_holder.append((False, e))
+                for attempt in range(max_retries + 1):
+                    try:
+                        cursor = conn.cursor()
+                        res = write_func(cursor)
+                        conn.commit()
+                        result_holder.append((True, res))
+                        break
+                    except sqlite3.OperationalError as op_err:
+                        try:
+                            conn.rollback()
+                        except sqlite3.Error:
+                            pass
+                        msg = str(op_err).lower()
+                        if ("locked" in msg or "busy" in msg) and attempt < max_retries:
+                            time.sleep(0.04 * (2 ** attempt) + random.uniform(0.0, 0.02))
+                            continue
+                        result_holder.append((False, op_err))
+                        break
+                    except Exception as e:
+                        try:
+                            conn.rollback()
+                        except sqlite3.Error:
+                            pass
+                        result_holder.append((False, e))
+                        break
             finally:
                 done_event.set()
 
@@ -1334,31 +1493,36 @@ class WriterQueue:
         return val
 
     def _worker(self):
-        conn = sqlite3.connect(self.db_path, timeout=30.0)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode = WAL;")
-        conn.execute("PRAGMA busy_timeout = 5000;")
-        conn.execute("PRAGMA synchronous = NORMAL;")
+        conn = get_connection(self.db_path, is_project_db=True)
 
-        while not self._stop_event.is_set():
+        while not self._stop_event.is_set() or not self.queue.empty():
             try:
-                task = self.queue.get(timeout=0.2)
-                task(conn)
-                self.queue.task_done()
+                task = self.queue.get(timeout=0.15)
+                try:
+                    task(conn)
+                finally:
+                    self.queue.task_done()
             except queue.Empty:
                 continue
             except Exception:
                 pass
 
         try:
-            conn.close()
-        except Exception:
+            if conn.in_transaction:
+                conn.commit()
+            conn.execute("PRAGMA wal_checkpoint(PASSIVE);")
+        except sqlite3.Error:
             pass
+        finally:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
 
     def stop(self):
         self._stop_event.set()
         if self._thread.is_alive():
-            self._thread.join(timeout=2.0)
+            self._thread.join(timeout=3.0)
 
 
 def get_writer_queue(db_path: Path) -> WriterQueue:
@@ -1375,19 +1539,24 @@ def stop_writer_queue(db_path: Path):
     key = os.path.abspath(str(db_path))
     with _LOCK:
         wq = _QUEUES.pop(key, None)
-        if wq:
-            wq.stop()
+    if wq:
+        wq.stop()
 
 
 def stop_all_writer_queues():
-    """Stops all active WriterQueues and joins worker threads."""
+    """Stops all active WriterQueues, drains pending writes, and joins worker threads."""
     with _LOCK:
-        for wq in list(_QUEUES.values()):
-            try:
-                wq.stop()
-            except Exception:
-                pass
+        active_queues = list(_QUEUES.values())
         _QUEUES.clear()
+    for wq in active_queues:
+        try:
+            wq.stop()
+        except Exception:
+            pass
+
+
+# Guarantee clean SQLite connection shutdown and WAL checkpoint on process exit
+atexit.register(stop_all_writer_queues)
 
 
 def write_journal_entry(project_root: Path, entry_type: str, data: dict, worker_id: str = None) -> Path:
@@ -1403,14 +1572,14 @@ def write_journal_entry(project_root: Path, entry_type: str, data: dict, worker_
     record = {
         "timestamp": time.time(),
         "type": entry_type,
-        "data": data
+        "data": data,
     }
     with open(journal_file, "a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
     return journal_file
 
 
-def flush_journals(project_root: Path, conn: sqlite3.Connection):
+def flush_journals(project_root: Path, conn: sqlite3.Connection) -> int:
     """Atomically consolidates all pending journal files into memory.db and removes flushed files."""
     journal_dir = project_root / ".agents" / "journal"
     if not journal_dir.exists():
@@ -1433,22 +1602,35 @@ def flush_journals(project_root: Path, conn: sqlite3.Connection):
                     etype = rec.get("type")
                     data = rec.get("data", {})
                     if etype == "fact":
-                        cursor.execute("""
-                        INSERT OR REPLACE INTO project_facts (key, value, updated_at)
-                        VALUES (?, ?, ?);
-                        """, (data.get("key"), data.get("value"), data.get("updated_at", "")))
+                        cursor.execute(
+                            """
+                            INSERT OR REPLACE INTO project_facts (key, value, updated_at)
+                            VALUES (?, ?, ?);
+                            """,
+                            (data.get("key"), data.get("value"), data.get("updated_at", "")),
+                        )
                         flushed_count += 1
                     elif etype == "decision":
-                        cursor.execute("""
-                        INSERT INTO project_decisions (title, content, category, is_active, created_at, updated_at)
-                        VALUES (?, ?, ?, 1, ?, ?);
-                        """, (data.get("title"), data.get("content"), data.get("category", "architecture"), data.get("now", ""), data.get("now", "")))
+                        cursor.execute(
+                            """
+                            INSERT INTO project_decisions (title, content, category, is_active, created_at, updated_at)
+                            VALUES (?, ?, ?, 1, ?, ?);
+                            """,
+                            (
+                                data.get("title"),
+                                data.get("content"),
+                                data.get("category", "architecture"),
+                                data.get("now", ""),
+                                data.get("now", ""),
+                            ),
+                        )
                         flushed_count += 1
             jf.unlink(missing_ok=True)
         except Exception:
             pass
 
-    conn.commit()
+    if flushed_count > 0:
+        conn.commit()
     return flushed_count
 
 
@@ -2107,7 +2289,7 @@ def export_skill(conn: sqlite3.Connection, skill_name: str, target_dir_str: str)
 # =====================================================================
 # SECTION: skillsdb.memory.gitea_config
 # =====================================================================
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 
 
 
@@ -2229,29 +2411,28 @@ def _scrub_workspace_git_config_credentials(project_root: Path, db_path: Path = 
 
         if db_path:
             now_iso = datetime.now(timezone.utc).isoformat()
-            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(db_path, timeout=3.0)
-            cur = conn.cursor()
-            cur.execute(
-                "CREATE TABLE IF NOT EXISTS runtime_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT);"
-            )
-            cur.execute("SELECT COUNT(*) FROM runtime_config WHERE key = 'gitea_token';")
-            has_token = cur.fetchone()[0] > 0
-            if not has_token:
-                m0 = matches[0]
-                scheme, _, auth_tok, host_and_path, repo_owner = m0.group(2), m0.group(3), m0.group(4), m0.group(5), m0.group(6)
-                host_port = host_and_path.split("/", 1)[0]
-                learned_url = f"{scheme}{host_port}"
-                cur.executemany(
-                    "INSERT OR IGNORE INTO runtime_config (key, value, updated_at) VALUES (?, ?, ?);",
-                    [
-                        ("gitea_url", learned_url, now_iso),
-                        ("gitea_user", repo_owner, now_iso),
-                        ("gitea_token", auth_tok, now_iso),
-                    ],
+            with managed_connection(db_path) as conn:
+                cur = conn.cursor()
+                execute_with_retry(
+                    cur,
+                    "CREATE TABLE IF NOT EXISTS runtime_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT);",
                 )
-                conn.commit()
-            conn.close()
+                cur.execute("SELECT COUNT(*) FROM runtime_config WHERE key = 'gitea_token';")
+                has_token = cur.fetchone()[0] > 0
+                if not has_token:
+                    m0 = matches[0]
+                    scheme, _, auth_tok, host_and_path, repo_owner = m0.group(2), m0.group(3), m0.group(4), m0.group(5), m0.group(6)
+                    host_port = host_and_path.split("/", 1)[0]
+                    learned_url = f"{scheme}{host_port}"
+                    cur.executemany(
+                        "INSERT OR IGNORE INTO runtime_config (key, value, updated_at) VALUES (?, ?, ?);",
+                        [
+                            ("gitea_url", learned_url, now_iso),
+                            ("gitea_user", repo_owner, now_iso),
+                            ("gitea_token", auth_tok, now_iso),
+                        ],
+                    )
+                    conn.commit()
 
         cleaned_cfg = pattern.sub(r"\1\2\5", raw_cfg)
         if cleaned_cfg != raw_cfg:
@@ -2282,43 +2463,42 @@ def learn_workspace(project_root: Path, db_path: Path = DB_PATH) -> Optional[str
         _scrub_workspace_git_config_credentials(abs_root, db_path=db_path)
 
         if db_path:
-            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(db_path, timeout=3.0)
-            cur = conn.cursor()
-            cur.execute(
-                "CREATE TABLE IF NOT EXISTS runtime_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT);"
-            )
-            scratch_abs = Path(os.path.abspath(str(GEMINI_DIR / "antigravity" / "scratch")))
-            try:
-                abs_root.relative_to(scratch_abs)
-                new_is_scratch = True
-            except ValueError:
-                new_is_scratch = False
-
-            cur.execute(
-                "SELECT key, value FROM runtime_config WHERE LOWER(key) = LOWER(?);",
-                (ws_key,),
-            )
-            existing_rows = cur.fetchall()
-            skip_insert = False
-            for ex_key, ex_val in existing_rows:
-                if new_is_scratch and ex_val and Path(ex_val).exists():
-                    try:
-                        Path(os.path.abspath(str(ex_val))).relative_to(scratch_abs)
-                    except ValueError:
-                        skip_insert = True
-                        break
-                if ex_key != ws_key:
-                    cur.execute("DELETE FROM runtime_config WHERE key = ?;", (ex_key,))
-
-            if not skip_insert:
-                cur.execute(
-                    "INSERT OR REPLACE INTO runtime_config (key, value, updated_at) VALUES (?, ?, ?);",
-                    (ws_key, str(abs_root), now_iso),
+            with managed_connection(db_path) as conn:
+                cur = conn.cursor()
+                execute_with_retry(
+                    cur,
+                    "CREATE TABLE IF NOT EXISTS runtime_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT);",
                 )
+                scratch_abs = Path(os.path.abspath(str(GEMINI_DIR / "antigravity" / "scratch")))
+                try:
+                    abs_root.relative_to(scratch_abs)
+                    new_is_scratch = True
+                except ValueError:
+                    new_is_scratch = False
 
-            conn.commit()
-            conn.close()
+                cur.execute(
+                    "SELECT key, value FROM runtime_config WHERE LOWER(key) = LOWER(?);",
+                    (ws_key,),
+                )
+                existing_rows = cur.fetchall()
+                skip_insert = False
+                for ex_key, ex_val in existing_rows:
+                    if new_is_scratch and ex_val and Path(ex_val).exists():
+                        try:
+                            Path(os.path.abspath(str(ex_val))).relative_to(scratch_abs)
+                        except ValueError:
+                            skip_insert = True
+                            break
+                    if ex_key != ws_key:
+                        execute_with_retry(cur, "DELETE FROM runtime_config WHERE key = ?;", (ex_key,))
+
+                if not skip_insert:
+                    execute_with_retry(
+                        cur,
+                        "INSERT OR REPLACE INTO runtime_config (key, value, updated_at) VALUES (?, ?, ?);",
+                        (ws_key, str(abs_root), now_iso),
+                    )
+                conn.commit()
         return str(abs_root)
     except Exception:
         return None
@@ -2334,69 +2514,71 @@ def get_learned_workspaces(db_path: Path = DB_PATH, prune_missing: bool = True) 
     """
     learned: Dict[str, str] = {}
     stale_keys: List[str] = []
+    valid_paths_to_scrub: List[Path] = []
     if not db_path or not Path(db_path).exists():
         return learned
     try:
-        conn = sqlite3.connect(db_path, timeout=3.0)
-        cur = conn.cursor()
-        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='runtime_config';")
-        if cur.fetchone():
-            cur.execute(
-                "SELECT key, value, updated_at FROM runtime_config WHERE key LIKE 'workspace:%' ORDER BY updated_at ASC;"
-            )
-            rows = cur.fetchall()
-            scratch_abs = Path(os.path.abspath(str(GEMINI_DIR / "antigravity" / "scratch")))
-            by_lower: Dict[str, Tuple[str, str]] = {}
+        with managed_connection(db_path) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='runtime_config';")
+            if cur.fetchone():
+                cur.execute(
+                    "SELECT key, value, updated_at FROM runtime_config WHERE key LIKE 'workspace:%' ORDER BY updated_at ASC;"
+                )
+                rows = cur.fetchall()
+                scratch_abs = Path(os.path.abspath(str(GEMINI_DIR / "antigravity" / "scratch")))
+                by_lower: Dict[str, Tuple[str, str]] = {}
 
-            for k, v, _ in rows:
-                name = k.split("workspace:", 1)[1]
-                if not name or not v:
-                    stale_keys.append(k)
-                    continue
-                p = Path(v)
-                if _is_excluded_workspace_path(p):
-                    stale_keys.append(k)
-                    for stray in (".agents", ".git"):
-                        stray_dir = p / stray
-                        if stray_dir.exists() and str(p).startswith(str(GEMINI_DIR / "config" / "plugins")):
-                            shutil.rmtree(stray_dir, ignore_errors=True)
-                    continue
-                if p.exists() and p.is_dir():
-                    _scrub_workspace_git_config_credentials(p, db_path=db_path)
-                    lower_name = name.lower()
-                    if lower_name in by_lower:
-                        prev_key, prev_val = by_lower[lower_name]
-                        try:
-                            Path(os.path.abspath(v)).relative_to(scratch_abs)
-                            curr_is_scratch = True
-                        except ValueError:
-                            curr_is_scratch = False
-                        try:
-                            Path(os.path.abspath(prev_val)).relative_to(scratch_abs)
-                            prev_is_scratch = True
-                        except ValueError:
-                            prev_is_scratch = False
+                for k, v, _ in rows:
+                    name = k.split("workspace:", 1)[1]
+                    if not name or not v:
+                        stale_keys.append(k)
+                        continue
+                    p = Path(v)
+                    if _is_excluded_workspace_path(p):
+                        stale_keys.append(k)
+                        for stray in (".agents", ".git"):
+                            stray_dir = p / stray
+                            if stray_dir.exists() and str(p).startswith(str(GEMINI_DIR / "config" / "plugins")):
+                                shutil.rmtree(stray_dir, ignore_errors=True)
+                        continue
+                    if p.exists() and p.is_dir():
+                        valid_paths_to_scrub.append(p)
+                        lower_name = name.lower()
+                        if lower_name in by_lower:
+                            prev_key, prev_val = by_lower[lower_name]
+                            try:
+                                Path(os.path.abspath(v)).relative_to(scratch_abs)
+                                curr_is_scratch = True
+                            except ValueError:
+                                curr_is_scratch = False
+                            try:
+                                Path(os.path.abspath(prev_val)).relative_to(scratch_abs)
+                                prev_is_scratch = True
+                            except ValueError:
+                                prev_is_scratch = False
 
-                        if curr_is_scratch and not prev_is_scratch:
-                            if k != prev_key:
+                            if curr_is_scratch and not prev_is_scratch:
+                                if k != prev_key:
+                                    stale_keys.append(k)
+                                continue
+                            else:
+                                if prev_key != k:
+                                    stale_keys.append(prev_key)
+                                learned.pop(prev_key.split("workspace:", 1)[1], None)
+                        by_lower[lower_name] = (k, v)
+                        learned[name] = v
+                    elif prune_missing:
+                        try:
+                            if p.parent.exists():
                                 stale_keys.append(k)
-                            continue
-                        else:
-                            if prev_key != k:
-                                stale_keys.append(prev_key)
-                            learned.pop(prev_key.split("workspace:", 1)[1], None)
-                    by_lower[lower_name] = (k, v)
-                    learned[name] = v
-                elif prune_missing:
-                    try:
-                        if p.parent.exists():
-                            stale_keys.append(k)
-                    except Exception:
-                        pass
-            if stale_keys:
-                cur.executemany("DELETE FROM runtime_config WHERE key = ?;", [(sk,) for sk in set(stale_keys)])
-                conn.commit()
-        conn.close()
+                        except Exception:
+                            pass
+                if stale_keys:
+                    cur.executemany("DELETE FROM runtime_config WHERE key = ?;", [(sk,) for sk in set(stale_keys)])
+                    conn.commit()
+        for p in valid_paths_to_scrub:
+            _scrub_workspace_git_config_credentials(p, db_path=db_path)
     except Exception:
         pass
     return learned
@@ -2413,15 +2595,14 @@ def get_gitea_config(db_path: Path = DB_PATH) -> Dict[str, str]:
     db_cfg: Dict[str, str] = {}
     if db_path and Path(db_path).exists():
         try:
-            conn = sqlite3.connect(db_path, timeout=3.0)
-            cur = conn.cursor()
-            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='runtime_config';")
-            if cur.fetchone():
-                cur.execute("SELECT key, value FROM runtime_config;")
-                for k, v in cur.fetchall():
-                    if v:
-                        db_cfg[k] = v
-            conn.close()
+            with managed_connection(db_path) as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='runtime_config';")
+                if cur.fetchone():
+                    cur.execute("SELECT key, value FROM runtime_config;")
+                    for k, v in cur.fetchall():
+                        if v:
+                            db_cfg[k] = v
         except Exception:
             pass
 
@@ -2450,6 +2631,11 @@ def get_gitea_config(db_path: Path = DB_PATH) -> Dict[str, str]:
         or db_cfg.get("remote_share_path")
         or ""
     )
+    svc_name = (
+        os.environ.get("SKILLSDB_GITEA_SERVICE")
+        or db_cfg.get("gitea_service")
+        or GITEA_SERVICE_NAME
+    )
 
     return {
         "url": url,
@@ -2457,7 +2643,7 @@ def get_gitea_config(db_path: Path = DB_PATH) -> Dict[str, str]:
         "token": token,
         "workspaces_root": workspaces_root,
         "remote_share": remote_share,
-        "service_name": GITEA_SERVICE_NAME,
+        "service_name": svc_name,
     }
 
 
@@ -2467,6 +2653,7 @@ def set_gitea_config(
     token: Optional[str] = None,
     workspaces_root: Optional[str] = None,
     remote_share: Optional[str] = None,
+    service: Optional[str] = None,
     db_path: Path = DB_PATH,
 ) -> Dict[str, str]:
     """Persists Gitea and workspace settings in runtime_config and registers the Git credential helper."""
@@ -2482,19 +2669,21 @@ def set_gitea_config(
         updates.append(("gitea_workspaces_root", str(workspaces_root).strip(), now_iso))
     if remote_share is not None:
         updates.append(("remote_share_path", str(remote_share).strip(), now_iso))
+    if service is not None:
+        updates.append(("gitea_service", str(service).strip(), now_iso))
 
     if updates and db_path:
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(db_path, timeout=5.0)
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS runtime_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT);"
-        )
-        conn.executemany(
-            "INSERT OR REPLACE INTO runtime_config (key, value, updated_at) VALUES (?, ?, ?);",
-            updates,
-        )
-        conn.commit()
-        conn.close()
+        with managed_connection(db_path) as conn:
+            cur = conn.cursor()
+            execute_with_retry(
+                cur,
+                "CREATE TABLE IF NOT EXISTS runtime_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT);",
+            )
+            cur.executemany(
+                "INSERT OR REPLACE INTO runtime_config (key, value, updated_at) VALUES (?, ?, ?);",
+                updates,
+            )
+            conn.commit()
 
     cfg = get_gitea_config(db_path=db_path)
     register_git_credential_helper(cfg.get("url"))
@@ -4047,6 +4236,17 @@ def sync_all_workspaces(base_dir: Optional[Path] = None):
 # SECTION: skillsdb.memory.project_memory
 # =====================================================================
 _HOOK_STATE_FILE = Path(tempfile.gettempdir()) / "skillsdb_hook_state.json"
+_VERIFIED_PROJECT_DBS: set[str] = set()
+_REQUIRED_PROJECT_TABLES = frozenset({
+    "project_decisions",
+    "session_snapshots",
+    "project_facts",
+    "fact_history",
+    "project_tasks",
+    "task_verifications",
+    "task_handoffs",
+    "project_memory_fts",
+})
 
 
 def _is_protected_non_workspace(path: Path) -> bool:
@@ -4106,21 +4306,53 @@ def get_project_db_path(project_root: Path = None) -> Path:
 
 
 def get_project_connection(project_root: Path = None) -> sqlite3.Connection:
-    """Returns a WAL-enabled SQLite connection to the project memory database."""
+    """Returns a WAL-enabled, memory-mapped SQLite connection to the project memory database."""
     db_path = get_project_db_path(project_root)
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path, timeout=30.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode = WAL;")
-    conn.execute("PRAGMA busy_timeout = 5000;")
-    conn.execute("PRAGMA auto_vacuum = INCREMENTAL;")
-    conn.execute("PRAGMA synchronous = NORMAL;")
+    conn = get_connection(db_path, is_project_db=True)
     init_project_db(conn)
     return conn
 
 
+def _project_schema_ready(conn: sqlite3.Connection) -> bool:
+    """Fast read-only check verifying all project memory tables and columns exist without taking a write lock."""
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND name IN "
+            "('project_decisions', 'session_snapshots', 'project_facts', 'fact_history', "
+            "'project_tasks', 'task_verifications', 'task_handoffs', 'project_memory_fts');"
+        )
+        found = {row[0] for row in cur.fetchall()}
+        if not _REQUIRED_PROJECT_TABLES.issubset(found):
+            return False
+        cur.execute("PRAGMA table_info(session_snapshots);")
+        snap_cols = {row[1] for row in cur.fetchall()}
+        if "commit_hash" not in snap_cols:
+            return False
+        cur.execute("PRAGMA table_info(project_facts);")
+        fact_cols = {row[1] for row in cur.fetchall()}
+        return "deprecated_at" in fact_cols and "superseded_by" in fact_cols
+    except sqlite3.Error:
+        return False
+
+
 def init_project_db(conn: sqlite3.Connection):
     """Initializes tables for architectural decisions, snapshots, project facts, tasks, verifications, and handoffs."""
+    db_key = None
+    try:
+        row = conn.execute("PRAGMA database_list;").fetchone()
+        if row and row[2]:
+            db_key = f"{os.path.abspath(row[2])}:{os.path.getsize(row[2]) if os.path.exists(row[2]) else 0}"
+            if db_key in _VERIFIED_PROJECT_DBS:
+                return
+    except sqlite3.Error:
+        pass
+
+    if _project_schema_ready(conn):
+        if db_key:
+            _VERIFIED_PROJECT_DBS.add(db_key)
+        return
+
     cursor = conn.cursor()
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS project_decisions (
@@ -4220,6 +4452,8 @@ def init_project_db(conn: sqlite3.Connection):
     );
     """)
     conn.commit()
+    if db_key:
+        _VERIFIED_PROJECT_DBS.add(db_key)
 
 
 def mem_init(project_root: Path = None):
@@ -4228,19 +4462,28 @@ def mem_init(project_root: Path = None):
         print(f"Skipped: '{root}' is a protected system/profile directory, not a project workspace.")
         return
     db_path = get_project_db_path(root)
-    conn = get_project_connection(root)
-    init_project_db(conn)
-    conn.close()
+    with managed_connection(db_path, is_project_db=True) as conn:
+        init_project_db(conn)
     if not _is_temp_workspace(root) and not (root / ".git" / "HEAD").exists():
         setup_workspace_git(root, configure_remote=False)
     learn_workspace(root)
     print(f"Project memory database initialized at: {db_path}")
 
 
-def mem_save_decision(conn: sqlite3.Connection, title: str, content: str, category: str = "architecture", db_path: Path = None):
+def mem_save_decision(
+    conn: sqlite3.Connection,
+    title: str,
+    content: str,
+    category: str = "architecture",
+    db_path: Path = None,
+    rationale: str = None,
+):
     """Saves an architectural decision using WriterQueue if path is available to prevent lock contention."""
     now_iso = datetime.now(timezone.utc).isoformat()
+    full_content = f"{content.strip()}\nRationale: {rationale.strip()}" if rationale and rationale.strip() else content
     target_path = db_path or (Path(conn.cursor().execute("PRAGMA database_list;").fetchone()[2]) if conn else None)
+    if conn and conn.in_transaction:
+        conn.commit()
 
     if target_path and Path(target_path).exists():
         wq = get_writer_queue(target_path)
@@ -4248,12 +4491,12 @@ def mem_save_decision(conn: sqlite3.Connection, title: str, content: str, catego
             cur.execute("""
             INSERT INTO project_decisions (title, content, category, is_active, created_at, updated_at)
             VALUES (?, ?, ?, 1, ?, ?);
-            """, (title, content, category, now_iso, now_iso))
+            """, (title, full_content, category, now_iso, now_iso))
             row_id = cur.lastrowid
             cur.execute("""
             INSERT INTO project_memory_fts (source_table, title_or_key, content)
             VALUES ('decision', ?, ?);
-            """, (title, content))
+            """, (title, full_content))
             return row_id
         row_id = wq.execute_write(_write)
         print(f"Project decision saved (ID {row_id}): '{title}'")
@@ -4263,12 +4506,12 @@ def mem_save_decision(conn: sqlite3.Connection, title: str, content: str, catego
     cursor.execute("""
     INSERT INTO project_decisions (title, content, category, is_active, created_at, updated_at)
     VALUES (?, ?, ?, 1, ?, ?);
-    """, (title, content, category, now_iso, now_iso))
+    """, (title, full_content, category, now_iso, now_iso))
     row_id = cursor.lastrowid
     cursor.execute("""
     INSERT INTO project_memory_fts (source_table, title_or_key, content)
     VALUES ('decision', ?, ?);
-    """, (title, content))
+    """, (title, full_content))
     conn.commit()
     print(f"Project decision saved (ID {row_id}): '{title}'")
 
@@ -4937,18 +5180,16 @@ def handle_pre_invocation_hook():
         cwd_hints = detect_cwd_hints(proj_path)
         if cwd_hints and DB_PATH.exists():
             try:
-                gconn = sqlite3.connect(DB_PATH, timeout=5.0)
-                gconn.row_factory = sqlite3.Row
-                gcursor = gconn.cursor()
-                fts_query = " OR ".join(cwd_hints[:8])
-                gcursor.execute("""
-                SELECT s.name, s.description FROM skills_fts f
-                JOIN skills s ON f.rowid = s.id
-                WHERE skills_fts MATCH ?
-                ORDER BY rank LIMIT 3;
-                """, (fts_query,))
-                matched_skills = gcursor.fetchall()
-                gconn.close()
+                with managed_connection(DB_PATH) as gconn:
+                    gcursor = gconn.cursor()
+                    fts_query = " OR ".join(cwd_hints[:8])
+                    gcursor.execute("""
+                    SELECT s.name, s.description FROM skills_fts f
+                    JOIN skills s ON f.rowid = s.id
+                    WHERE skills_fts MATCH ?
+                    ORDER BY rank LIMIT 3;
+                    """, (fts_query,))
+                    matched_skills = gcursor.fetchall()
                 if matched_skills:
                     lines.append(f"[AUTONOMOUS DIRECTORY SCOPING: {', '.join(cwd_hints)}]")
                     lines.append("Domain micro-skills pre-routed for current workspace:")
@@ -4961,85 +5202,83 @@ def handle_pre_invocation_hook():
 
     if has_valid_workspace and db_path and db_path.exists():
         try:
-            conn = sqlite3.connect(db_path, timeout=5.0)
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
+            with managed_connection(db_path, is_project_db=True) as conn:
+                init_project_db(conn)
+                cursor = conn.cursor()
 
-            # 2. Autonomous Auto-Compaction check (prunes completed tasks automatically)
-            cursor.execute("SELECT COUNT(*) FROM project_tasks WHERE status = 'completed';")
-            completed_count = cursor.fetchone()[0]
-            if completed_count >= 3:
-                mem_compact(conn, summary=f"[AUTO-COMPACTED] Pruned {completed_count} completed tasks and consolidated state.", archive_completed=True, project_root=root_path, db_path=db_path, silent=True)
+                # 2. Autonomous Auto-Compaction check (prunes completed tasks automatically)
+                cursor.execute("SELECT COUNT(*) FROM project_tasks WHERE status = 'completed';")
+                completed_count = cursor.fetchone()[0]
+                if completed_count >= 3:
+                    mem_compact(conn, summary=f"[AUTO-COMPACTED] Pruned {completed_count} completed tasks and consolidated state.", archive_completed=True, project_root=root_path, db_path=db_path, silent=True)
 
-            mem_lines = []
-            git_telem = get_workspace_git_telemetry(root_path)
-            if git_telem:
-                mem_lines.append(git_telem)
+                mem_lines = []
+                git_telem = get_workspace_git_telemetry(root_path)
+                if git_telem:
+                    mem_lines.append(git_telem)
 
-            # 3. Active Task Board
-            cursor.execute("""
-            SELECT id, title, status, priority FROM project_tasks
-            WHERE status IN ('pending', 'in_progress', 'blocked')
-            ORDER BY 
-                CASE status WHEN 'in_progress' THEN 1 WHEN 'pending' THEN 2 ELSE 3 END,
-                CASE priority WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'med' THEN 3 ELSE 4 END,
-                id ASC LIMIT 5;
-            """)
-            open_tasks = cursor.fetchall()
-            if open_tasks:
-                if mem_lines:
-                    mem_lines.append("")
-                mem_lines.append("Active Task Board (Deterministic Progress):")
-                for t in open_tasks:
-                    mem_lines.append(f"  * [#{t['id']}] [{t['status'].upper():11}] ({t['priority'].upper():8}): {t['title']}")
+                # 3. Active Task Board
+                cursor.execute("""
+                SELECT id, title, status, priority FROM project_tasks
+                WHERE status IN ('pending', 'in_progress', 'blocked')
+                ORDER BY 
+                    CASE status WHEN 'in_progress' THEN 1 WHEN 'pending' THEN 2 ELSE 3 END,
+                    CASE priority WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'med' THEN 3 ELSE 4 END,
+                    id ASC LIMIT 5;
+                """)
+                open_tasks = cursor.fetchall()
+                if open_tasks:
+                    if mem_lines:
+                        mem_lines.append("")
+                    mem_lines.append("Active Task Board (Deterministic Progress):")
+                    for t in open_tasks:
+                        mem_lines.append(f"  * [#{t['id']}] [{t['status'].upper():11}] ({t['priority'].upper():8}): {t['title']}")
 
-            # 3.5 Active Agent Handoffs
-            cursor.execute("SELECT id, source_role, target_role, notes FROM task_handoffs WHERE status = 'pending' ORDER BY created_at DESC LIMIT 3;")
-            pending_hos = cursor.fetchall()
-            if pending_hos:
-                if mem_lines:
-                    mem_lines.append("")
-                mem_lines.append("Pending Agent Handoffs (Delegation Queue):")
-                for ho in pending_hos:
-                    note_s = f" - '{ho['notes'][:60]}...'" if ho['notes'] else ""
-                    mem_lines.append(f"  * [{ho['id']}] [{ho['source_role']}] -> [{ho['target_role']}]{note_s}")
+                # 3.5 Active Agent Handoffs
+                cursor.execute("SELECT id, source_role, target_role, notes FROM task_handoffs WHERE status = 'pending' ORDER BY created_at DESC LIMIT 3;")
+                pending_hos = cursor.fetchall()
+                if pending_hos:
+                    if mem_lines:
+                        mem_lines.append("")
+                    mem_lines.append("Pending Agent Handoffs (Delegation Queue):")
+                    for ho in pending_hos:
+                        note_s = f" - '{ho['notes'][:60]}...'" if ho['notes'] else ""
+                        mem_lines.append(f"  * [{ho['id']}] [{ho['source_role']}] -> [{ho['target_role']}]{note_s}")
 
-            # 4. Key Facts (Active only, tombstoned excluded)
-            cursor.execute("SELECT key, value FROM project_facts WHERE deprecated_at IS NULL ORDER BY updated_at DESC LIMIT 10;")
-            facts = cursor.fetchall()
-            if facts:
-                if mem_lines:
-                    mem_lines.append("")
-                mem_lines.append("Project Facts & Configs:")
-                for f in facts:
-                    mem_lines.append(f"  * {f['key']}: {f['value']}")
+                # 4. Key Facts (Active only, tombstoned excluded)
+                cursor.execute("SELECT key, value FROM project_facts WHERE deprecated_at IS NULL ORDER BY updated_at DESC LIMIT 10;")
+                facts = cursor.fetchall()
+                if facts:
+                    if mem_lines:
+                        mem_lines.append("")
+                    mem_lines.append("Project Facts & Configs:")
+                    for f in facts:
+                        mem_lines.append(f"  * {f['key']}: {f['value']}")
 
-            # 5. Active Decisions
-            cursor.execute("SELECT title, content FROM project_decisions WHERE is_active = 1 ORDER BY updated_at DESC LIMIT 5;")
-            decs = cursor.fetchall()
-            if decs:
-                if mem_lines:
-                    mem_lines.append("")
-                mem_lines.append("Active Architectural Decisions:")
-                for d in decs:
-                    mem_lines.append(f"  * [{d['title']}]: {d['content']}")
+                # 5. Active Decisions
+                cursor.execute("SELECT title, content FROM project_decisions WHERE is_active = 1 ORDER BY updated_at DESC LIMIT 5;")
+                decs = cursor.fetchall()
+                if decs:
+                    if mem_lines:
+                        mem_lines.append("")
+                    mem_lines.append("Active Architectural Decisions:")
+                    for d in decs:
+                        mem_lines.append(f"  * [{d['title']}]: {d['content']}")
 
-            # 6. Milestone Snapshot
-            cursor.execute("SELECT summary, next_steps, files_touched, commit_hash, created_at FROM session_snapshots ORDER BY id DESC LIMIT 1;")
-            snap = cursor.fetchone()
-            if snap:
-                if mem_lines:
-                    mem_lines.append("")
-                mem_lines.append("Latest Project Milestone Snapshot:")
-                mem_lines.append(f"  Summary: {snap['summary']}")
-                if "commit_hash" in snap.keys() and snap['commit_hash']:
-                    mem_lines.append(f"  Commit: {snap['commit_hash'][:7]}")
-                if "files_touched" in snap.keys() and snap['files_touched']:
-                    mem_lines.append(f"  Files Touched: {snap['files_touched']}")
-                if snap['next_steps']:
-                    mem_lines.append(f"  Next Steps: {snap['next_steps']}")
-
-            conn.close()
+                # 6. Milestone Snapshot
+                cursor.execute("SELECT summary, next_steps, files_touched, commit_hash, created_at FROM session_snapshots ORDER BY id DESC LIMIT 1;")
+                snap = cursor.fetchone()
+                if snap:
+                    if mem_lines:
+                        mem_lines.append("")
+                    mem_lines.append("Latest Project Milestone Snapshot:")
+                    mem_lines.append(f"  Summary: {snap['summary']}")
+                    if "commit_hash" in snap.keys() and snap['commit_hash']:
+                        mem_lines.append(f"  Commit: {snap['commit_hash'][:7]}")
+                    if "files_touched" in snap.keys() and snap['files_touched']:
+                        mem_lines.append(f"  Files Touched: {snap['files_touched']}")
+                    if snap['next_steps']:
+                        mem_lines.append(f"  Next Steps: {snap['next_steps']}")
 
             if mem_lines:
                 lines.append("=== PROJECT MEMORY CONTEXT (Auto-Loaded via Hook) ===")
@@ -5568,45 +5807,48 @@ def check_update(quiet: bool = False) -> dict:
 
 
 def merge_upstream_database(local_db_path: Path, upstream_db_path: Path) -> dict:
-    """Non-destructive differential merge preserving all user-learned rules."""
-    conn = sqlite3.connect(local_db_path)
-    cur = conn.cursor()
+    """Non-destructive differential merge preserving all user-learned rules and runtime configuration."""
+    with managed_connection(local_db_path) as conn:
+        cur = conn.cursor()
 
-    cur.execute("SELECT COUNT(*) FROM rules WHERE category = 'learned';")
-    learned_before = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM rules WHERE category = 'learned';")
+        learned_before = cur.fetchone()[0]
 
-    cur.execute(f"ATTACH DATABASE ? AS upstream;", (str(upstream_db_path),))
+        cur.execute("ATTACH DATABASE ? AS upstream;", (str(upstream_db_path),))
 
-    cur.execute("""
-    INSERT OR REPLACE INTO skills (name, plugin_name, category, is_active, description, content, token_estimate, updated_at)
-    SELECT name, plugin_name, category, is_active, description, content, token_estimate, updated_at
-    FROM upstream.skills;
-    """)
-    merged_skills = cur.rowcount
+        cur.execute("""
+        INSERT OR REPLACE INTO skills (name, plugin_name, category, is_active, description, content, token_estimate, updated_at)
+        SELECT name, plugin_name, category, is_active, description, content, token_estimate, updated_at
+        FROM upstream.skills;
+        """)
+        merged_skills = cur.rowcount
 
-    cur.execute("""
-    INSERT OR REPLACE INTO rules (key, name, category, scope, is_active, summary, content, token_estimate, updated_at)
-    SELECT key, name, category, scope, is_active, summary, content, token_estimate, updated_at
-    FROM upstream.rules
-    WHERE category != 'learned';
-    """)
-    merged_rules = cur.rowcount
+        cur.execute("""
+        INSERT OR REPLACE INTO rules (key, name, category, scope, is_active, summary, content, token_estimate, updated_at)
+        SELECT key, name, category, scope, is_active, summary, content, token_estimate, updated_at
+        FROM upstream.rules
+        WHERE category != 'learned';
+        """)
+        merged_rules = cur.rowcount
 
-    cur.execute("INSERT INTO rules_fts(rules_fts) VALUES ('rebuild');")
-    cur.execute("INSERT INTO skills_fts(skills_fts) VALUES ('rebuild');")
+        cur.execute("INSERT INTO rules_fts(rules_fts) VALUES ('rebuild');")
+        cur.execute("INSERT INTO skills_fts(skills_fts) VALUES ('rebuild');")
 
-    conn.commit()
-    cur.execute("DETACH DATABASE upstream;")
+        conn.commit()
+        cur.execute("DETACH DATABASE upstream;")
 
-    cur.execute("SELECT COUNT(*) FROM rules WHERE category = 'learned';")
-    learned_after = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM rules WHERE category = 'learned';")
+        learned_after = cur.fetchone()[0]
 
-    if learned_after < learned_before:
-        conn.rollback()
-        conn.close()
-        raise RuntimeError("Differential merge aborted: User-learned rules count dropped! Rolled back.")
+        if learned_after < learned_before:
+            conn.rollback()
+            raise RuntimeError("Differential merge aborted: User-learned rules count dropped! Rolled back.")
 
-    conn.close()
+        try:
+            conn.execute("PRAGMA wal_checkpoint(PASSIVE);")
+        except sqlite3.Error:
+            pass
+
     return {
         "merged_skills": merged_skills,
         "merged_rules": merged_rules,
@@ -5914,15 +6156,14 @@ def doctor(conn: sqlite3.Connection):
     proj_db = proj_root / ".agents" / "memory.db"
     if proj_db.exists():
         try:
-            pconn = sqlite3.connect(proj_db)
-            pcur = pconn.cursor()
-            pcur.execute("SELECT COUNT(*) FROM session_snapshots;")
-            snaps = pcur.fetchone()[0]
-            pcur.execute("SELECT COUNT(*) FROM project_decisions;")
-            decs = pcur.fetchone()[0]
-            pcur.execute("SELECT COUNT(*) FROM project_facts;")
-            facts = pcur.fetchone()[0]
-            pconn.close()
+            with managed_connection(proj_db, is_project_db=True) as pconn:
+                pcur = pconn.cursor()
+                pcur.execute("SELECT COUNT(*) FROM session_snapshots;")
+                snaps = pcur.fetchone()[0]
+                pcur.execute("SELECT COUNT(*) FROM project_decisions;")
+                decs = pcur.fetchone()[0]
+                pcur.execute("SELECT COUNT(*) FROM project_facts;")
+                facts = pcur.fetchone()[0]
             print(f"[OK] Project Memory: Active in {proj_root} ({facts} facts, {decs} decisions, {snaps} snapshots)")
         except Exception as e:
             print(f"[WARN] Project Memory DB present but error reading: {e}")
@@ -6188,8 +6429,11 @@ def build_parser() -> argparse.ArgumentParser:
     mem_init_parser.add_argument("--project", default=None, help="Project root directory (optional)")
 
     mem_dec_parser = subparsers.add_parser("mem-save-decision", help="Save an architectural or setup decision")
-    mem_dec_parser.add_argument("title", help="Decision title")
-    mem_dec_parser.add_argument("content", help="Decision content/rationale")
+    mem_dec_parser.add_argument("title", nargs="?", default=None, help="Decision title")
+    mem_dec_parser.add_argument("content", nargs="?", default=None, help="Decision content/rationale")
+    mem_dec_parser.add_argument("--title", "--topic", dest="opt_title", default=None, help="Decision title (flag alias)")
+    mem_dec_parser.add_argument("--content", "--decision", dest="opt_content", default=None, help="Decision content (flag alias)")
+    mem_dec_parser.add_argument("--rationale", "--context", "--reason", dest="rationale", default=None, help="Optional rationale or context to append")
     mem_dec_parser.add_argument("--category", default="architecture", help="Category (default: architecture)")
     mem_dec_parser.add_argument("--project", default=None, help="Project root directory (optional)")
 
@@ -6204,7 +6448,7 @@ def build_parser() -> argparse.ArgumentParser:
     mem_fact_parser = subparsers.add_parser("mem-save-fact", help="Save a key-value fact or configuration")
     mem_fact_parser.add_argument("key", help="Fact key")
     mem_fact_parser.add_argument("value", help="Fact value")
-    mem_fact_parser.add_argument("--reason", default=None, help="Reason if updating/superseding an existing fact")
+    mem_fact_parser.add_argument("--reason", "--rationale", "--context", dest="reason", default=None, help="Reason if updating/superseding an existing fact")
     mem_fact_parser.add_argument("--project", default=None, help="Project root directory (optional)")
 
     mem_dep_fact_parser = subparsers.add_parser("mem-deprecate-fact", help="Tombstone a fact so it no longer pollutes LLM context")
@@ -6316,6 +6560,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_gitea_cfg.add_argument("--url", default=None, help="Update Gitea server URL")
     p_gitea_cfg.add_argument("--user", default=None, help="Update Gitea repository owner")
     p_gitea_cfg.add_argument("--token", default=None, help="Update Gitea API token")
+    p_gitea_cfg.add_argument("--service", default=None, help="Update Gitea service name (default: gitea)")
     p_gitea_cfg.add_argument("--workspaces-root", default=None, help="Update primary workspaces root directory (auto-aligns remote_share_path)")
     p_gitea_cfg.add_argument("--remote-share", default=None, help="Update remote customizations.db share path")
     p_gitea_cfg.add_argument("--auto-detect", action="store_true", help="Automatically scan drives and registered projects to heal paths")
@@ -6555,13 +6800,14 @@ def main(argv: list[str] = None):
             sys.exit(2)
         return
     elif args.command == "gitea-config":
-        if any(getattr(args, k, None) is not None for k in ("url", "user", "token", "workspaces_root", "remote_share")):
+        if any(getattr(args, k, None) is not None for k in ("url", "user", "token", "workspaces_root", "remote_share", "service")):
             set_gitea_config(
                 url=getattr(args, "url", None),
                 user=getattr(args, "user", None),
                 token=getattr(args, "token", None),
                 workspaces_root=getattr(args, "workspaces_root", None),
                 remote_share=getattr(args, "remote_share", None),
+                service=getattr(args, "service", None),
             )
         gitea_config_summary(auto_detect=getattr(args, "auto_detect", False))
         return
@@ -6591,110 +6837,121 @@ def main(argv: list[str] = None):
             return
 
         pconn = get_project_connection(proj_root)
-        init_project_db(pconn)
-
-        if args.command == "mem-save-decision":
-            mem_save_decision(pconn, args.title, args.content, args.category)
-        elif args.command == "mem-save-snapshot":
-            mem_save_snapshot(
-                pconn,
-                args.summary,
-                conversation_id=args.cid,
-                next_steps=args.next_steps,
-                files_touched=args.files,
-                auto_commit=not getattr(args, "no_commit", False),
-            )
-        elif args.command == "mem-save-fact":
-            mem_save_fact(pconn, args.key, args.value, reason=args.reason)
-        elif args.command == "mem-deprecate-fact":
-            mem_deprecate_fact(pconn, args.key, reason=args.reason)
-        elif args.command == "mem-fact-history":
-            mem_fact_history(pconn, key=args.key)
-        elif args.command == "mem-reconcile":
-            mem_reconcile(pconn)
-        elif args.command == "mem-task-add":
-            mem_task_add(pconn, args.title, description=args.desc, priority=args.priority, status=args.status)
-        elif args.command == "mem-task-update":
-            mem_task_update(pconn, args.id, status=args.status, priority=args.priority, title=args.title, description=args.desc)
-        elif args.command == "mem-task-list":
-            mem_task_list(pconn, status=args.status, as_json=args.json)
-        elif args.command == "mem-task-clear":
-            mem_task_clear(pconn, only_completed=not getattr(args, "all", False))
-        elif args.command == "mem-compact":
-            mem_compact(pconn, summary=args.summary, next_steps=args.next_steps, archive_completed=not getattr(args, "keep_completed", False), project_root=proj_root)
-        elif args.command == "mem-get-context":
-            mem_get_context(pconn, project_root=proj_root)
-        elif args.command == "mem-search":
-            mem_search(pconn, args.query)
-        elif args.command == "mem-prune":
-            mem_prune(pconn, max_snapshots=args.max_snapshots, max_age_days=args.max_age)
-
-        stop_all_writer_queues()
-        pconn.close()
+        try:
+            if args.command == "mem-save-decision":
+                dec_title = getattr(args, "opt_title", None) or getattr(args, "title", None)
+                dec_content = getattr(args, "opt_content", None) or getattr(args, "content", None)
+                if not dec_title or not dec_content:
+                    print("Error: mem-save-decision requires both title and content (positional or via --title/--content).")
+                    sys.exit(1)
+                mem_save_decision(
+                    pconn,
+                    dec_title,
+                    dec_content,
+                    args.category,
+                    rationale=getattr(args, "rationale", None),
+                )
+            elif args.command == "mem-save-snapshot":
+                mem_save_snapshot(
+                    pconn,
+                    args.summary,
+                    conversation_id=args.cid,
+                    next_steps=args.next_steps,
+                    files_touched=args.files,
+                    auto_commit=not getattr(args, "no_commit", False),
+                )
+            elif args.command == "mem-save-fact":
+                mem_save_fact(pconn, args.key, args.value, reason=args.reason)
+            elif args.command == "mem-deprecate-fact":
+                mem_deprecate_fact(pconn, args.key, reason=args.reason)
+            elif args.command == "mem-fact-history":
+                mem_fact_history(pconn, key=args.key)
+            elif args.command == "mem-reconcile":
+                mem_reconcile(pconn)
+            elif args.command == "mem-task-add":
+                mem_task_add(pconn, args.title, description=args.desc, priority=args.priority, status=args.status)
+            elif args.command == "mem-task-update":
+                mem_task_update(pconn, args.id, status=args.status, priority=args.priority, title=args.title, description=args.desc)
+            elif args.command == "mem-task-list":
+                mem_task_list(pconn, status=args.status, as_json=args.json)
+            elif args.command == "mem-task-clear":
+                mem_task_clear(pconn, only_completed=not getattr(args, "all", False))
+            elif args.command == "mem-compact":
+                mem_compact(pconn, summary=args.summary, next_steps=args.next_steps, archive_completed=not getattr(args, "keep_completed", False), project_root=proj_root)
+            elif args.command == "mem-get-context":
+                mem_get_context(pconn, project_root=proj_root)
+            elif args.command == "mem-search":
+                mem_search(pconn, args.query)
+            elif args.command == "mem-prune":
+                mem_prune(pconn, max_snapshots=args.max_snapshots, max_age_days=args.max_age)
+        finally:
+            stop_all_writer_queues()
+            pconn.close()
         return
 
     # Route central DB commands
     conn = get_connection(DB_PATH)
-    init_db(conn)
-    init_synonyms(conn)
+    try:
+        init_db(conn)
+        init_synonyms(conn)
 
-    if args.command == "import-all" or not args.command:
-        import_from_plugins(conn)
-    elif args.command == "get-active-rules":
-        get_active_rules(conn)
-    elif args.command == "get-rule":
-        get_rule(conn, args.key)
-    elif args.command == "get-skill":
-        get_skill(conn, args.name, summary=getattr(args, "summary", False), section=getattr(args, "section", None))
-    elif args.command == "learn-rule":
-        learn_rule(conn, args.key, args.name, args.content, category=args.category, scope=args.scope)
-    elif args.command == "doctor":
-        doctor(conn)
-    elif args.command == "fix-utf8":
-        fix_utf8(check_only=getattr(args, "check", False))
-    elif args.command == "check-update":
-        check_update()
-    elif args.command == "update":
-        if getattr(args, "check", False):
+        if args.command == "import-all" or not args.command:
+            import_from_plugins(conn)
+        elif args.command == "get-active-rules":
+            get_active_rules(conn)
+        elif args.command == "get-rule":
+            get_rule(conn, args.key)
+        elif args.command == "get-skill":
+            get_skill(conn, args.name, summary=getattr(args, "summary", False), section=getattr(args, "section", None))
+        elif args.command == "learn-rule":
+            learn_rule(conn, args.key, args.name, args.content, category=args.category, scope=args.scope)
+        elif args.command == "doctor":
+            doctor(conn)
+        elif args.command == "fix-utf8":
+            fix_utf8(check_only=getattr(args, "check", False))
+        elif args.command == "check-update":
             check_update()
-        else:
-            update_plugin(force=getattr(args, "force", False))
-    elif args.command == "search":
-        search(conn, args.query)
-    elif args.command == "suggest":
-        suggest_skills(conn, args.task, as_json=args.json, cwd_path=Path(args.cwd) if getattr(args, "cwd", None) else None)
-    elif args.command == "import-file":
-        import_file(conn, args.file_path)
-    elif args.command == "remove":
-        remove_item(conn, args.type, args.name)
-    elif args.command == "sync":
-        sync_database(conn, args.direction, args.remote)
-    elif args.command == "list":
-        list_all(conn)
-    elif args.command == "stats":
-        stats(conn, show_savings=getattr(args, "savings", False))
-    elif args.command == "export-skill":
-        export_skill(conn, args.name, args.target)
-    elif args.command == "profile":
-        if args.action == "set":
-            if not args.tier:
-                print("Error: Specify tier to set (ultra, standard, lean, local, offline). Example: skillsdb profile set local")
+        elif args.command == "update":
+            if getattr(args, "check", False):
+                check_update()
             else:
-                set_profile(args.tier, db_path=DB_PATH)
-        elif args.action == "auto":
-            set_profile("auto", db_path=DB_PATH)
-        else:
-            get_profile()
-    elif args.command == "get-skills":
-        get_skills_parallel(args.names, max_workers=args.workers, as_json=args.json, summary=args.summary, db_path=DB_PATH)
-    elif args.command == "search-multi":
-        search_multi_parallel(args.queries, max_workers=args.workers, limit_per_query=args.limit, as_json=args.json, db_path=DB_PATH)
-    elif args.command == "get-cluster":
-        get_cluster(args.domain, max_workers=args.workers, as_json=args.json, summary=args.summary, db_path=DB_PATH)
-    elif args.command == "benchmark-concurrency":
-        benchmark_concurrency(num_queries=args.queries, max_workers=args.workers, db_path=DB_PATH)
-
-    conn.close()
+                update_plugin(force=getattr(args, "force", False))
+        elif args.command == "search":
+            search(conn, args.query)
+        elif args.command == "suggest":
+            suggest_skills(conn, args.task, as_json=args.json, cwd_path=Path(args.cwd) if getattr(args, "cwd", None) else None)
+        elif args.command == "import-file":
+            import_file(conn, args.file_path)
+        elif args.command == "remove":
+            remove_item(conn, args.type, args.name)
+        elif args.command == "sync":
+            sync_database(conn, args.direction, args.remote)
+        elif args.command == "list":
+            list_all(conn)
+        elif args.command == "stats":
+            stats(conn, show_savings=getattr(args, "savings", False))
+        elif args.command == "export-skill":
+            export_skill(conn, args.name, args.target)
+        elif args.command == "profile":
+            if args.action == "set":
+                if not args.tier:
+                    print("Error: Specify tier to set (ultra, standard, lean, local, offline). Example: skillsdb profile set local")
+                else:
+                    set_profile(args.tier, db_path=DB_PATH)
+            elif args.action == "auto":
+                set_profile("auto", db_path=DB_PATH)
+            else:
+                get_profile()
+        elif args.command == "get-skills":
+            get_skills_parallel(args.names, max_workers=args.workers, as_json=args.json, summary=args.summary, db_path=DB_PATH)
+        elif args.command == "search-multi":
+            search_multi_parallel(args.queries, max_workers=args.workers, limit_per_query=args.limit, as_json=args.json, db_path=DB_PATH)
+        elif args.command == "get-cluster":
+            get_cluster(args.domain, max_workers=args.workers, as_json=args.json, summary=args.summary, db_path=DB_PATH)
+        elif args.command == "benchmark-concurrency":
+            benchmark_concurrency(num_queries=args.queries, max_workers=args.workers, db_path=DB_PATH)
+    finally:
+        conn.close()
 
 # =====================================================================
 # Standalone CLI Entrypoint

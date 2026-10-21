@@ -11,12 +11,24 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from ..config import TIER_ULTRA, DB_PATH, GEMINI_DIR, __version__
+from ..core.db import get_connection, managed_connection
 from ..core.detector import detect_model_tier
 from .writer_queue import get_writer_queue, flush_journals
 from .gitea_sync import _is_temp_workspace, save_code_commit, get_workspace_git_telemetry, learn_workspace, flush_all_pending_pushes, setup_workspace_git
 from ..search.fts import detect_cwd_hints
 
 _HOOK_STATE_FILE = Path(tempfile.gettempdir()) / "skillsdb_hook_state.json"
+_VERIFIED_PROJECT_DBS: set[str] = set()
+_REQUIRED_PROJECT_TABLES = frozenset({
+    "project_decisions",
+    "session_snapshots",
+    "project_facts",
+    "fact_history",
+    "project_tasks",
+    "task_verifications",
+    "task_handoffs",
+    "project_memory_fts",
+})
 
 
 def _is_protected_non_workspace(path: Path) -> bool:
@@ -76,21 +88,53 @@ def get_project_db_path(project_root: Path = None) -> Path:
 
 
 def get_project_connection(project_root: Path = None) -> sqlite3.Connection:
-    """Returns a WAL-enabled SQLite connection to the project memory database."""
+    """Returns a WAL-enabled, memory-mapped SQLite connection to the project memory database."""
     db_path = get_project_db_path(project_root)
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path, timeout=30.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode = WAL;")
-    conn.execute("PRAGMA busy_timeout = 5000;")
-    conn.execute("PRAGMA auto_vacuum = INCREMENTAL;")
-    conn.execute("PRAGMA synchronous = NORMAL;")
+    conn = get_connection(db_path, is_project_db=True)
     init_project_db(conn)
     return conn
 
 
+def _project_schema_ready(conn: sqlite3.Connection) -> bool:
+    """Fast read-only check verifying all project memory tables and columns exist without taking a write lock."""
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND name IN "
+            "('project_decisions', 'session_snapshots', 'project_facts', 'fact_history', "
+            "'project_tasks', 'task_verifications', 'task_handoffs', 'project_memory_fts');"
+        )
+        found = {row[0] for row in cur.fetchall()}
+        if not _REQUIRED_PROJECT_TABLES.issubset(found):
+            return False
+        cur.execute("PRAGMA table_info(session_snapshots);")
+        snap_cols = {row[1] for row in cur.fetchall()}
+        if "commit_hash" not in snap_cols:
+            return False
+        cur.execute("PRAGMA table_info(project_facts);")
+        fact_cols = {row[1] for row in cur.fetchall()}
+        return "deprecated_at" in fact_cols and "superseded_by" in fact_cols
+    except sqlite3.Error:
+        return False
+
+
 def init_project_db(conn: sqlite3.Connection):
     """Initializes tables for architectural decisions, snapshots, project facts, tasks, verifications, and handoffs."""
+    db_key = None
+    try:
+        row = conn.execute("PRAGMA database_list;").fetchone()
+        if row and row[2]:
+            db_key = f"{os.path.abspath(row[2])}:{os.path.getsize(row[2]) if os.path.exists(row[2]) else 0}"
+            if db_key in _VERIFIED_PROJECT_DBS:
+                return
+    except sqlite3.Error:
+        pass
+
+    if _project_schema_ready(conn):
+        if db_key:
+            _VERIFIED_PROJECT_DBS.add(db_key)
+        return
+
     cursor = conn.cursor()
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS project_decisions (
@@ -190,6 +234,8 @@ def init_project_db(conn: sqlite3.Connection):
     );
     """)
     conn.commit()
+    if db_key:
+        _VERIFIED_PROJECT_DBS.add(db_key)
 
 
 def mem_init(project_root: Path = None):
@@ -198,19 +244,28 @@ def mem_init(project_root: Path = None):
         print(f"Skipped: '{root}' is a protected system/profile directory, not a project workspace.")
         return
     db_path = get_project_db_path(root)
-    conn = get_project_connection(root)
-    init_project_db(conn)
-    conn.close()
+    with managed_connection(db_path, is_project_db=True) as conn:
+        init_project_db(conn)
     if not _is_temp_workspace(root) and not (root / ".git" / "HEAD").exists():
         setup_workspace_git(root, configure_remote=False)
     learn_workspace(root)
     print(f"Project memory database initialized at: {db_path}")
 
 
-def mem_save_decision(conn: sqlite3.Connection, title: str, content: str, category: str = "architecture", db_path: Path = None):
+def mem_save_decision(
+    conn: sqlite3.Connection,
+    title: str,
+    content: str,
+    category: str = "architecture",
+    db_path: Path = None,
+    rationale: str = None,
+):
     """Saves an architectural decision using WriterQueue if path is available to prevent lock contention."""
     now_iso = datetime.now(timezone.utc).isoformat()
+    full_content = f"{content.strip()}\nRationale: {rationale.strip()}" if rationale and rationale.strip() else content
     target_path = db_path or (Path(conn.cursor().execute("PRAGMA database_list;").fetchone()[2]) if conn else None)
+    if conn and conn.in_transaction:
+        conn.commit()
 
     if target_path and Path(target_path).exists():
         wq = get_writer_queue(target_path)
@@ -218,12 +273,12 @@ def mem_save_decision(conn: sqlite3.Connection, title: str, content: str, catego
             cur.execute("""
             INSERT INTO project_decisions (title, content, category, is_active, created_at, updated_at)
             VALUES (?, ?, ?, 1, ?, ?);
-            """, (title, content, category, now_iso, now_iso))
+            """, (title, full_content, category, now_iso, now_iso))
             row_id = cur.lastrowid
             cur.execute("""
             INSERT INTO project_memory_fts (source_table, title_or_key, content)
             VALUES ('decision', ?, ?);
-            """, (title, content))
+            """, (title, full_content))
             return row_id
         row_id = wq.execute_write(_write)
         print(f"Project decision saved (ID {row_id}): '{title}'")
@@ -233,12 +288,12 @@ def mem_save_decision(conn: sqlite3.Connection, title: str, content: str, catego
     cursor.execute("""
     INSERT INTO project_decisions (title, content, category, is_active, created_at, updated_at)
     VALUES (?, ?, ?, 1, ?, ?);
-    """, (title, content, category, now_iso, now_iso))
+    """, (title, full_content, category, now_iso, now_iso))
     row_id = cursor.lastrowid
     cursor.execute("""
     INSERT INTO project_memory_fts (source_table, title_or_key, content)
     VALUES ('decision', ?, ?);
-    """, (title, content))
+    """, (title, full_content))
     conn.commit()
     print(f"Project decision saved (ID {row_id}): '{title}'")
 
@@ -907,18 +962,16 @@ def handle_pre_invocation_hook():
         cwd_hints = detect_cwd_hints(proj_path)
         if cwd_hints and DB_PATH.exists():
             try:
-                gconn = sqlite3.connect(DB_PATH, timeout=5.0)
-                gconn.row_factory = sqlite3.Row
-                gcursor = gconn.cursor()
-                fts_query = " OR ".join(cwd_hints[:8])
-                gcursor.execute("""
-                SELECT s.name, s.description FROM skills_fts f
-                JOIN skills s ON f.rowid = s.id
-                WHERE skills_fts MATCH ?
-                ORDER BY rank LIMIT 3;
-                """, (fts_query,))
-                matched_skills = gcursor.fetchall()
-                gconn.close()
+                with managed_connection(DB_PATH) as gconn:
+                    gcursor = gconn.cursor()
+                    fts_query = " OR ".join(cwd_hints[:8])
+                    gcursor.execute("""
+                    SELECT s.name, s.description FROM skills_fts f
+                    JOIN skills s ON f.rowid = s.id
+                    WHERE skills_fts MATCH ?
+                    ORDER BY rank LIMIT 3;
+                    """, (fts_query,))
+                    matched_skills = gcursor.fetchall()
                 if matched_skills:
                     lines.append(f"[AUTONOMOUS DIRECTORY SCOPING: {', '.join(cwd_hints)}]")
                     lines.append("Domain micro-skills pre-routed for current workspace:")
@@ -931,85 +984,83 @@ def handle_pre_invocation_hook():
 
     if has_valid_workspace and db_path and db_path.exists():
         try:
-            conn = sqlite3.connect(db_path, timeout=5.0)
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
+            with managed_connection(db_path, is_project_db=True) as conn:
+                init_project_db(conn)
+                cursor = conn.cursor()
 
-            # 2. Autonomous Auto-Compaction check (prunes completed tasks automatically)
-            cursor.execute("SELECT COUNT(*) FROM project_tasks WHERE status = 'completed';")
-            completed_count = cursor.fetchone()[0]
-            if completed_count >= 3:
-                mem_compact(conn, summary=f"[AUTO-COMPACTED] Pruned {completed_count} completed tasks and consolidated state.", archive_completed=True, project_root=root_path, db_path=db_path, silent=True)
+                # 2. Autonomous Auto-Compaction check (prunes completed tasks automatically)
+                cursor.execute("SELECT COUNT(*) FROM project_tasks WHERE status = 'completed';")
+                completed_count = cursor.fetchone()[0]
+                if completed_count >= 3:
+                    mem_compact(conn, summary=f"[AUTO-COMPACTED] Pruned {completed_count} completed tasks and consolidated state.", archive_completed=True, project_root=root_path, db_path=db_path, silent=True)
 
-            mem_lines = []
-            git_telem = get_workspace_git_telemetry(root_path)
-            if git_telem:
-                mem_lines.append(git_telem)
+                mem_lines = []
+                git_telem = get_workspace_git_telemetry(root_path)
+                if git_telem:
+                    mem_lines.append(git_telem)
 
-            # 3. Active Task Board
-            cursor.execute("""
-            SELECT id, title, status, priority FROM project_tasks
-            WHERE status IN ('pending', 'in_progress', 'blocked')
-            ORDER BY 
-                CASE status WHEN 'in_progress' THEN 1 WHEN 'pending' THEN 2 ELSE 3 END,
-                CASE priority WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'med' THEN 3 ELSE 4 END,
-                id ASC LIMIT 5;
-            """)
-            open_tasks = cursor.fetchall()
-            if open_tasks:
-                if mem_lines:
-                    mem_lines.append("")
-                mem_lines.append("Active Task Board (Deterministic Progress):")
-                for t in open_tasks:
-                    mem_lines.append(f"  * [#{t['id']}] [{t['status'].upper():11}] ({t['priority'].upper():8}): {t['title']}")
+                # 3. Active Task Board
+                cursor.execute("""
+                SELECT id, title, status, priority FROM project_tasks
+                WHERE status IN ('pending', 'in_progress', 'blocked')
+                ORDER BY 
+                    CASE status WHEN 'in_progress' THEN 1 WHEN 'pending' THEN 2 ELSE 3 END,
+                    CASE priority WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'med' THEN 3 ELSE 4 END,
+                    id ASC LIMIT 5;
+                """)
+                open_tasks = cursor.fetchall()
+                if open_tasks:
+                    if mem_lines:
+                        mem_lines.append("")
+                    mem_lines.append("Active Task Board (Deterministic Progress):")
+                    for t in open_tasks:
+                        mem_lines.append(f"  * [#{t['id']}] [{t['status'].upper():11}] ({t['priority'].upper():8}): {t['title']}")
 
-            # 3.5 Active Agent Handoffs
-            cursor.execute("SELECT id, source_role, target_role, notes FROM task_handoffs WHERE status = 'pending' ORDER BY created_at DESC LIMIT 3;")
-            pending_hos = cursor.fetchall()
-            if pending_hos:
-                if mem_lines:
-                    mem_lines.append("")
-                mem_lines.append("Pending Agent Handoffs (Delegation Queue):")
-                for ho in pending_hos:
-                    note_s = f" - '{ho['notes'][:60]}...'" if ho['notes'] else ""
-                    mem_lines.append(f"  * [{ho['id']}] [{ho['source_role']}] -> [{ho['target_role']}]{note_s}")
+                # 3.5 Active Agent Handoffs
+                cursor.execute("SELECT id, source_role, target_role, notes FROM task_handoffs WHERE status = 'pending' ORDER BY created_at DESC LIMIT 3;")
+                pending_hos = cursor.fetchall()
+                if pending_hos:
+                    if mem_lines:
+                        mem_lines.append("")
+                    mem_lines.append("Pending Agent Handoffs (Delegation Queue):")
+                    for ho in pending_hos:
+                        note_s = f" - '{ho['notes'][:60]}...'" if ho['notes'] else ""
+                        mem_lines.append(f"  * [{ho['id']}] [{ho['source_role']}] -> [{ho['target_role']}]{note_s}")
 
-            # 4. Key Facts (Active only, tombstoned excluded)
-            cursor.execute("SELECT key, value FROM project_facts WHERE deprecated_at IS NULL ORDER BY updated_at DESC LIMIT 10;")
-            facts = cursor.fetchall()
-            if facts:
-                if mem_lines:
-                    mem_lines.append("")
-                mem_lines.append("Project Facts & Configs:")
-                for f in facts:
-                    mem_lines.append(f"  * {f['key']}: {f['value']}")
+                # 4. Key Facts (Active only, tombstoned excluded)
+                cursor.execute("SELECT key, value FROM project_facts WHERE deprecated_at IS NULL ORDER BY updated_at DESC LIMIT 10;")
+                facts = cursor.fetchall()
+                if facts:
+                    if mem_lines:
+                        mem_lines.append("")
+                    mem_lines.append("Project Facts & Configs:")
+                    for f in facts:
+                        mem_lines.append(f"  * {f['key']}: {f['value']}")
 
-            # 5. Active Decisions
-            cursor.execute("SELECT title, content FROM project_decisions WHERE is_active = 1 ORDER BY updated_at DESC LIMIT 5;")
-            decs = cursor.fetchall()
-            if decs:
-                if mem_lines:
-                    mem_lines.append("")
-                mem_lines.append("Active Architectural Decisions:")
-                for d in decs:
-                    mem_lines.append(f"  * [{d['title']}]: {d['content']}")
+                # 5. Active Decisions
+                cursor.execute("SELECT title, content FROM project_decisions WHERE is_active = 1 ORDER BY updated_at DESC LIMIT 5;")
+                decs = cursor.fetchall()
+                if decs:
+                    if mem_lines:
+                        mem_lines.append("")
+                    mem_lines.append("Active Architectural Decisions:")
+                    for d in decs:
+                        mem_lines.append(f"  * [{d['title']}]: {d['content']}")
 
-            # 6. Milestone Snapshot
-            cursor.execute("SELECT summary, next_steps, files_touched, commit_hash, created_at FROM session_snapshots ORDER BY id DESC LIMIT 1;")
-            snap = cursor.fetchone()
-            if snap:
-                if mem_lines:
-                    mem_lines.append("")
-                mem_lines.append("Latest Project Milestone Snapshot:")
-                mem_lines.append(f"  Summary: {snap['summary']}")
-                if "commit_hash" in snap.keys() and snap['commit_hash']:
-                    mem_lines.append(f"  Commit: {snap['commit_hash'][:7]}")
-                if "files_touched" in snap.keys() and snap['files_touched']:
-                    mem_lines.append(f"  Files Touched: {snap['files_touched']}")
-                if snap['next_steps']:
-                    mem_lines.append(f"  Next Steps: {snap['next_steps']}")
-
-            conn.close()
+                # 6. Milestone Snapshot
+                cursor.execute("SELECT summary, next_steps, files_touched, commit_hash, created_at FROM session_snapshots ORDER BY id DESC LIMIT 1;")
+                snap = cursor.fetchone()
+                if snap:
+                    if mem_lines:
+                        mem_lines.append("")
+                    mem_lines.append("Latest Project Milestone Snapshot:")
+                    mem_lines.append(f"  Summary: {snap['summary']}")
+                    if "commit_hash" in snap.keys() and snap['commit_hash']:
+                        mem_lines.append(f"  Commit: {snap['commit_hash'][:7]}")
+                    if "files_touched" in snap.keys() and snap['files_touched']:
+                        mem_lines.append(f"  Files Touched: {snap['files_touched']}")
+                    if snap['next_steps']:
+                        mem_lines.append(f"  Next Steps: {snap['next_steps']}")
 
             if mem_lines:
                 lines.append("=== PROJECT MEMORY CONTEXT (Auto-Loaded via Hook) ===")

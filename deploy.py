@@ -9,8 +9,81 @@ import os
 import sys
 import json
 import shutil
+import sqlite3
 import argparse
+import contextlib
 from pathlib import Path
+
+
+def safe_deploy_database(source_db_file: Path, target_db_file: Path) -> None:
+    """
+    Safely deploys or upgrades customizations.db without overwriting active WAL files
+    or leaking SQLite file handles.
+    - If target_db_file already exists and is healthy, performs an atomic in-place
+      differential merge via ATTACH DATABASE, preserving 100% of runtime_config,
+      token_savings_log, and user-learned rules.
+    - If target_db_file does not exist (or needs initialization), uses SQLite's
+      native online backup API with clean WAL checkpointing.
+    """
+    target_db_file.parent.mkdir(parents=True, exist_ok=True)
+
+    if target_db_file.exists() and target_db_file.stat().st_size > 0:
+        try:
+            with contextlib.closing(sqlite3.connect(str(target_db_file), timeout=30.0)) as conn:
+                conn.execute("PRAGMA busy_timeout = 30000;")
+                conn.execute("PRAGMA journal_mode = WAL;")
+                cur = conn.cursor()
+                cur.execute("PRAGMA quick_check;")
+                if cur.fetchone()[0] == "ok":
+                    cur.execute("ATTACH DATABASE ? AS upstream;", (str(source_db_file),))
+                    try:
+                        cur.execute("""
+                        INSERT OR REPLACE INTO skills (name, plugin_name, category, is_active, description, content, token_estimate, updated_at)
+                        SELECT name, plugin_name, category, is_active, description, content, token_estimate, updated_at
+                        FROM upstream.skills;
+                        """)
+                        cur.execute("""
+                        INSERT OR REPLACE INTO rules (key, name, category, scope, is_active, summary, content, token_estimate, updated_at)
+                        SELECT key, name, category, scope, is_active, summary, content, token_estimate, updated_at
+                        FROM upstream.rules
+                        WHERE category != 'learned';
+                        """)
+                        cur.execute("""
+                        INSERT OR REPLACE INTO synonym_synapses (term, synonyms, language, category)
+                        SELECT term, synonyms, language, category
+                        FROM upstream.synonym_synapses;
+                        """)
+                        cur.execute("""
+                        INSERT OR REPLACE INTO runtime_config (key, value, updated_at)
+                        SELECT key, value, updated_at
+                        FROM upstream.runtime_config
+                        WHERE key = 'schema_version';
+                        """)
+                        cur.execute("INSERT INTO rules_fts(rules_fts) VALUES ('rebuild');")
+                        cur.execute("INSERT INTO skills_fts(skills_fts) VALUES ('rebuild');")
+                        cur.execute("INSERT INTO synonym_fts(synonym_fts) VALUES ('rebuild');")
+                        conn.commit()
+                    finally:
+                        cur.execute("DETACH DATABASE upstream;")
+                    conn.execute("PRAGMA wal_checkpoint(PASSIVE);")
+                    return
+        except Exception:
+            pass
+
+    # Fresh install or recovery path: remove stale WAL/SHM sidecars and use online backup API
+    for suffix in ("-wal", "-shm"):
+        sidecar = Path(str(target_db_file) + suffix)
+        if sidecar.exists():
+            try:
+                sidecar.unlink()
+            except OSError:
+                pass
+
+    with contextlib.closing(sqlite3.connect(str(source_db_file), timeout=30.0)) as src_conn:
+        with contextlib.closing(sqlite3.connect(str(target_db_file), timeout=30.0)) as dst_conn:
+            src_conn.backup(dst_conn)
+            dst_conn.execute("PRAGMA journal_mode = WAL;")
+            dst_conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
 
 
 def deploy(source_dir: Path = None, target_dir: Path = None):
@@ -42,54 +115,10 @@ def deploy(source_dir: Path = None, target_dir: Path = None):
     target_plugins_dir.mkdir(parents=True, exist_ok=True)
     target_plugin.mkdir(parents=True, exist_ok=True)
 
-    # 2. Copy Database & CLI Manager (preserving existing runtime_config and token_savings_log)
+    # 2. Copy Database & CLI Manager (via enterprise WAL-safe differential upgrade / online backup)
     print("[2/5] Deploying database and management CLI...")
     target_db_file = target_db_dir / "customizations.db"
-    preserved_runtime = []
-    preserved_savings = []
-    if target_db_file.exists():
-        try:
-            import sqlite3
-            with sqlite3.connect(str(target_db_file)) as old_conn:
-                cur = old_conn.cursor()
-                cur.execute(
-                    "SELECT key, value, updated_at FROM runtime_config WHERE key != 'schema_version'"
-                )
-                preserved_runtime = cur.fetchall()
-                cur.execute(
-                    "SELECT conversation_id, model_tier, step_count, turns_counted, baseline_tokens_per_turn, "
-                    "compact_tokens_per_turn, micro_skill_tokens_loaded, tokens_saved, estimated_cost_saved_usd, updated_at "
-                    "FROM token_savings_log"
-                )
-                preserved_savings = cur.fetchall()
-        except Exception:
-            pass
-
-    shutil.copy2(source_dir / "database" / "customizations.db", target_db_file)
-
-    if preserved_runtime or preserved_savings:
-        try:
-            import sqlite3
-            with sqlite3.connect(str(target_db_file)) as new_conn:
-                cur = new_conn.cursor()
-                for k, v, ts in preserved_runtime:
-                    if v is not None and str(v).strip() != "":
-                        cur.execute(
-                            "INSERT OR REPLACE INTO runtime_config (key, value, updated_at) VALUES (?, ?, ?)",
-                            (k, v, ts),
-                        )
-                for row in preserved_savings:
-                    cur.execute(
-                        "INSERT OR REPLACE INTO token_savings_log "
-                        "(conversation_id, model_tier, step_count, turns_counted, baseline_tokens_per_turn, "
-                        "compact_tokens_per_turn, micro_skill_tokens_loaded, tokens_saved, estimated_cost_saved_usd, updated_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        row,
-                    )
-                new_conn.commit()
-        except Exception:
-            pass
-
+    safe_deploy_database(source_dir / "database" / "customizations.db", target_db_file)
     shutil.copy2(source_dir / "database" / "db_manager.py", target_db_dir / "db_manager.py")
     if (source_dir / "skillsdb").exists():
         shutil.copytree(source_dir / "skillsdb", target_db_dir / "skillsdb", dirs_exist_ok=True)

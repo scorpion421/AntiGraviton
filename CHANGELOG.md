@@ -28,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **Modular decomposition of Gitea synchronization engine (`skillsdb/memory/gitea_config.py`, `skillsdb/memory/gitea_service.py`, `skillsdb/memory/gitea_releases.py`, `skillsdb/memory/gitea_sync.py`, `build.py`)**:
   - Split the 1,870-line `gitea_sync.py` monolith into four focused modules (`gitea_config.py`, `gitea_service.py`, `gitea_releases.py`, and `gitea_sync.py`) with full backward-compatible symbol re-exports and single-file bundling in `build.py`.
+- **Enterprise SQLite connection lifecycle, WAL/mmap tuning, and zero-lock schema checks (`skillsdb/core/db.py`, `skillsdb/memory/writer_queue.py`, `skillsdb/memory/project_memory.py`, `skillsdb/memory/gitea_config.py`, `deploy.py`, `skillsdb/cli.py`)**:
+  - Added `managed_connection()` and `execute_with_retry()` in `skillsdb/core/db.py` with consistent `30000 ms` `busy_timeout`, `64 MB` `mmap_size`, `temp_store = MEMORY`, and deterministic `conn.close()` on context exit to prevent Windows file-handle leaks.
+  - Added fast read-only `sqlite_master` verification (`_central_schema_ready()` and `_project_schema_ready()`) in `init_db()` and `init_project_db()` so read invocations (`get-skill`, `suggest`, `mem-get-context`, `PreInvocation` hook) acquire zero write locks.
+  - Registered `atexit` queue draining and passive WAL checkpointing in `WriterQueue` (`skillsdb/memory/writer_queue.py`).
+  - Added `safe_deploy_database()` in `deploy.py` using in-place `ATTACH DATABASE` differential merges and online `sqlite3.Connection.backup()` instead of raw `shutil.copy2` file overwrites on active WAL databases.
+  - Added fault-tolerant CLI flag aliases (`--title`/`--topic`, `--content`/`--decision`, `--rationale`/`--context`/`--reason` on `mem-save-decision`, `--rationale`/`--context` on `mem-save-fact`, and `--service` on `gitea-config`).
 
 ### Fixed
 - **PowerShell 5.1 service installer parameter syntax, secondary drive NTFS ACLs, and native download speed (`gitea-service/scripts/deploy-gitea.ps1`, `install-antigraviton.ps1`, `deploy.py`)**:

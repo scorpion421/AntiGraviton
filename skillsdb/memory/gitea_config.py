@@ -14,7 +14,7 @@ import tempfile
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 
 from ..config import (
     DB_PATH,
@@ -24,6 +24,7 @@ from ..config import (
     GITEA_DEFAULT_TOKEN,
     GITEA_SERVICE_NAME,
 )
+from ..core.db import managed_connection, execute_with_retry
 
 
 def _is_temp_workspace(project_root: Path) -> bool:
@@ -144,29 +145,28 @@ def _scrub_workspace_git_config_credentials(project_root: Path, db_path: Path = 
 
         if db_path:
             now_iso = datetime.now(timezone.utc).isoformat()
-            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(db_path, timeout=3.0)
-            cur = conn.cursor()
-            cur.execute(
-                "CREATE TABLE IF NOT EXISTS runtime_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT);"
-            )
-            cur.execute("SELECT COUNT(*) FROM runtime_config WHERE key = 'gitea_token';")
-            has_token = cur.fetchone()[0] > 0
-            if not has_token:
-                m0 = matches[0]
-                scheme, _, auth_tok, host_and_path, repo_owner = m0.group(2), m0.group(3), m0.group(4), m0.group(5), m0.group(6)
-                host_port = host_and_path.split("/", 1)[0]
-                learned_url = f"{scheme}{host_port}"
-                cur.executemany(
-                    "INSERT OR IGNORE INTO runtime_config (key, value, updated_at) VALUES (?, ?, ?);",
-                    [
-                        ("gitea_url", learned_url, now_iso),
-                        ("gitea_user", repo_owner, now_iso),
-                        ("gitea_token", auth_tok, now_iso),
-                    ],
+            with managed_connection(db_path) as conn:
+                cur = conn.cursor()
+                execute_with_retry(
+                    cur,
+                    "CREATE TABLE IF NOT EXISTS runtime_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT);",
                 )
-                conn.commit()
-            conn.close()
+                cur.execute("SELECT COUNT(*) FROM runtime_config WHERE key = 'gitea_token';")
+                has_token = cur.fetchone()[0] > 0
+                if not has_token:
+                    m0 = matches[0]
+                    scheme, _, auth_tok, host_and_path, repo_owner = m0.group(2), m0.group(3), m0.group(4), m0.group(5), m0.group(6)
+                    host_port = host_and_path.split("/", 1)[0]
+                    learned_url = f"{scheme}{host_port}"
+                    cur.executemany(
+                        "INSERT OR IGNORE INTO runtime_config (key, value, updated_at) VALUES (?, ?, ?);",
+                        [
+                            ("gitea_url", learned_url, now_iso),
+                            ("gitea_user", repo_owner, now_iso),
+                            ("gitea_token", auth_tok, now_iso),
+                        ],
+                    )
+                    conn.commit()
 
         cleaned_cfg = pattern.sub(r"\1\2\5", raw_cfg)
         if cleaned_cfg != raw_cfg:
@@ -198,43 +198,42 @@ def learn_workspace(project_root: Path, db_path: Path = DB_PATH) -> Optional[str
         _scrub_workspace_git_config_credentials(abs_root, db_path=db_path)
 
         if db_path:
-            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(db_path, timeout=3.0)
-            cur = conn.cursor()
-            cur.execute(
-                "CREATE TABLE IF NOT EXISTS runtime_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT);"
-            )
-            scratch_abs = Path(os.path.abspath(str(GEMINI_DIR / "antigravity" / "scratch")))
-            try:
-                abs_root.relative_to(scratch_abs)
-                new_is_scratch = True
-            except ValueError:
-                new_is_scratch = False
-
-            cur.execute(
-                "SELECT key, value FROM runtime_config WHERE LOWER(key) = LOWER(?);",
-                (ws_key,),
-            )
-            existing_rows = cur.fetchall()
-            skip_insert = False
-            for ex_key, ex_val in existing_rows:
-                if new_is_scratch and ex_val and Path(ex_val).exists():
-                    try:
-                        Path(os.path.abspath(str(ex_val))).relative_to(scratch_abs)
-                    except ValueError:
-                        skip_insert = True
-                        break
-                if ex_key != ws_key:
-                    cur.execute("DELETE FROM runtime_config WHERE key = ?;", (ex_key,))
-
-            if not skip_insert:
-                cur.execute(
-                    "INSERT OR REPLACE INTO runtime_config (key, value, updated_at) VALUES (?, ?, ?);",
-                    (ws_key, str(abs_root), now_iso),
+            with managed_connection(db_path) as conn:
+                cur = conn.cursor()
+                execute_with_retry(
+                    cur,
+                    "CREATE TABLE IF NOT EXISTS runtime_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT);",
                 )
+                scratch_abs = Path(os.path.abspath(str(GEMINI_DIR / "antigravity" / "scratch")))
+                try:
+                    abs_root.relative_to(scratch_abs)
+                    new_is_scratch = True
+                except ValueError:
+                    new_is_scratch = False
 
-            conn.commit()
-            conn.close()
+                cur.execute(
+                    "SELECT key, value FROM runtime_config WHERE LOWER(key) = LOWER(?);",
+                    (ws_key,),
+                )
+                existing_rows = cur.fetchall()
+                skip_insert = False
+                for ex_key, ex_val in existing_rows:
+                    if new_is_scratch and ex_val and Path(ex_val).exists():
+                        try:
+                            Path(os.path.abspath(str(ex_val))).relative_to(scratch_abs)
+                        except ValueError:
+                            skip_insert = True
+                            break
+                    if ex_key != ws_key:
+                        execute_with_retry(cur, "DELETE FROM runtime_config WHERE key = ?;", (ex_key,))
+
+                if not skip_insert:
+                    execute_with_retry(
+                        cur,
+                        "INSERT OR REPLACE INTO runtime_config (key, value, updated_at) VALUES (?, ?, ?);",
+                        (ws_key, str(abs_root), now_iso),
+                    )
+                conn.commit()
         return str(abs_root)
     except Exception:
         return None
@@ -250,69 +249,71 @@ def get_learned_workspaces(db_path: Path = DB_PATH, prune_missing: bool = True) 
     """
     learned: Dict[str, str] = {}
     stale_keys: List[str] = []
+    valid_paths_to_scrub: List[Path] = []
     if not db_path or not Path(db_path).exists():
         return learned
     try:
-        conn = sqlite3.connect(db_path, timeout=3.0)
-        cur = conn.cursor()
-        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='runtime_config';")
-        if cur.fetchone():
-            cur.execute(
-                "SELECT key, value, updated_at FROM runtime_config WHERE key LIKE 'workspace:%' ORDER BY updated_at ASC;"
-            )
-            rows = cur.fetchall()
-            scratch_abs = Path(os.path.abspath(str(GEMINI_DIR / "antigravity" / "scratch")))
-            by_lower: Dict[str, Tuple[str, str]] = {}
+        with managed_connection(db_path) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='runtime_config';")
+            if cur.fetchone():
+                cur.execute(
+                    "SELECT key, value, updated_at FROM runtime_config WHERE key LIKE 'workspace:%' ORDER BY updated_at ASC;"
+                )
+                rows = cur.fetchall()
+                scratch_abs = Path(os.path.abspath(str(GEMINI_DIR / "antigravity" / "scratch")))
+                by_lower: Dict[str, Tuple[str, str]] = {}
 
-            for k, v, _ in rows:
-                name = k.split("workspace:", 1)[1]
-                if not name or not v:
-                    stale_keys.append(k)
-                    continue
-                p = Path(v)
-                if _is_excluded_workspace_path(p):
-                    stale_keys.append(k)
-                    for stray in (".agents", ".git"):
-                        stray_dir = p / stray
-                        if stray_dir.exists() and str(p).startswith(str(GEMINI_DIR / "config" / "plugins")):
-                            shutil.rmtree(stray_dir, ignore_errors=True)
-                    continue
-                if p.exists() and p.is_dir():
-                    _scrub_workspace_git_config_credentials(p, db_path=db_path)
-                    lower_name = name.lower()
-                    if lower_name in by_lower:
-                        prev_key, prev_val = by_lower[lower_name]
-                        try:
-                            Path(os.path.abspath(v)).relative_to(scratch_abs)
-                            curr_is_scratch = True
-                        except ValueError:
-                            curr_is_scratch = False
-                        try:
-                            Path(os.path.abspath(prev_val)).relative_to(scratch_abs)
-                            prev_is_scratch = True
-                        except ValueError:
-                            prev_is_scratch = False
+                for k, v, _ in rows:
+                    name = k.split("workspace:", 1)[1]
+                    if not name or not v:
+                        stale_keys.append(k)
+                        continue
+                    p = Path(v)
+                    if _is_excluded_workspace_path(p):
+                        stale_keys.append(k)
+                        for stray in (".agents", ".git"):
+                            stray_dir = p / stray
+                            if stray_dir.exists() and str(p).startswith(str(GEMINI_DIR / "config" / "plugins")):
+                                shutil.rmtree(stray_dir, ignore_errors=True)
+                        continue
+                    if p.exists() and p.is_dir():
+                        valid_paths_to_scrub.append(p)
+                        lower_name = name.lower()
+                        if lower_name in by_lower:
+                            prev_key, prev_val = by_lower[lower_name]
+                            try:
+                                Path(os.path.abspath(v)).relative_to(scratch_abs)
+                                curr_is_scratch = True
+                            except ValueError:
+                                curr_is_scratch = False
+                            try:
+                                Path(os.path.abspath(prev_val)).relative_to(scratch_abs)
+                                prev_is_scratch = True
+                            except ValueError:
+                                prev_is_scratch = False
 
-                        if curr_is_scratch and not prev_is_scratch:
-                            if k != prev_key:
+                            if curr_is_scratch and not prev_is_scratch:
+                                if k != prev_key:
+                                    stale_keys.append(k)
+                                continue
+                            else:
+                                if prev_key != k:
+                                    stale_keys.append(prev_key)
+                                learned.pop(prev_key.split("workspace:", 1)[1], None)
+                        by_lower[lower_name] = (k, v)
+                        learned[name] = v
+                    elif prune_missing:
+                        try:
+                            if p.parent.exists():
                                 stale_keys.append(k)
-                            continue
-                        else:
-                            if prev_key != k:
-                                stale_keys.append(prev_key)
-                            learned.pop(prev_key.split("workspace:", 1)[1], None)
-                    by_lower[lower_name] = (k, v)
-                    learned[name] = v
-                elif prune_missing:
-                    try:
-                        if p.parent.exists():
-                            stale_keys.append(k)
-                    except Exception:
-                        pass
-            if stale_keys:
-                cur.executemany("DELETE FROM runtime_config WHERE key = ?;", [(sk,) for sk in set(stale_keys)])
-                conn.commit()
-        conn.close()
+                        except Exception:
+                            pass
+                if stale_keys:
+                    cur.executemany("DELETE FROM runtime_config WHERE key = ?;", [(sk,) for sk in set(stale_keys)])
+                    conn.commit()
+        for p in valid_paths_to_scrub:
+            _scrub_workspace_git_config_credentials(p, db_path=db_path)
     except Exception:
         pass
     return learned
@@ -329,15 +330,14 @@ def get_gitea_config(db_path: Path = DB_PATH) -> Dict[str, str]:
     db_cfg: Dict[str, str] = {}
     if db_path and Path(db_path).exists():
         try:
-            conn = sqlite3.connect(db_path, timeout=3.0)
-            cur = conn.cursor()
-            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='runtime_config';")
-            if cur.fetchone():
-                cur.execute("SELECT key, value FROM runtime_config;")
-                for k, v in cur.fetchall():
-                    if v:
-                        db_cfg[k] = v
-            conn.close()
+            with managed_connection(db_path) as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='runtime_config';")
+                if cur.fetchone():
+                    cur.execute("SELECT key, value FROM runtime_config;")
+                    for k, v in cur.fetchall():
+                        if v:
+                            db_cfg[k] = v
         except Exception:
             pass
 
@@ -366,6 +366,11 @@ def get_gitea_config(db_path: Path = DB_PATH) -> Dict[str, str]:
         or db_cfg.get("remote_share_path")
         or ""
     )
+    svc_name = (
+        os.environ.get("SKILLSDB_GITEA_SERVICE")
+        or db_cfg.get("gitea_service")
+        or GITEA_SERVICE_NAME
+    )
 
     return {
         "url": url,
@@ -373,7 +378,7 @@ def get_gitea_config(db_path: Path = DB_PATH) -> Dict[str, str]:
         "token": token,
         "workspaces_root": workspaces_root,
         "remote_share": remote_share,
-        "service_name": GITEA_SERVICE_NAME,
+        "service_name": svc_name,
     }
 
 
@@ -383,6 +388,7 @@ def set_gitea_config(
     token: Optional[str] = None,
     workspaces_root: Optional[str] = None,
     remote_share: Optional[str] = None,
+    service: Optional[str] = None,
     db_path: Path = DB_PATH,
 ) -> Dict[str, str]:
     """Persists Gitea and workspace settings in runtime_config and registers the Git credential helper."""
@@ -398,19 +404,21 @@ def set_gitea_config(
         updates.append(("gitea_workspaces_root", str(workspaces_root).strip(), now_iso))
     if remote_share is not None:
         updates.append(("remote_share_path", str(remote_share).strip(), now_iso))
+    if service is not None:
+        updates.append(("gitea_service", str(service).strip(), now_iso))
 
     if updates and db_path:
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(db_path, timeout=5.0)
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS runtime_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT);"
-        )
-        conn.executemany(
-            "INSERT OR REPLACE INTO runtime_config (key, value, updated_at) VALUES (?, ?, ?);",
-            updates,
-        )
-        conn.commit()
-        conn.close()
+        with managed_connection(db_path) as conn:
+            cur = conn.cursor()
+            execute_with_retry(
+                cur,
+                "CREATE TABLE IF NOT EXISTS runtime_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT);",
+            )
+            cur.executemany(
+                "INSERT OR REPLACE INTO runtime_config (key, value, updated_at) VALUES (?, ?, ?);",
+                updates,
+            )
+            conn.commit()
 
     cfg = get_gitea_config(db_path=db_path)
     register_git_credential_helper(cfg.get("url"))

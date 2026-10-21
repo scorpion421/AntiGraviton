@@ -342,6 +342,58 @@ class TestGiteaSync(unittest.TestCase):
         self.assertIn("SECRET_KEY = sec123", ini)
         self.assertIn("TYPE = immediate", ini)
 
+    def test_enterprise_sqlite_connection_and_deploy_safety(self):
+        """Verifies managed_connection closing, 30s busy_timeout, safe_deploy_database WAL preservation, and CLI decision flag aliases."""
+        from skillsdb.core.db import managed_connection, init_db
+        from skillsdb.cli import build_parser
+        import deploy as dep
+
+        test_central_db = self.test_dir / "central_test.db"
+        with managed_connection(test_central_db, init_schema=True) as conn:
+            bt = conn.execute("PRAGMA busy_timeout;").fetchone()[0]
+            self.assertEqual(bt, 30000)
+            jmode = conn.execute("PRAGMA journal_mode;").fetchone()[0].lower()
+            self.assertEqual(jmode, "wal")
+            conn.execute(
+                "INSERT INTO runtime_config (key, value, updated_at) VALUES ('gitea_token', 'keep_me_safe', '2026-10-21');"
+            )
+            conn.execute(
+                "INSERT INTO rules (key, name, category, scope, is_active, summary, content, token_estimate, updated_at) "
+                "VALUES ('custom-learned-1', 'Custom Rule', 'learned', 'global', 1, 'Sum', 'Body', 10, '2026-10-21');"
+            )
+
+        # Connection must be closed after exiting context manager
+        with self.assertRaises(Exception):
+            conn.execute("SELECT 1;")
+
+        # Second init_db call must be a zero-write-lock fast check
+        with managed_connection(test_central_db) as conn2:
+            init_db(conn2)
+            self.assertFalse(conn2.in_transaction)
+
+        # Verify safe_deploy_database preserves runtime_config and learned rules in-place
+        source_template_db = Path(__file__).parent.parent / "database" / "customizations.db"
+        if source_template_db.exists():
+            dep.safe_deploy_database(source_template_db, test_central_db)
+            with managed_connection(test_central_db) as conn3:
+                tok = conn3.execute("SELECT value FROM runtime_config WHERE key = 'gitea_token';").fetchone()
+                self.assertIsNotNone(tok)
+                self.assertEqual(tok[0], "keep_me_safe")
+                learned = conn3.execute("SELECT COUNT(*) FROM rules WHERE key = 'custom-learned-1';").fetchone()[0]
+                self.assertEqual(learned, 1)
+
+        # Verify CLI parser accepts both positional and flag-based mem-save-decision arguments
+        parser = build_parser()
+        args_flags = parser.parse_args([
+            "mem-save-decision",
+            "--topic", "SQLite Architecture",
+            "--decision", "Use WAL and managed_connection",
+            "--rationale", "Prevents handle leaks on Windows",
+        ])
+        self.assertEqual(args_flags.opt_title, "SQLite Architecture")
+        self.assertEqual(args_flags.opt_content, "Use WAL and managed_connection")
+        self.assertEqual(args_flags.rationale, "Prevents handle leaks on Windows")
+
 
 if __name__ == "__main__":
     unittest.main()
