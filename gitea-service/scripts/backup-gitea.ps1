@@ -67,26 +67,53 @@ if ($RegisterScheduledTask) {
     return
 }
 
-New-Item -ItemType Directory -Force -Path $BackupTargetPath | Out-Null
+$localStagingDir = Join-Path $resolvedInstall "backups"
+New-Item -ItemType Directory -Force -Path $localStagingDir | Out-Null
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $hostTag = $env:COMPUTERNAME.ToLower()
-$archiveFile = Join-Path $BackupTargetPath "gitea-backup-$hostTag-$timestamp.zip"
+$archiveName = "gitea-backup-$hostTag-$timestamp.zip"
+$localArchiveFile = Join-Path $localStagingDir $archiveName
 $tempWorkDir = Join-Path ([System.IO.Path]::GetTempPath()) "gitea_dump_$timestamp"
 New-Item -ItemType Directory -Force -Path $tempWorkDir | Out-Null
 
 try {
-    & $giteaExe dump --config $configPath --work-path $resolvedInstall --tempdir $tempWorkDir --file $archiveFile
-    if (-not (Test-Path $archiveFile)) {
-        throw "Gitea dump completed without creating archive at $archiveFile"
+    & $giteaExe dump --config $configPath --work-path $resolvedInstall --tempdir $tempWorkDir --file $localArchiveFile
+    if (-not (Test-Path $localArchiveFile)) {
+        throw "Gitea dump completed without creating archive at $localArchiveFile"
     }
-    Write-Host "Created Gitea backup archive: $archiveFile" -ForegroundColor Green
+    Write-Host "Created local Gitea backup archive: $localArchiveFile" -ForegroundColor Green
 } finally {
     if (Test-Path $tempWorkDir) {
         Remove-Item -Path $tempWorkDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
-if ($RetentionDays -gt 0) {
+# Transfer staged archives to BackupTargetPath if different from localStagingDir and reachable
+try {
+    New-Item -ItemType Directory -Force -Path $BackupTargetPath -ErrorAction Stop | Out-Null
+    $resolvedTarget = (Resolve-Path $BackupTargetPath).Path
+    if ($resolvedTarget -ne $localStagingDir) {
+        Get-ChildItem -Path $localStagingDir -Filter "gitea-backup-*.zip" -File -ErrorAction SilentlyContinue | ForEach-Object {
+            $destFile = Join-Path $resolvedTarget $_.Name
+            if (-not (Test-Path $destFile)) {
+                Copy-Item -Path $_.FullName -Destination $destFile -Force
+                Write-Host "Transferred backup to target: $destFile" -ForegroundColor Green
+            }
+        }
+    }
+} catch {
+    Write-Warning "Target backup directory '$BackupTargetPath' temporarily unreachable ($($_.Exception.Message)). Archive preserved in local staging: $localArchiveFile"
+}
+
+# Keep the 2 most recent local staging archives
+Get-ChildItem -Path $localStagingDir -Filter "gitea-backup-*.zip" -File -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -Skip 2 |
+    ForEach-Object {
+        Remove-Item -Path $_.FullName -Force -ErrorAction SilentlyContinue
+    }
+
+if ($RetentionDays -gt 0 -and (Test-Path $BackupTargetPath)) {
     $cutoff = (Get-Date).AddDays(-$RetentionDays)
     Get-ChildItem -Path $BackupTargetPath -Filter "gitea-backup-*.zip" -File -ErrorAction SilentlyContinue |
         Where-Object { $_.LastWriteTime -lt $cutoff } |

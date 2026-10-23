@@ -355,16 +355,107 @@ def _get_current_branch(project_root: Path) -> str:
     return "main"
 
 
+def _extract_repo_name_from_remote_url(url: str) -> Optional[str]:
+    """Extracts the bare repository name (without .git suffix) from an HTTP(S) or SSH remote URL."""
+    if not url:
+        return None
+    cleaned = url.strip().rstrip("/")
+    if cleaned.endswith(".git"):
+        cleaned = cleaned[:-4]
+    tail = cleaned.split("/")[-1].split(":")[-1]
+    return tail or None
+
+
 def _resolve_workspace_repo_name(project_root: Path, repo_name: Optional[str] = None) -> str:
-    """Resolves the target Gitea repository name, preserving any existing Gitea remote name before falling back to folder name."""
+    """
+    Resolves the target Gitea repository name, preserving any existing non-empty Gitea remote name,
+    matching existing GitHub remote names or hyphen/underscore variants on Gitea before falling back
+    to the folder name.
+    """
     if repo_name:
         return repo_name
+
     configured_url = _get_configured_gitea_repo_url(project_root)
-    if configured_url:
-        tail = configured_url.rstrip("/").split("/")[-1]
-        if tail:
-            return tail
+    configured_name = _extract_repo_name_from_remote_url(configured_url) if configured_url else None
+
+    # Check if the workspace has a github remote (or non-Gitea origin) whose name exists on Gitea
+    gh_candidate: Optional[str] = None
+    if (project_root / ".git").exists():
+        for rem_alias in ("github", "origin"):
+            try:
+                res = subprocess.run(
+                    ["git", "remote", "get-url", rem_alias],
+                    cwd=str(project_root),
+                    capture_output=True,
+                    text=True,
+                    timeout=1.5,
+                )
+                if res.returncode == 0 and "github.com" in res.stdout.lower():
+                    gh_candidate = _extract_repo_name_from_remote_url(res.stdout)
+                    if gh_candidate:
+                        break
+            except Exception:
+                pass
+
+    if configured_name:
+        if gh_candidate and gh_candidate != configured_name:
+            try:
+                cfg_info = inspect_remote_repository(configured_name)
+                gh_info = inspect_remote_repository(gh_candidate)
+                if cfg_info.get("empty") and gh_info.get("exists") and not gh_info.get("empty"):
+                    return gh_candidate
+            except Exception:
+                pass
+        return configured_name
+
+    if gh_candidate and gh_candidate != project_root.name:
+        try:
+            gh_info = inspect_remote_repository(gh_candidate)
+            if gh_info.get("exists") and not gh_info.get("empty"):
+                return gh_candidate
+        except Exception:
+            pass
+
+    # Check hyphen <-> underscore variant on Gitea if folder name has not been populated yet
+    alt_name: Optional[str] = None
+    if "_" in project_root.name:
+        alt_name = project_root.name.replace("_", "-")
+    elif "-" in project_root.name:
+        alt_name = project_root.name.replace("-", "_")
+    if alt_name:
+        try:
+            cur_info = inspect_remote_repository(project_root.name)
+            if not cur_info.get("exists") or cur_info.get("empty"):
+                alt_info = inspect_remote_repository(alt_name)
+                if alt_info.get("exists") and not alt_info.get("empty"):
+                    return alt_name
+        except Exception:
+            pass
+
     return project_root.name
+
+
+def _prune_stale_origin_refs(project_root: Path) -> None:
+    """Deletes cached local refs/remotes/origin/* tracking refs when origin is repointed to a new remote URL."""
+    try:
+        refs_res = subprocess.run(
+            ["git", "for-each-ref", "--format=%(refname)", "refs/remotes/origin/"],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        for ref in refs_res.stdout.splitlines():
+            ref = ref.strip()
+            if ref:
+                subprocess.run(
+                    ["git", "update-ref", "-d", ref],
+                    cwd=str(project_root),
+                    capture_output=True,
+                    timeout=2,
+                )
+    except Exception:
+        pass
 
 
 def setup_workspace_git(
@@ -464,11 +555,32 @@ def setup_workspace_git(
         )
         remotes = rem_res.stdout.split()
         if "origin" in remotes:
+            old_url_res = subprocess.run(
+                ["git", "remote", "get-url", "origin"],
+                cwd=str(project_root),
+                capture_output=True,
+                text=True,
+            )
+            old_url = (old_url_res.stdout or "").strip()
+            if old_url and "github.com" in old_url.lower() and "github" not in remotes:
+                subprocess.run(
+                    ["git", "remote", "add", "github", old_url],
+                    cwd=str(project_root),
+                    capture_output=True,
+                )
             subprocess.run(
                 ["git", "remote", "set-url", "origin", clean_url],
                 cwd=str(project_root),
                 capture_output=True,
             )
+            old_norm = (_strip_credentials_from_url(old_url) or "").rstrip("/").lower()
+            if old_norm.endswith(".git"):
+                old_norm = old_norm[:-4]
+            new_norm = clean_url.rstrip("/").lower()
+            if new_norm.endswith(".git"):
+                new_norm = new_norm[:-4]
+            if old_norm and old_norm != new_norm:
+                _prune_stale_origin_refs(project_root)
         else:
             subprocess.run(
                 ["git", "remote", "add", "origin", clean_url],
@@ -479,8 +591,31 @@ def setup_workspace_git(
     return False
 
 
+def _push_tags_to_origin_if_present(project_root: Path) -> None:
+    """Pushes local Git tags to local Gitea origin (never to github automatically)."""
+    try:
+        tag_res = subprocess.run(
+            ["git", "tag", "-l"],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        if tag_res.returncode == 0 and tag_res.stdout.strip():
+            tag_cmd = _get_git_auth_cmd_prefix() + ["push", "origin", "--tags"]
+            subprocess.run(
+                tag_cmd,
+                cwd=str(project_root),
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+    except Exception:
+        pass
+
+
 def _push_to_origin(project_root: Path, async_push: bool = False, _allow_retry: bool = True) -> bool:
-    """Pushes local main branch to origin using transient in-memory auth headers; auto-heals Gitea service on failure."""
+    """Pushes local active branch and tags to Gitea origin using transient in-memory auth headers; auto-heals Gitea service on failure."""
     rem_res = subprocess.run(
         ["git", "remote"],
         cwd=str(project_root),
@@ -518,6 +653,7 @@ def _push_to_origin(project_root: Path, async_push: bool = False, _allow_retry: 
             timeout=120,
         )
         if push_res.returncode == 0:
+            _push_tags_to_origin_if_present(project_root)
             return True
 
         if _allow_retry and not _is_temp_workspace(project_root):
@@ -532,14 +668,16 @@ def _push_to_origin(project_root: Path, async_push: bool = False, _allow_retry: 
                     text=True,
                     timeout=120,
                 )
-                return retry_res.returncode == 0
+                if retry_res.returncode == 0:
+                    _push_tags_to_origin_if_present(project_root)
+                    return True
         return False
     except Exception:
         return False
 
 
 def _has_unpushed_commits(project_root: Path) -> bool:
-    """Checks if local HEAD has commits not yet pushed to origin/main."""
+    """Checks if local HEAD has commits not yet pushed to origin/<branch> or if the Gitea repository is still empty."""
     rem_res = subprocess.run(
         ["git", "remote"],
         cwd=str(project_root),
@@ -549,6 +687,15 @@ def _has_unpushed_commits(project_root: Path) -> bool:
     if "origin" not in rem_res.stdout.split():
         return True
 
+    head_res = subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD"],
+        cwd=str(project_root),
+        capture_output=True,
+        text=True,
+    )
+    if head_res.returncode != 0:
+        return False
+
     branch = _get_current_branch(project_root)
     rev_res = subprocess.run(
         ["git", "rev-list", "--count", f"origin/{branch}..HEAD"],
@@ -557,18 +704,25 @@ def _has_unpushed_commits(project_root: Path) -> bool:
         text=True,
     )
     if rev_res.returncode != 0:
-        head_res = subprocess.run(
-            ["git", "rev-parse", "--verify", "HEAD"],
-            cwd=str(project_root),
-            capture_output=True,
-            text=True,
-        )
-        return head_res.returncode == 0
+        return True
 
     try:
-        return int(rev_res.stdout.strip()) > 0
+        if int(rev_res.stdout.strip()) > 0:
+            return True
     except ValueError:
         return False
+
+    # Guard against stale local refs/remotes/origin/<branch> when the target Gitea repo is still empty
+    try:
+        repo_name = _resolve_workspace_repo_name(project_root)
+        rem_info = inspect_remote_repository(repo_name)
+        if rem_info.get("exists") and rem_info.get("empty"):
+            _prune_stale_origin_refs(project_root)
+            return True
+    except Exception:
+        pass
+
+    return False
 
 
 def save_code_commit(

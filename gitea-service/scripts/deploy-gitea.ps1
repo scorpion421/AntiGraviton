@@ -141,9 +141,12 @@ if (-not (Test-Path $configPath)) {
     $updatedIni = [regex]::Replace($updatedIni, "(?m)^(\s*APP_DATA_PATH\s*=\s*).+[/\\]data\s*$", "`${1}$escapedResolvedSlash/data")
     $updatedIni = [regex]::Replace($updatedIni, "(?m)^(\s*ROOT_PATH\s*=\s*).+[/\\]log\s*$", "`${1}$escapedResolvedBackslash\log")
 
-    # Ensure LevelDB-free immediate queue configuration is present to prevent Windows file lock errors during 'gitea dump'
+    # Ensure LevelDB-free immediate queue and db indexer configuration is present to prevent Windows file lock errors during 'gitea dump'
     if ($updatedIni -notmatch "(?m)^\s*\[queue\]") {
         $updatedIni = $updatedIni.TrimEnd() + "`r`n`r`n[queue]`r`nTYPE = immediate`r`n`r`n[queue.common]`r`nTYPE = immediate`r`n"
+    }
+    if ($updatedIni -notmatch "(?m)^\s*\[indexer\]") {
+        $updatedIni = $updatedIni.TrimEnd() + "`r`n`r`n[indexer]`r`nISSUE_INDEXER_TYPE = db`r`nREPO_INDEXER_ENABLED = false`r`n"
     }
 
     if ($updatedIni -ne $rawIni) {

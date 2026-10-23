@@ -14,6 +14,7 @@ from ..config import DB_PATH
 
 # Process-local cache of verified database file paths to avoid redundant DDL checks
 _VERIFIED_CENTRAL_DBS: Set[str] = set()
+_NETWORK_ROOT_CACHE: Dict[str, bool] = {}
 
 _REQUIRED_CENTRAL_TABLES = frozenset({
     "rules",
@@ -26,20 +27,56 @@ _REQUIRED_CENTRAL_TABLES = frozenset({
 })
 
 
-def _apply_pragmas(conn: sqlite3.Connection, is_project_db: bool = False) -> None:
-    """Applies enterprise SQLite pragmas for concurrent WAL readers, memory-mapped I/O, and lock resilience."""
+def _is_network_path(db_path: Path) -> bool:
+    """
+    Detects whether db_path resides on a network share (UNC path or mapped SMB/CIFS drive).
+    On network shares, SQLite shared-memory files (*.db-shm) and mmap can fail or corrupt
+    when SMB oplocks/leases break, so journal_mode=TRUNCATE and mmap_size=0 are used instead.
+    """
+    try:
+        raw = os.path.abspath(str(db_path))
+        if raw.startswith("\\\\"):
+            return True
+        drive, _ = os.path.splitdrive(raw)
+        if not drive:
+            return False
+        root = drive.upper() + "\\"
+        if root in _NETWORK_ROOT_CACHE:
+            return _NETWORK_ROOT_CACHE[root]
+        is_net = False
+        if os.name == "nt":
+            import ctypes
+            drive_type = ctypes.windll.kernel32.GetDriveTypeW(root)
+            # DRIVE_REMOTE == 4
+            is_net = (drive_type == 4)
+        _NETWORK_ROOT_CACHE[root] = is_net
+        return is_net
+    except Exception:
+        return False
+
+
+def _apply_pragmas(conn: sqlite3.Connection, is_project_db: bool = False, is_network: bool = False) -> None:
+    """Applies enterprise SQLite pragmas for concurrent WAL readers on local drives or SMB-safe TRUNCATE mode on network shares."""
     try:
         conn.execute("PRAGMA busy_timeout = 30000;")
     except sqlite3.Error:
         pass
     try:
-        conn.execute("PRAGMA journal_mode = WAL;")
+        if is_network:
+            conn.execute("PRAGMA journal_mode = TRUNCATE;")
+        else:
+            conn.execute("PRAGMA journal_mode = WAL;")
     except sqlite3.Error:
         pass
     try:
-        conn.execute("PRAGMA synchronous = NORMAL;")
-        conn.execute("PRAGMA temp_store = MEMORY;")
-        conn.execute("PRAGMA mmap_size = 67108864;")
+        if is_network:
+            conn.execute("PRAGMA synchronous = FULL;")
+            conn.execute("PRAGMA temp_store = MEMORY;")
+            conn.execute("PRAGMA mmap_size = 0;")
+        else:
+            conn.execute("PRAGMA synchronous = NORMAL;")
+            conn.execute("PRAGMA temp_store = MEMORY;")
+            conn.execute("PRAGMA mmap_size = 67108864;")
         conn.execute("PRAGMA foreign_keys = ON;")
         if is_project_db:
             conn.execute("PRAGMA auto_vacuum = INCREMENTAL;")
@@ -48,12 +85,12 @@ def _apply_pragmas(conn: sqlite3.Connection, is_project_db: bool = False) -> Non
 
 
 def get_connection(db_path: Path = DB_PATH, is_project_db: bool = False) -> sqlite3.Connection:
-    """Primary SQLite connection configured with WAL mode, 64MB mmap, and 30s busy timeout."""
+    """Primary SQLite connection configured with WAL/mmap on local drives or SMB-safe TRUNCATE mode on network drives."""
     target = Path(db_path)
     target.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(target), timeout=30.0)
     conn.row_factory = sqlite3.Row
-    _apply_pragmas(conn, is_project_db=is_project_db)
+    _apply_pragmas(conn, is_project_db=is_project_db, is_network=_is_network_path(target))
     return conn
 
 

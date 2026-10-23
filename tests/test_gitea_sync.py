@@ -444,6 +444,63 @@ class TestGiteaSync(unittest.TestCase):
         self.assertEqual(hook_res.get("decision"), "deny")
         self.assertIn("semver-immutability", hook_res.get("reason", ""))
 
+    def test_v1_4_1_network_pragmas_and_stale_origin_ref_pruning(self):
+        """Verifies SMB/UNC network pragma fallback and stale origin tracking ref pruning."""
+        import sqlite3
+        import subprocess
+        from pathlib import Path
+        from skillsdb.core.db import _is_network_path, _apply_pragmas
+        from skillsdb.memory.gitea_sync import _prune_stale_origin_refs, _extract_repo_name_from_remote_url
+
+        self.assertTrue(_is_network_path(Path(r"\\fileserver\share\customizations.db")))
+        self.assertFalse(_is_network_path(self.test_dir / "local.db"))
+
+        net_db = self.test_dir / "net_sim.db"
+        conn = sqlite3.connect(str(net_db))
+        try:
+            _apply_pragmas(conn, is_project_db=False, is_network=True)
+            jmode = conn.execute("PRAGMA journal_mode;").fetchone()[0].lower()
+            mmap_val = conn.execute("PRAGMA mmap_size;").fetchone()[0]
+            self.assertEqual(jmode, "truncate")
+            self.assertEqual(mmap_val, 0)
+        finally:
+            conn.close()
+
+        self.assertEqual(
+            _extract_repo_name_from_remote_url("https://github.com/scorpion421/AA-Tachometer.git"),
+            "AA-Tachometer",
+        )
+
+        repo_dir = self.test_dir / "stale_ref_repo"
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-b", "main"], cwd=str(repo_dir), check=True, capture_output=True)
+        (repo_dir / "README.md").write_text("hello\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=str(repo_dir), check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=t@t.dev", "commit", "-m", "init"],
+            cwd=str(repo_dir),
+            check=True,
+            capture_output=True,
+        )
+        head_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(repo_dir), check=True, capture_output=True, text=True
+        ).stdout.strip()
+        subprocess.run(
+            ["git", "update-ref", "refs/remotes/origin/main", head_sha],
+            cwd=str(repo_dir),
+            check=True,
+            capture_output=True,
+        )
+        _prune_stale_origin_refs(repo_dir)
+        refs_after = subprocess.run(
+            ["git", "for-each-ref", "refs/remotes/origin/"],
+            cwd=str(repo_dir),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        self.assertEqual(refs_after, "")
+
 
 if __name__ == "__main__":
     unittest.main()

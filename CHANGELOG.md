@@ -5,6 +5,23 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] - 2026-10-24
+
+### Added
+- **Network share (`DRIVE_REMOTE` / UNC) SQLite pragma auto-adaptation (`skillsdb/core/db.py`, `v3.7.1`)**:
+  - Added `_is_network_path()` to detect UNC paths (`\\server\share`) and mapped Windows SMB/CIFS network drives (`GetDriveTypeW == DRIVE_REMOTE`).
+  - Updated `_apply_pragmas()` to keep `journal_mode = WAL`, `synchronous = NORMAL`, and `mmap_size = 64 MB` on local drives while automatically switching to `journal_mode = TRUNCATE`, `synchronous = FULL`, and `mmap_size = 0` on network shares to prevent `SQLITE_IOERR_SHMOPEN` and shared-memory lock corruption over SMB.
+- **LevelDB-free database indexer and dual-stage backup staging (`gitea-service/custom/conf/app.example.ini`, `gitea-service/scripts/deploy-gitea.ps1`, `gitea-service/scripts/backup-gitea.ps1`)**:
+  - Added `[indexer]` (`ISSUE_INDEXER_TYPE = db`, `REPO_INDEXER_ENABLED = false`) to `app.example.ini` and `deploy-gitea.ps1` self-healing so Gitea stores issue indexes inside SQLite instead of Bleve/LevelDB files.
+  - Updated `backup-gitea.ps1` to write dumps to local staging (`backups/`) first and synchronize to offsite targets with automatic fallback if the offsite share is temporarily offline.
+
+### Fixed
+- **Stale `refs/remotes/origin/*` ghost tracking refs and hyphen/underscore Gitea repository resolution (`skillsdb/memory/gitea_sync.py`)**:
+  - Updated `setup_workspace_git()` to preserve pre-existing `github.com` `origin` URLs as a `github` remote before repointing `origin` to local Gitea, and added `_prune_stale_origin_refs()` to clear leftover `refs/remotes/origin/*` refs when `origin` changes URL.
+  - Updated `_has_unpushed_commits()` to verify via `inspect_remote_repository()` whether the target Gitea repository is still `empty=True` even if a stale local tracking ref matches `HEAD`.
+  - Updated `_resolve_workspace_repo_name()` to check existing `github` remote names and hyphen/underscore variants on Gitea before creating duplicate empty repositories.
+  - Updated `_push_to_origin()` to push local Git tags (`--tags`) alongside the active branch to local Gitea (`origin`).
+
 ## [1.4.0] - 2026-10-23
 
 ### Added
