@@ -1,7 +1,7 @@
-# AntiGraviton complete suite (`v1.0.8`)
+# AntiGraviton complete suite (`v1.4.0`)
 
 **Turnkey agentic development environment for Google Antigravity IDE**  
-*Combining **SkillsDB (`v3.5.6`)** + **Antigravity Gitea Windows service (`v1.1.1`)** in a single one-command distribution.*
+*Combining **SkillsDB (`v3.7.0`)** + **Antigravity Gitea Windows service (`v1.1.1`)** in a single one-command distribution.*
 
 ---
 
@@ -11,7 +11,7 @@
 
 It bundles two tightly integrated systems into a single repository and installer:
 
-1. **SkillsDB context and memory engine (`v3.5.6`)**:
+1. **SkillsDB context and memory engine (`v3.7.0`)**:
    - **On-demand micro-skill routing**: Replaces static plugin prompt bloat (~35,000 tokens/turn) with a compact (~450 token) routing directive and surgical SQLite FTS5 micro-skill retrieval (`--summary`, `--section`).
    - **Persistent episodic project memory (`.agents/memory.db`)**: Automatically records architectural decisions, milestone snapshots, and workspace telemetry across sessions so every new conversation starts with full project context.
    - **Organic on-demand workspace learning**: Ships with zero hardcoded paths or credentials. Automatically learns project paths as you work (`mem-init`, `mem-save-snapshot`, `gitea-init`) and discovers Antigravity IDE workspaces from `~/.gemini/config/projects/*.json` and `~/.gemini/antigravity/scratch`.
@@ -24,7 +24,7 @@ It bundles two tightly integrated systems into a single repository and installer
 
 ## 2. Measured impact in daily development
 
-| Metric | Standard Antigravity setup | AntiGraviton suite (`v1.0.8`) | Real-world improvement |
+| Metric | Standard Antigravity setup | AntiGraviton suite (`v1.4.0`) | Real-world improvement |
 | :--- | :--- | :--- | :--- |
 | **System and plugin context load** | ~35,000 tokens / turn | **~1,500 tokens / turn** | **~95% lower base overhead** |
 | **Token consumption (60-turn session, benchmarked on Gemini 4 Argon High)** | ~3.39M input tokens | **~0.83M input tokens** | **~75.5% total token savings (4x session capacity)** |
@@ -56,17 +56,17 @@ Beyond providing persistent project memory and automated Gitea backups, **AntiGr
   - Completely bypasses Google's broken `invocationNum` counter by maintaining an independent, sub-millisecond state tracker (`skillsdb_hook_state.json`) keyed by `(conversationId, workspace)`.
   - Guardrails and project memory are injected **strictly once** per conversation (or workspace switch). All subsequent tool steps and turns within that conversation return `{"injectSteps": []}` in `< 1 ms`, restoring 100% tail KV-cache continuity.
 
-### C. Hook working directory (`cwd`) escalation when no workspace is open
-* **The IDE behavior**: Antigravity executes plugin hooks with the working directory (`cwd`) set to the plugin folder (`~/.gemini/config/plugins/customizations-db`). When a user chats without an open project folder (`"workspacePaths": []`), naive upward directory traversal walks out of `~/.gemini` directly into the user's Windows profile root (`C:\Users\<User>`), mistaking the entire OS user profile for a software project.
-* **How AntiGraviton `v1.0.3+` fixes it**: Enforces a strict `_is_protected_non_workspace()` boundary guard that blocks `Path.home()`, `~/.gemini`, `~/.gemini/config/*`, `~/.gemini/database/*`, the `~/.gemini/antigravity/scratch` container root, and the OS temp root from ever being scanned or initialized as a project workspace.
+### C. Hook and terminal working directory (`cwd`) escalation when no workspace is open (`v2.26.0+`)
+* **The IDE behavior**: Antigravity executes plugin hooks with `cwd` set to `~/.gemini/config/plugins/customizations-db`, and in Antigravity `v2.26.0+`, terminal commands spawned outside of a project (`ANTIGRAVITY_PROJECT_ID=outside-of-project`) start directly inside the application installation folder (`%LOCALAPPDATA%\Programs\antigravity`). Naive directory detection would mistake either the user profile (`C:\Users\<User>`) or the Antigravity binary directory itself for a software project.
+* **How AntiGraviton `v1.4.0+` fixes it**: Enforces a comprehensive `_is_protected_non_workspace()` and `_is_excluded_workspace_path()` boundary guard blocking `Path.home()`, `~/.gemini/*`, the `~/.gemini/antigravity/scratch` container root, OS temp directories, and all application installation roots (`%LOCALAPPDATA%\Programs\*`, `%APPDATA%\Antigravity`, `%ProgramFiles%`, and `ANTIGRAVITY_AGENTAPI_EXE` parent paths) from ever being scanned or initialized as a project workspace.
 
-### D. Frontier model renaming (`Gemini 4 Argon`) and reverse transcript inspection
-* **The IDE behavior**: When Google introduces new frontier model identifiers (such as `Gemini 4 Argon`) or when a developer switches models mid-session via the IDE dropdown, a `<USER_SETTINGS_CHANGE>` event is appended to `transcript.jsonl`.
-* **How AntiGraviton `v1.0.3+` fixes it**: `detect_model_tier()` scans the tail of `transcript.jsonl` in reverse chronological order for `<USER_SETTINGS_CHANGE>` events and maps `Gemini 4 Argon` (`argon`, `gemini 4`) directly to `TIER_ULTRA` (16-thread high-concurrency mode).
+### D. Frontier model renaming (`Gemini 4 Argon` & `Gemini 4 Carbon`) and reverse transcript inspection
+* **The IDE behavior**: When Google introduces new frontier model identifiers (such as `Gemini 4 Argon` and `Gemini 4 Carbon` in `v2.26.0`) or when a developer switches models mid-session via the IDE dropdown, a `<USER_SETTINGS_CHANGE>` event is appended to `transcript.jsonl`.
+* **How AntiGraviton `v1.4.0+` fixes it**: `detect_model_tier()` scans the tail of `transcript.jsonl` in reverse chronological order for `<USER_SETTINGS_CHANGE>` events and maps `Gemini 4 Argon` and `Gemini 4 Carbon` (`argon`, `carbon`, `gemini 4`) directly to `TIER_ULTRA` (16-thread high-concurrency mode), while mapping automation `Flash Lite` presets to `TIER_LEAN`.
 
-### E. Windows UTF-8 manifest reset on every IDE update
-* **The IDE behavior**: Every Antigravity IDE update replaces `Antigravity.exe` and `language_server_windows_x64.exe` and wipes out external `.manifest` files. On Windows, child processes then fall back to legacy codepages (`cp1252`/`cp850`), corrupting umlauts and UTF-8 characters (`Mojibake`) and forcing the LLM into expensive retry loops.
-* **How AntiGraviton fixes it**: `skillsdb doctor` automatically detects missing `<activeCodePage>UTF-8</activeCodePage>` manifests after an IDE update, and `skillsdb fix-utf8` restores them in a single command.
+### E. Windows UTF-8 manifest reset and builtin skill drift on every IDE update
+* **The IDE behavior**: Every Antigravity IDE update replaces `Antigravity.exe` and `language_server.exe` (wiping out external `<activeCodePage>UTF-8</activeCodePage>` `.manifest` files so Windows child processes fall back to legacy codepages `cp1252`/`cp850`) and updates bundled skills under `~/.gemini/antigravity/builtin/skills` (`builtin/.checksum`).
+* **How AntiGraviton `v1.4.0+` fixes it**: On Turn 1 (`handle_pre_invocation_hook()`), as well as during `deploy.py` and `skillsdb update`, SkillsDB automatically verifies and silently restores missing Windows UTF-8 `.manifest` files (`ensure_windows_utf8_manifests()`) and synchronizes any updated Antigravity builtin skills and their `docs/*.md` and `references/*.md` sub-documents into `customizations.db` (`sync_builtin_skills()`) whenever `builtin/.checksum` changes.
 
 ---
 
@@ -103,7 +103,7 @@ powershell -ExecutionPolicy Bypass -File .\install-antigraviton.ps1
 
 ```text
 AntiGraviton/
-|-- VERSION                        # SemVer 2.0.0 suite release version (1.0.7)
+|-- VERSION                        # SemVer 2.0.0 suite release version (1.4.0)
 |-- CHANGELOG.md                   # SemVer release history
 |-- README.md                      # Suite documentation
 |-- install-antigraviton.ps1       # Unified 1-command installer (SkillsDB + Gitea + Auto-Token)
@@ -114,7 +114,7 @@ AntiGraviton/
 |   `-- skills/
 |       `-- install-antigraviton/
 |           `-- SKILL.md           # Antigravity IDE 1-prompt onboarding skill
-|-- skillsdb/                      # Modular Python package source (v3.5.5)
+|-- skillsdb/                      # Modular Python package source (v3.7.0)
 |   |-- config.py
 |   |-- schema.py
 |   |-- guardrails.py

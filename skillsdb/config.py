@@ -14,7 +14,7 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-__version__ = "3.6.0"
+__version__ = "3.7.0"
 
 # Model capability tiers
 TIER_LEAN = "lean"          # Gemini Flash, Flash-Lite, micro-skills, minimal token footprint
@@ -31,7 +31,8 @@ SKILL_CLUSTERS = {
     "firebase": ["firebase-firestore", "firebase-auth-basics", "firebase-data-connect", "firebase-security-rules-auditor", "firebase-basics"],
     "web": ["chrome-devtools", "modern-web-guidance", "a11y-debugging", "memory-leak-debugging"],
     "admin": ["admin-elevation", "customizations-db", "credentials", "permissioned-github"],
-    "security": ["admin-elevation", "credentials", "firebase-security-rules-auditor", "gcs-security-assessment"]
+    "security": ["admin-elevation", "credentials", "firebase-security-rules-auditor", "gcs-security-assessment"],
+    "antigravity": ["antigravity-guide", "agy-customizations", "plugin", "automation", "generative_ui", "ui-plugin-navigation"]
 }
 
 # Dynamically resolve user-relative paths

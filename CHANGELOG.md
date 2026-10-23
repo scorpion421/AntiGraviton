@@ -5,6 +5,29 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-10-23
+
+### Added
+- **Autonomous post-update Windows UTF-8 manifest self-healing (`skillsdb/platform/windows_utf8.py`, `skillsdb/memory/project_memory.py`, `skillsdb/updater/merger.py`, `deploy.py`, `v3.7.0`)**:
+  - Added `ensure_windows_utf8_manifests()` to silently verify and restore `Antigravity.exe.manifest` and `resources/bin/language_server.exe.manifest` whenever an Antigravity IDE update overwrites the application directory.
+  - Integrated `ensure_windows_utf8_manifests()` into Turn 1 of `handle_pre_invocation_hook()`, `deploy.py`, and `skillsdb update` so UTF-8 process code pages self-heal automatically without requiring manual `skillsdb fix-utf8` execution after IDE updates.
+- **Checksum-driven Antigravity `v2.26.0` builtin skill and sub-documentation synchronization (`skillsdb/updater/merger.py`, `skillsdb/config.py`, `skillsdb/search/synonyms.py`)**:
+  - Added `compile_skill_directory_content()` and `sync_builtin_skills()` to index all 9 Antigravity `v2.26.0` builtin skills (`agy-customizations`, `antigravity-guide`, `automation`, `generative_ui`, `migrate-workflows`, `permissioned-github`, `plugin`, `run-workflow`, `ui-plugin-navigation`) along with their bundled `docs/*.md` and `references/*.md` sub-documents into `customizations.db` for surgical `--summary` and `--section` micro-skill retrieval.
+  - Tracked `~/.gemini/antigravity/builtin/.checksum` in `runtime_config` (`builtin_skills_checksum`) so `handle_pre_invocation_hook()` and `skillsdb doctor` automatically re-index builtin skills whenever Antigravity updates.
+  - Added the `antigravity` skill cluster in `skillsdb/config.py` and German/English FTS5 search synonyms (`automatisierung`, `zeitplan`, `erweiterung`, `widget`) in `skillsdb/search/synonyms.py`.
+
+### Changed
+- **Frontier model tier classification for `Gemini 4 Carbon` and `Flash Lite` (`skillsdb/core/detector.py`)**:
+  - Extended `_classify_model_string()` to map `Gemini 4 Carbon` (`carbon`) alongside `Gemini 4 Argon` to `TIER_ULTRA` (16-thread high-concurrency mode) and `Flash Lite` (space-separated automation preset) to `TIER_LEAN`.
+- **Dynamic branch and Gitea repository name resolution (`skillsdb/memory/gitea_sync.py`)**:
+  - Added `_get_current_branch()` and `_resolve_workspace_repo_name()` so workspaces on non-`main` branches push cleanly and existing Gitea remote repository names are preserved across sync and release operations.
+
+### Fixed
+- **Application installation directory (`%LOCALAPPDATA%/Programs/antigravity`) non-workspace boundary guard (`skillsdb/memory/gitea_config.py`, `skillsdb/memory/project_memory.py`, `skillsdb/updater/merger.py`)**:
+  - Hardened `_is_excluded_workspace_path()`, `_is_protected_non_workspace()`, and `skillsdb doctor` to block `%LOCALAPPDATA%/Programs/*`, `%APPDATA%/Antigravity`, `%ProgramFiles%`, and `ANTIGRAVITY_AGENTAPI_EXE` parent directories when Antigravity `v2.26.0` runs shell commands outside of an active project (`ANTIGRAVITY_PROJECT_ID=outside-of-project`), preventing `.agents/memory.db` or `.git` from ever being initialized inside the Antigravity binary directory.
+- **Non-destructive plugin and builtin skill re-indexing (`skillsdb/updater/merger.py`)**:
+  - Updated `import_from_plugins()` to perform non-destructive `INSERT OR REPLACE` updates across `GLOBAL_PLUGINS_PATH`, `ARCHIVED_PLUGINS_PATH`, and `BUILTIN_SKILLS_PATH` without wiping pre-existing official rules or skills.
+
 ## [1.3.0] - 2026-10-21
 
 ### Added

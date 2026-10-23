@@ -226,6 +226,45 @@ print("Hello World")
         self.assertIn("SKILLSDB UTF-8 ENCODING FIX", res.stdout)
 
 
+    def test_v1_4_0_protected_app_paths_and_model_detection(self):
+        # Verify %LOCALAPPDATA%/Programs/antigravity is blocked as a protected non-workspace
+        import os
+        local_app = os.environ.get("LOCALAPPDATA") or "C:/Users/Default/AppData/Local"
+        ag_prog_dir = Path(local_app) / "Programs" / "antigravity"
+        self.assertTrue(db_manager._is_protected_non_workspace(ag_prog_dir))
+        self.assertTrue(db_manager._is_excluded_workspace_path(ag_prog_dir))
+
+        # Verify subdirectories inside ~/.gemini/antigravity/scratch/<project> remain valid workspaces
+        valid_scratch_proj = db_manager.GEMINI_DIR / "antigravity" / "scratch" / "AntiGraviton"
+        self.assertFalse(db_manager._is_protected_non_workspace(valid_scratch_proj))
+        self.assertFalse(db_manager._is_excluded_workspace_path(valid_scratch_proj))
+
+        # Verify Gemini 4 Argon / Carbon -> ULTRA and Flash Lite -> LEAN
+        self.assertEqual(db_manager._classify_model_string("Gemini 4 Argon (High)"), db_manager.TIER_ULTRA)
+        self.assertEqual(db_manager._classify_model_string("Gemini 4 Carbon"), db_manager.TIER_ULTRA)
+        self.assertEqual(db_manager._classify_model_string("Flash Lite"), db_manager.TIER_LEAN)
+
+    def test_v1_4_0_compile_skill_directory_with_subdocs(self):
+        sim_skill = self.test_db_dir / "sim_builtin_skill"
+        (sim_skill / "docs").mkdir(parents=True, exist_ok=True)
+        (sim_skill / "SKILL.md").write_text(
+            "---\nname: sim-custom\ndescription: Simulated builtin skill\n---\n# Main Guide\nOverview text.\n",
+            encoding="utf-8",
+        )
+        (sim_skill / "docs" / "hooks.md").write_text(
+            "# Lifecycle Hooks\nDetails about SessionStart and PreInvocation.\n",
+            encoding="utf-8",
+        )
+        name, desc, compiled = db_manager.compile_skill_directory_content(sim_skill, default_plugin="builtin")
+        self.assertEqual(name, "sim-custom")
+        self.assertEqual(desc, "Simulated builtin skill")
+        self.assertIn("# Lifecycle Hooks", compiled)
+        sections = db_manager.extract_skill_sections(compiled)
+        titles = [s["title"] for s in sections]
+        self.assertIn("Main Guide", titles)
+        self.assertIn("Lifecycle Hooks", titles)
+
+
 if __name__ == "__main__":
     unittest.main()
 

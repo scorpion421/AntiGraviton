@@ -14,7 +14,8 @@ from ..config import TIER_ULTRA, DB_PATH, GEMINI_DIR, __version__
 from ..core.db import get_connection, managed_connection
 from ..core.detector import detect_model_tier
 from .writer_queue import get_writer_queue, flush_journals
-from .gitea_sync import _is_temp_workspace, save_code_commit, get_workspace_git_telemetry, learn_workspace, flush_all_pending_pushes, setup_workspace_git
+from ..platform.windows_utf8 import ensure_windows_utf8_manifests
+from .gitea_sync import _is_temp_workspace, _is_excluded_workspace_path, save_code_commit, get_workspace_git_telemetry, learn_workspace, flush_all_pending_pushes, setup_workspace_git
 from ..search.fts import detect_cwd_hints
 
 _HOOK_STATE_FILE = Path(tempfile.gettempdir()) / "skillsdb_hook_state.json"
@@ -33,35 +34,11 @@ _REQUIRED_PROJECT_TABLES = frozenset({
 
 def _is_protected_non_workspace(path: Path) -> bool:
     """
-    Returns True if path is a system/user profile/container directory that must never
+    Returns True if path is a system/user profile/container/application directory that must never
     be treated as a project workspace (e.g., user home, ~/.gemini, scratch container root,
-    or root OS temp dir).
+    root OS temp dir, or %LOCALAPPDATA%/Programs/antigravity).
     """
-    if not path:
-        return True
-    try:
-        abs_p = Path(os.path.abspath(str(path)))
-        home_abs = Path(os.path.abspath(str(Path.home())))
-        gemini_abs = Path(os.path.abspath(str(GEMINI_DIR)))
-        scratch_abs = gemini_abs / "antigravity" / "scratch"
-        temp_abs = Path(os.path.abspath(str(tempfile.gettempdir())))
-        if abs_p in (home_abs, gemini_abs, scratch_abs, temp_abs):
-            return True
-        for sub in ("config", "database", "plugins_archive"):
-            try:
-                abs_p.relative_to(gemini_abs / sub)
-                return True
-            except ValueError:
-                pass
-        for ag_sub in ("brain", "builtin", "bin"):
-            try:
-                abs_p.relative_to(gemini_abs / "antigravity" / ag_sub)
-                return True
-            except ValueError:
-                pass
-        return False
-    except Exception:
-        return True
+    return _is_excluded_workspace_path(path, allow_temp_subdirs=True)
 
 
 def find_project_root(start_path: Path = None) -> Path:
@@ -913,9 +890,26 @@ def handle_pre_invocation_hook():
         except Exception:
             pass
 
+    # Autonomous post-update self-healing: restore Windows UTF-8 manifests & sync builtin skills if Antigravity updated
+    utf8_healed = ensure_windows_utf8_manifests()
+    _sync_builtin_fn = globals().get("sync_builtin_skills")
+    if not _sync_builtin_fn:
+        try:
+            import importlib
+            _sync_builtin_fn = getattr(importlib.import_module("skillsdb.updater.merger"), "sync_builtin_skills", None)
+        except Exception:
+            _sync_builtin_fn = None
+    if _sync_builtin_fn:
+        try:
+            _sync_builtin_fn(silent=True)
+        except Exception:
+            pass
+
     model_hint = payload.get("modelName") or payload.get("model")
     tier, tdesc = detect_model_tier(cid=cid, model_name_hint=model_hint)
     lines = []
+    if utf8_healed:
+        lines.append("[SKILLSDB SELF-HEALING: Restored Windows UTF-8 application manifests after Antigravity IDE update]")
 
     # 0. Global Turn-1 Invariant Guardrails (Strict English for maximum LLM attention weight & adherence)
     guardrail_lines = [

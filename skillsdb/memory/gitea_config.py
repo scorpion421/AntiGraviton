@@ -37,28 +37,59 @@ def _is_temp_workspace(project_root: Path) -> bool:
         return False
 
 
-def _is_excluded_workspace_path(project_root: Path) -> bool:
+def _is_excluded_workspace_path(project_root: Path, allow_temp_subdirs: bool = False) -> bool:
     """
-    Returns True if project_root is inside OS temp, user home root, or protected
-    ~/.gemini subdirectories (config, database, plugins_archive, or scratch root).
+    Returns True if project_root is inside OS temp (unless allow_temp_subdirs=True),
+    user home root, protected ~/.gemini subdirectories, or OS/application installation
+    directories (such as %LOCALAPPDATA%/Programs/antigravity).
     """
-    if not project_root or _is_temp_workspace(project_root):
+    if not project_root:
+        return True
+    if not allow_temp_subdirs and _is_temp_workspace(project_root):
         return True
     try:
         abs_root = Path(os.path.abspath(str(project_root)))
         home_abs = Path(os.path.abspath(str(Path.home())))
         gemini_abs = Path(os.path.abspath(str(GEMINI_DIR)))
-        scratch_abs = gemini_abs / "antigravity" / "scratch"
-        if abs_root in (home_abs, gemini_abs, scratch_abs):
+        ag_data_abs = gemini_abs / "antigravity"
+        scratch_abs = ag_data_abs / "scratch"
+        temp_abs = Path(os.path.abspath(str(tempfile.gettempdir())))
+        if abs_root in (home_abs, gemini_abs, ag_data_abs, scratch_abs, temp_abs):
             return True
-        for excluded_sub in (
-            gemini_abs / "config",
-            gemini_abs / "database",
-            gemini_abs / "plugins_archive",
-        ):
+        for sub in ("config", "database", "plugins_archive", "share", "credentials"):
             try:
-                abs_root.relative_to(excluded_sub)
+                abs_root.relative_to(gemini_abs / sub)
                 return True
+            except ValueError:
+                pass
+        for ag_sub in ("annotations", "brain", "browser_recordings", "builtin", "bin", "conversations", "crashes", "knowledge", "lib", "mcp", "plugin_data", "presence", "sidecar_data"):
+            try:
+                abs_root.relative_to(ag_data_abs / ag_sub)
+                return True
+            except ValueError:
+                pass
+        for env_key in ("LOCALAPPDATA", "APPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)", "SYSTEMROOT"):
+            env_val = os.environ.get(env_key)
+            if not env_val:
+                continue
+            env_abs = Path(os.path.abspath(env_val))
+            if abs_root == env_abs:
+                return True
+            for app_sub in (env_abs / "Programs", env_abs / "Antigravity", env_abs / "antigravity"):
+                try:
+                    abs_root.relative_to(app_sub)
+                    return True
+                except ValueError:
+                    pass
+        agent_exe = os.environ.get("ANTIGRAVITY_AGENTAPI_EXE")
+        if agent_exe:
+            try:
+                exe_path = Path(os.path.abspath(agent_exe))
+                if len(exe_path.parents) >= 3:
+                    app_install_root = exe_path.parents[2]
+                    if app_install_root != home_abs:
+                        abs_root.relative_to(app_install_root)
+                        return True
             except ValueError:
                 pass
         return False

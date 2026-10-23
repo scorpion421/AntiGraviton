@@ -56,6 +56,57 @@ def check_windows_utf8() -> tuple[bool, str]:
     return False, f"Missing UTF-8 manifest for: {', '.join(missing)}"
 
 
+def ensure_windows_utf8_manifests() -> bool:
+    """
+    Silently verifies and restores Windows UTF-8 application manifests if they were
+    wiped out by an Antigravity IDE update. Safe to call inside PreInvocation hooks
+    (produces zero stdout output). Returns True if missing manifests were restored.
+    """
+    if sys.platform != "win32":
+        return False
+
+    ok, _ = check_windows_utf8()
+    if ok:
+        return False
+
+    ag_dir = get_antigravity_paths()
+    if not ag_dir:
+        return False
+
+    restored = False
+    exe_manifest = ag_dir / "Antigravity.exe.manifest"
+    ls_manifest = ag_dir / "resources" / "bin" / "language_server.exe.manifest"
+    manifest_text = UTF8_MANIFEST_XML.strip() + "\n"
+
+    try:
+        if not (exe_manifest.exists() and "activeCodePage" in exe_manifest.read_text(encoding="utf-8", errors="ignore")):
+            exe_manifest.write_text(manifest_text, encoding="utf-8")
+            restored = True
+    except Exception:
+        pass
+
+    try:
+        if not (ls_manifest.exists() and "activeCodePage" in ls_manifest.read_text(encoding="utf-8", errors="ignore")):
+            ls_manifest.parent.mkdir(parents=True, exist_ok=True)
+            ls_manifest.write_text(manifest_text, encoding="utf-8")
+            restored = True
+    except Exception:
+        pass
+
+    if restored:
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_SET_VALUE) as key:
+                winreg.SetValueEx(key, "PYTHONUTF8", 0, winreg.REG_SZ, "1")
+                winreg.SetValueEx(key, "PYTHONIOENCODING", 0, winreg.REG_SZ, "utf-8")
+                winreg.SetValueEx(key, "LANG", 0, winreg.REG_SZ, "de_DE.UTF-8")
+                winreg.SetValueEx(key, "LC_ALL", 0, winreg.REG_SZ, "de_DE.UTF-8")
+        except Exception:
+            pass
+
+    return restored
+
+
 def fix_utf8(check_only: bool = False):
     """
     Configures Antigravity to run natively with UTF-8 process code page on Windows.

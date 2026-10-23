@@ -212,7 +212,10 @@ def deploy(source_dir: Path = None, target_dir: Path = None):
     try:
         sys.path.insert(0, str(target_db_dir))
         import db_manager
+        db_manager.ensure_windows_utf8_manifests()
         conn = db_manager.get_connection(target_db_dir / "customizations.db")
+        db_manager.init_synonyms(conn)
+        db_manager.sync_builtin_skills(conn, force=True, silent=True)
         db_manager.stats(conn)
         conn.close()
     except Exception as err:

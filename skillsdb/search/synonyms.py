@@ -66,6 +66,12 @@ DEFAULT_SYNONYMS = {
     "sichern": "gitea git backup sync snapshot repository",
     "versionierung": "gitea git repository commit semver changelog",
     "backup": "gitea git backup sync snapshot repository",
+
+    # Antigravity 2.0, Automations, Plugins & Generative UI
+    "automatisierung": "automation schedule cron sidecar timer recurring",
+    "zeitplan": "automation schedule cron sidecar timer",
+    "erweiterung": "plugin customization skill hook mcp sidecar",
+    "widget": "generative_ui html embed tailwind card chart",
 }
 
 

@@ -24,9 +24,9 @@ from ..config import (
 from ..core.db import get_connection, init_db, managed_connection
 from ..core.detector import detect_model_tier
 from ..core.concurrency import fetch_single_skill
-from ..memory.project_memory import find_project_root
+from ..memory.project_memory import find_project_root, _is_protected_non_workspace
 from ..memory.gitea_sync import get_gitea_config, get_gitea_service_status, check_gitea_health, get_learned_workspaces
-from ..platform.windows_utf8 import check_windows_utf8
+from ..platform.windows_utf8 import check_windows_utf8, ensure_windows_utf8_manifests
 
 
 def find_repo_root() -> Path:
@@ -232,6 +232,8 @@ def update_plugin(force: bool = False):
 
         # Automatically prune any legacy excluded non-workspace paths or case duplicates from runtime_config
         get_learned_workspaces(db_path=DB_PATH, prune_missing=True)
+        ensure_windows_utf8_manifests()
+        sync_builtin_skills(force=True, silent=True)
 
         print("\n[OK] Safe update completed successfully! Project memory & learned rules remain intact.")
         print("Running system diagnostics:")
@@ -265,6 +267,100 @@ def parse_skill_frontmatter(content: str) -> tuple[str, str]:
             desc_raw = desc_match.group(1).strip()
             description = " ".join([line.strip() for line in desc_raw.splitlines() if line.strip()])
     return name, description
+
+
+def compile_skill_directory_content(skill_folder: Path, default_plugin: str = "builtin") -> tuple[str, str, str]:
+    """
+    Reads SKILL.md from skill_folder and appends any bundled sub-documentation
+    (docs/*.md, references/*.md) as markdown sections for surgical --section retrieval.
+    Returns (skill_name, description, full_compiled_content).
+    """
+    skill_md = skill_folder / "SKILL.md"
+    content = skill_md.read_text(encoding="utf-8", errors="replace")
+    name, desc = parse_skill_frontmatter(content)
+    name = name or skill_folder.name
+    desc = desc or f"Workflow skill from {default_plugin}"
+
+    sub_chunks = []
+    for sub_dir_name in ("docs", "references"):
+        sub_dir = skill_folder / sub_dir_name
+        if sub_dir.exists() and sub_dir.is_dir():
+            for md_file in sorted(sub_dir.glob("*.md")):
+                try:
+                    sub_raw = md_file.read_text(encoding="utf-8", errors="replace").strip()
+                    sub_body = re.sub(r"^---\s*\n.*?\n---\s*\n?", "", sub_raw, count=1, flags=re.DOTALL).strip()
+                    if sub_body:
+                        sub_chunks.append(sub_body)
+                except Exception:
+                    pass
+
+    if sub_chunks:
+        content = content.rstrip() + "\n\n---\n\n" + "\n\n---\n\n".join(sub_chunks) + "\n"
+
+    return name, desc, content
+
+
+def sync_builtin_skills(conn: sqlite3.Connection = None, force: bool = False, silent: bool = False) -> int:
+    """
+    Synchronizes Antigravity builtin skills (~/.gemini/antigravity/builtin/skills)
+    into customizations.db whenever builtin/.checksum changes or force=True.
+    """
+    if not BUILTIN_SKILLS_PATH.exists() or not BUILTIN_SKILLS_PATH.is_dir():
+        return 0
+
+    checksum_file = BUILTIN_SKILLS_PATH.parent / ".checksum"
+    current_checksum = ""
+    if checksum_file.exists():
+        try:
+            current_checksum = checksum_file.read_text(encoding="utf-8", errors="ignore").strip()
+        except Exception:
+            current_checksum = ""
+
+    own_conn = conn is None
+    active_conn = get_connection(DB_PATH) if own_conn else conn
+    try:
+        init_db(active_conn)
+        cur = active_conn.cursor()
+        if not force and current_checksum:
+            cur.execute("SELECT value FROM runtime_config WHERE key = 'builtin_skills_checksum';")
+            row = cur.fetchone()
+            if row and row[0] == current_checksum:
+                return 0
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        synced_count = 0
+        for skill_folder in sorted(BUILTIN_SKILLS_PATH.iterdir()):
+            if not skill_folder.is_dir():
+                continue
+            skill_md = skill_folder / "SKILL.md"
+            if not skill_md.exists():
+                continue
+            try:
+                name, desc, content = compile_skill_directory_content(skill_folder, default_plugin="builtin")
+                tokens = estimate_tokens(content)
+                cur.execute("""
+                INSERT OR REPLACE INTO skills (name, plugin_name, category, is_active, description, content, token_estimate, updated_at)
+                VALUES (?, 'builtin', 'builtin', 1, ?, ?, ?, ?);
+                """, (name, desc, content, tokens, now_iso))
+                synced_count += 1
+            except Exception as err:
+                if not silent:
+                    print(f"Error syncing builtin skill {skill_folder.name}: {err}")
+
+        if synced_count > 0:
+            cur.execute("INSERT INTO skills_fts(skills_fts) VALUES ('rebuild');")
+            if current_checksum:
+                cur.execute("""
+                INSERT OR REPLACE INTO runtime_config (key, value, updated_at)
+                VALUES ('builtin_skills_checksum', ?, ?);
+                """, (current_checksum, now_iso))
+            active_conn.commit()
+            if not silent:
+                print(f"Synced {synced_count} builtin skills from {BUILTIN_SKILLS_PATH}")
+        return synced_count
+    finally:
+        if own_conn:
+            active_conn.close()
 
 
 def add_or_update_rule(conn: sqlite3.Connection, key: str, name: str, category: str, content: str, summary: str = None, scope: str = "global"):
@@ -386,6 +482,10 @@ def sync_database(conn: sqlite3.Connection, direction: str, remote_path_str: str
 
 def doctor(conn: sqlite3.Connection):
     """System health diagnostics."""
+    try:
+        sync_builtin_skills(conn, silent=True)
+    except Exception:
+        pass
     print("\n================ SKILLSDB SYSTEM DIAGNOSTICS ================")
     # 1. Central DB Check
     try:
@@ -451,7 +551,9 @@ def doctor(conn: sqlite3.Connection):
     # 6. Project Memory in current directory
     proj_root = find_project_root()
     proj_db = proj_root / ".agents" / "memory.db"
-    if proj_db.exists():
+    if _is_protected_non_workspace(proj_root):
+        print(f"[INFO] Project Memory: No active project workspace in current directory (protected path: {proj_root})")
+    elif proj_db.exists():
         try:
             with managed_connection(proj_db, is_project_db=True) as pconn:
                 pcur = pconn.cursor()
@@ -493,43 +595,12 @@ def doctor(conn: sqlite3.Connection):
 
 
 def import_from_plugins(conn: sqlite3.Connection):
-    """Imports skills from plugins_archive and builtin directories into customizations.db."""
+    """Non-destructively imports/updates skills from active plugins, plugins_archive, and builtin directories into customizations.db."""
     init_db(conn)
     cursor = conn.cursor()
     now_iso = datetime.now(timezone.utc).isoformat()
 
-    cursor.execute("DELETE FROM rules_fts;")
-    cursor.execute("DELETE FROM skills_fts;")
-    cursor.execute("DELETE FROM rules WHERE category != 'learned';")
-    cursor.execute("DELETE FROM skills;")
-
-    rules_count = 0
     skills_count = 0
-
-    rule_configs = [
-        {
-            "key": "global-formatting",
-            "name": "Global Output Formatting Invariants",
-            "category": "formatting",
-            "scope": "global",
-            "content": """# Global Output Formatting Invariants\n\nNo em-dashes, no en-dashes, no emojis.""",
-            "summary": "Mandatory formatting invariants"
-        }
-    ]
-
-    for rc in rule_configs:
-        tokens = estimate_tokens(rc["content"])
-        cursor.execute("""
-        INSERT OR REPLACE INTO rules (key, name, category, scope, is_active, summary, content, token_estimate, updated_at)
-        VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?);
-        """, (rc["key"], rc["name"], rc["category"], rc["scope"], rc["summary"], rc["content"], tokens, now_iso))
-        rule_id = cursor.lastrowid
-        cursor.execute("""
-        INSERT INTO rules_fts (rowid, key, name, category, summary, content)
-        VALUES (?, ?, ?, ?, ?, ?);
-        """, (rule_id, rc["key"], rc["name"], rc["category"], rc["summary"], rc["content"]))
-        rules_count += 1
-
     search_dirs = []
     if GLOBAL_PLUGINS_PATH.exists():
         search_dirs.append(GLOBAL_PLUGINS_PATH)
@@ -537,35 +608,36 @@ def import_from_plugins(conn: sqlite3.Connection):
         search_dirs.append(ARCHIVED_PLUGINS_PATH)
 
     for base_dir in search_dirs:
-        for plugin_dir in base_dir.iterdir():
+        for plugin_dir in sorted(base_dir.iterdir()):
             if not plugin_dir.is_dir():
                 continue
             skills_dir = plugin_dir / "skills"
             if skills_dir.exists() and skills_dir.is_dir():
-                for skill_folder in skills_dir.iterdir():
+                for skill_folder in sorted(skills_dir.iterdir()):
                     if not skill_folder.is_dir():
                         continue
                     skill_md = skill_folder / "SKILL.md"
                     if skill_md.exists():
                         try:
-                            content = skill_md.read_text(encoding="utf-8", errors="replace")
-                            name, desc = parse_skill_frontmatter(content)
-                            name = name or skill_folder.name
-                            desc = desc or f"Workflow skill from {plugin_dir.name}"
+                            name, desc, content = compile_skill_directory_content(skill_folder, default_plugin=plugin_dir.name)
                             tokens = estimate_tokens(content)
-
                             cursor.execute("""
                             INSERT OR REPLACE INTO skills (name, plugin_name, category, is_active, description, content, token_estimate, updated_at)
                             VALUES (?, ?, ?, 1, ?, ?, ?, ?);
                             """, (name, plugin_dir.name, plugin_dir.name, desc, content, tokens, now_iso))
-                            skill_id = cursor.lastrowid
-                            cursor.execute("""
-                            INSERT INTO skills_fts (rowid, name, plugin_name, category, description, content)
-                            VALUES (?, ?, ?, ?, ?, ?);
-                            """, (skill_id, name, plugin_dir.name, plugin_dir.name, desc, content))
                             skills_count += 1
                         except Exception as err:
                             print(f"Error inserting skill {skill_folder.name}: {err}")
 
+    builtin_synced = sync_builtin_skills(conn, force=True, silent=True)
+    skills_count += builtin_synced
+
+    cursor.execute("INSERT INTO rules_fts(rules_fts) VALUES ('rebuild');")
+    cursor.execute("INSERT INTO skills_fts(skills_fts) VALUES ('rebuild');")
     conn.commit()
-    print(f"Database populated with {rules_count} rules and {skills_count} skills at {DB_PATH}")
+
+    cursor.execute("SELECT COUNT(*) FROM rules;")
+    total_rules = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM skills;")
+    total_skills = cursor.fetchone()[0]
+    print(f"Database synchronized ({skills_count} plugin/builtin skills updated; total: {total_rules} rules, {total_skills} skills) at {DB_PATH}")

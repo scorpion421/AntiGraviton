@@ -337,6 +337,36 @@ def _clear_readonly_in_git(dot_git: Path):
         pass
 
 
+def _get_current_branch(project_root: Path) -> str:
+    """Returns the currently checked-out branch name in project_root (fallback: 'main')."""
+    try:
+        res = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        )
+        branch = res.stdout.strip()
+        if res.returncode == 0 and branch and branch != "HEAD":
+            return branch
+    except Exception:
+        pass
+    return "main"
+
+
+def _resolve_workspace_repo_name(project_root: Path, repo_name: Optional[str] = None) -> str:
+    """Resolves the target Gitea repository name, preserving any existing Gitea remote name before falling back to folder name."""
+    if repo_name:
+        return repo_name
+    configured_url = _get_configured_gitea_repo_url(project_root)
+    if configured_url:
+        tail = configured_url.rstrip("/").split("/")[-1]
+        if tail:
+            return tail
+    return project_root.name
+
+
 def setup_workspace_git(
     project_root: Path,
     repo_name: Optional[str] = None,
@@ -346,7 +376,7 @@ def setup_workspace_git(
     if not shutil.which("git"):
         return False
 
-    name = repo_name or project_root.name
+    name = _resolve_workspace_repo_name(project_root, repo_name)
     dot_git = project_root / ".git"
 
     if dot_git.exists():
@@ -464,7 +494,8 @@ def _push_to_origin(project_root: Path, async_push: bool = False, _allow_retry: 
     else:
         _scrub_workspace_git_config_credentials(project_root)
 
-    push_cmd = _get_git_auth_cmd_prefix() + ["push", "-u", "origin", "main"]
+    branch = _get_current_branch(project_root)
+    push_cmd = _get_git_auth_cmd_prefix() + ["push", "-u", "origin", branch]
 
     try:
         if async_push:
@@ -493,7 +524,7 @@ def _push_to_origin(project_root: Path, async_push: bool = False, _allow_retry: 
             health = ensure_gitea_online(auto_recover=True, flush_pending=False)
             if health.get("online"):
                 setup_workspace_git(project_root)
-                retry_cmd = _get_git_auth_cmd_prefix() + ["push", "-u", "origin", "main"]
+                retry_cmd = _get_git_auth_cmd_prefix() + ["push", "-u", "origin", branch]
                 retry_res = subprocess.run(
                     retry_cmd,
                     cwd=str(project_root),
@@ -518,8 +549,9 @@ def _has_unpushed_commits(project_root: Path) -> bool:
     if "origin" not in rem_res.stdout.split():
         return True
 
+    branch = _get_current_branch(project_root)
     rev_res = subprocess.run(
-        ["git", "rev-list", "--count", "origin/main..HEAD"],
+        ["git", "rev-list", "--count", f"origin/{branch}..HEAD"],
         cwd=str(project_root),
         capture_output=True,
         text=True,
@@ -742,7 +774,7 @@ def publish_gitea_release(
     Returns the HTML URL of the published Gitea release, or None on failure.
     """
     project_root = Path(project_root)
-    target_name = repo_name or project_root.name
+    target_name = _resolve_workspace_repo_name(project_root, repo_name)
     auto_tag, auto_title, auto_notes = _extract_changelog_section(project_root, tag_name)
     final_tag = (tag_name.strip() if tag_name else auto_tag)
     if not final_tag:
@@ -932,7 +964,7 @@ def init_workspace_gitea(
     If a non-empty repository with the target name already exists on Gitea and neither
     use_existing nor overwrite was specified, halts and prompts the agent/user for a decision.
     """
-    target_name = repo_name or project_root.name
+    target_name = _resolve_workspace_repo_name(project_root, repo_name)
     print(f"Initializing Gitea repository '{target_name}' for workspace: {project_root}")
 
     rem_info = inspect_remote_repository(target_name)
@@ -968,7 +1000,7 @@ def sync_workspace(
     """Initializes, learns, and synchronizes a specific workspace (including Keep a Changelog releases and collision checks) to Gitea."""
     has_explicit_msg = bool(message and message.strip() and message != "Synchronize workspace code history")
     msg = message or "Synchronize workspace code history"
-    target_name = repo_name or project_root.name
+    target_name = _resolve_workspace_repo_name(project_root, repo_name)
     print(f"Synchronizing workspace: {project_root.name} ({project_root})")
 
     configured_url = _get_configured_gitea_repo_url(project_root)
