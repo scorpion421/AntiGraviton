@@ -177,5 +177,25 @@ class TestForensicHardeningV143(unittest.TestCase):
             conn2.close()
 
 
+
+    def test_hooks_json_has_no_escaped_quotes_for_go_exec_runner(self):
+        hooks_path = Path(__file__).resolve().parent.parent / "plugin" / "hooks.json"
+        data = json.loads(hooks_path.read_text(encoding="utf-8"))
+        block = data["skillsdb-autonomous-memory"]
+        for item in block.get("PreInvocation", []):
+            cmd = item["command"]
+            self.assertNotIn('"', cmd)
+            tokens = cmd.split()
+            self.assertEqual(tokens[0], "python")
+            self.assertFalse(tokens[1].startswith('"'))
+        for matcher_group in block.get("PreToolUse", []):
+            for item in matcher_group.get("hooks", []):
+                cmd = item["command"]
+                self.assertNotIn('"', cmd)
+                tokens = cmd.split()
+                self.assertEqual(tokens[0], "python")
+                self.assertFalse(tokens[1].startswith('"'))
+
+
 if __name__ == "__main__":
     unittest.main()

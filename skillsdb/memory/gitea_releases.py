@@ -111,6 +111,27 @@ def _extract_changelog_section(
     return tag_name, title, None
 
 
+
+def _resolve_github_repo_slug(project_root: Path) -> Optional[str]:
+    """Resolves the 'owner/repo' slug from a GitHub remote ('github' or 'origin') if configured."""
+    for rem in ("github", "origin"):
+        try:
+            res = subprocess.run(
+                ["git", "remote", "get-url", rem],
+                cwd=str(project_root),
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if res.returncode == 0 and "github.com" in (res.stdout or "").lower():
+                m = re.search(r"github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?\s*$", res.stdout.strip(), re.IGNORECASE)
+                if m:
+                    return m.group(1)
+        except Exception:
+            pass
+    return None
+
+
 def sync_changelog_releases(
     project_root: Path,
     sync_github: bool = False,
@@ -242,8 +263,10 @@ def sync_changelog_releases(
                     tf.write(body)
                     tmp_path = tf.name
                 try:
+                    gh_slug = _resolve_github_repo_slug(project_root)
+                    repo_args = ["--repo", gh_slug] if gh_slug else []
                     chk = subprocess.run(
-                        ["gh", "release", "view", tag],
+                        ["gh", "release", "view", tag] + repo_args,
                         cwd=str(project_root),
                         capture_output=True,
                         text=True,
@@ -252,14 +275,14 @@ def sync_changelog_releases(
                     if chk.returncode == 0:
                         if overwrite_existing or "keepachangelog.com" not in (chk.stdout or ""):
                             subprocess.run(
-                                ["gh", "release", "edit", tag, "--title", rel_title, "--notes-file", tmp_path],
+                                ["gh", "release", "edit", tag, "--title", rel_title, "--notes-file", tmp_path] + repo_args,
                                 cwd=str(project_root),
                                 capture_output=True,
                                 timeout=20,
                             )
                     else:
                         subprocess.run(
-                            ["gh", "release", "create", tag, "--title", rel_title, "--notes-file", tmp_path],
+                            ["gh", "release", "create", tag, "--title", rel_title, "--notes-file", tmp_path] + repo_args,
                             cwd=str(project_root),
                             capture_output=True,
                             timeout=20,

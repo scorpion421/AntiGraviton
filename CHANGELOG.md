@@ -5,6 +5,12 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.4] - 2026-10-28
+
+### Fixed
+- **Antigravity Go Hook Runner Command Tokenization (`plugin/hooks.json`)**: Removed escaped double quotes around `%USERPROFILE%/.gemini/database/db_manager.py` in `PreInvocation` and `PreToolUse` hook definitions. Antigravity's native Go hook runner splits `command` strings via whitespace without stripping quotes (`strings.Fields`), which caused `python.exe` after a server restart to treat `""C:\Users\...\db_manager.py""` as a relative path with `[Errno 22] Invalid argument`.
+- **Multi-Remote GitHub Release Sync (`skillsdb/memory/gitea_releases.py`, `skillsdb/memory/gitea_sync.py`)**: Added `_resolve_github_repo_slug()` so `skillsdb gitea-release --github` and `skillsdb gitea-sync --releases --github` automatically pass `--repo <owner>/<repo>` to `gh release` when `origin` points to local Gitea and `github` points to `github.com`.
+
 ## [1.4.3] - 2026-10-28
 
 ### Added

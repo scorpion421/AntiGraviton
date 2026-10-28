@@ -3,7 +3,7 @@
     "PreInvocation": [
       {
         "type": "command",
-        "command": "python \"%USERPROFILE%/.gemini/database/db_manager.py\" mem-pre-invocation-hook",
+        "command": "python %USERPROFILE%/.gemini/database/db_manager.py mem-pre-invocation-hook",
         "timeout": 5
       }
     ],
@@ -13,7 +13,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"%USERPROFILE%/.gemini/database/db_manager.py\" guardrail-pre-tool-hook",
+            "command": "python %USERPROFILE%/.gemini/database/db_manager.py guardrail-pre-tool-hook",
             "timeout": 5
           }
         ]

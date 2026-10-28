@@ -92,7 +92,7 @@ def check_update(quiet: bool = False) -> dict:
 
     suite_tag = info["tag"]
     latest_engine = info.get("skillsdb_version") or suite_tag
-    local_suite = globals().get("__suite_version__", "1.4.3")
+    local_suite = globals().get("__suite_version__", "1.4.4")
     repo_root = find_repo_root()
     if repo_root and (repo_root / "VERSION").exists():
         try:

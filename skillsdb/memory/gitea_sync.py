@@ -45,6 +45,7 @@ from .gitea_service import (
 from .gitea_releases import (
     parse_keep_a_changelog,
     _extract_changelog_section,
+    _resolve_github_repo_slug,
     sync_changelog_releases,
 )
 
@@ -1111,11 +1112,14 @@ def publish_gitea_release(
                 tf.write(final_notes)
                 tmp_path = tf.name
             try:
-                chk = subprocess.run(["gh", "release", "view", final_tag], cwd=str(project_root), capture_output=True, text=True, timeout=15)
+                gh_slug = _resolve_github_repo_slug(project_root)
+                repo_args = ["--repo", gh_slug] if gh_slug else []
+                subprocess.run(["git", "push", "github", "main", final_tag], cwd=str(project_root), capture_output=True, timeout=30)
+                chk = subprocess.run(["gh", "release", "view", final_tag] + repo_args, cwd=str(project_root), capture_output=True, text=True, timeout=15)
                 if chk.returncode == 0:
-                    subprocess.run(["gh", "release", "edit", final_tag, "--title", final_title, "--notes-file", tmp_path], cwd=str(project_root), capture_output=True, timeout=20)
+                    subprocess.run(["gh", "release", "edit", final_tag, "--title", final_title, "--notes-file", tmp_path] + repo_args, cwd=str(project_root), capture_output=True, timeout=20)
                 else:
-                    subprocess.run(["gh", "release", "create", final_tag, "--title", final_title, "--notes-file", tmp_path], cwd=str(project_root), capture_output=True, timeout=20)
+                    subprocess.run(["gh", "release", "create", final_tag, "--title", final_title, "--notes-file", tmp_path] + repo_args, cwd=str(project_root), capture_output=True, timeout=20)
             finally:
                 Path(tmp_path).unlink(missing_ok=True)
         except Exception:
