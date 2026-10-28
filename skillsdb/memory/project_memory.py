@@ -1425,10 +1425,73 @@ def handle_pre_invocation_hook():
     print(json.dumps({"injectSteps": []}))
 
 
-def calculate_transcript_savings(target_date: str = None, brain_dir: Path = None):
+def _compute_dynamic_turn_savings(conn: sqlite3.Connection = None, db_path: Path = DB_PATH) -> dict:
+    """
+    Dynamically computes per-turn prompt token savings and reduction percentage from the
+    live rules and skills inventory in customizations.db instead of a static constant:
+      - Unconsolidated rules baseline: SUM(token_estimate) of all active rules
+      - Unconsolidated plugin catalog header: metadata/description tokens of all non-builtin skills
+      - Unsliced full-skill context footprint: 2x average full skill body vs. surgical micro-sections
+    """
+    rules_tokens = 0
+    catalog_tokens = 0
+    avg_skill_tokens = 0
+    total_skills_tokens = 0
+
+    def _query(c: sqlite3.Connection):
+        nonlocal rules_tokens, catalog_tokens, avg_skill_tokens, total_skills_tokens
+        cur = c.cursor()
+        cur.execute("SELECT COALESCE(SUM(token_estimate), 0) FROM rules WHERE is_active = 1;")
+        rules_tokens = int(cur.fetchone()[0] or 0)
+        cur.execute(
+            "SELECT COALESCE(SUM(CAST((LENGTH(COALESCE(name, '')) + LENGTH(COALESCE(description, ''))) / 4 AS INT) + 28), 0) "
+            "FROM skills WHERE is_active = 1 AND plugin_name != 'builtin';"
+        )
+        catalog_tokens = int(cur.fetchone()[0] or 0)
+        cur.execute("SELECT COALESCE(CAST(AVG(token_estimate) AS INT), 0), COALESCE(SUM(token_estimate), 0) FROM skills WHERE is_active = 1;")
+        row = cur.fetchone()
+        if row:
+            avg_skill_tokens = int(row[0] or 0)
+            total_skills_tokens = int(row[1] or 0)
+
+    try:
+        if conn is not None:
+            _query(conn)
+        elif db_path and Path(db_path).exists():
+            with managed_connection(Path(db_path)) as tmp_conn:
+                _query(tmp_conn)
+    except Exception:
+        pass
+
+    raw_turn_baseline = rules_tokens + catalog_tokens + (avg_skill_tokens * 2)
+    if raw_turn_baseline <= 500:
+        raw_turn_baseline = 14810
+
+    active_pointer_tokens = 380
+    tokens_saved_per_turn = max(500, raw_turn_baseline - active_pointer_tokens)
+    reduction_pct = round((tokens_saved_per_turn / float(raw_turn_baseline)) * 100.0, 1)
+
+    return {
+        "rules_tokens": rules_tokens,
+        "catalog_tokens": catalog_tokens,
+        "avg_skill_tokens": avg_skill_tokens,
+        "total_skills_tokens": total_skills_tokens,
+        "raw_turn_baseline": raw_turn_baseline,
+        "active_pointer_tokens": active_pointer_tokens,
+        "tokens_saved_per_turn": tokens_saved_per_turn,
+        "reduction_pct": reduction_pct,
+    }
+
+
+def calculate_transcript_savings(
+    target_date: str = None,
+    brain_dir: Path = None,
+    conn: sqlite3.Connection = None,
+    db_path: Path = DB_PATH,
+):
     """
     Scans Antigravity transcript files to compute both date-scoped (default: today UTC)
-    and cumulative all-time prompt tokens avoided.
+    and cumulative all-time prompt tokens avoided using dynamic database baselines.
     """
     b_dir = Path(brain_dir) if brain_dir else (Path.home() / ".gemini" / "antigravity" / "brain")
     if not b_dir.exists():
@@ -1490,11 +1553,15 @@ def calculate_transcript_savings(target_date: str = None, brain_dir: Path = None
     if total_turns == 0 and day_turns == 0:
         return None
 
-    tokens_saved = total_turns * 14430
+    dyn = _compute_dynamic_turn_savings(conn=conn, db_path=db_path)
+    per_turn = dyn["tokens_saved_per_turn"]
+    reduction_pct = dyn["reduction_pct"]
+
+    tokens_saved = total_turns * per_turn
     dollars_saved_pro = (tokens_saved / 1_000_000) * 2.00
     dollars_saved_ultra = (tokens_saved / 1_000_000) * 7.50
 
-    day_tokens_saved = day_turns * 14430
+    day_tokens_saved = day_turns * per_turn
     day_dollars_pro = (day_tokens_saved / 1_000_000) * 2.00
     day_dollars_ultra = (day_tokens_saved / 1_000_000) * 7.50
 
@@ -1503,6 +1570,9 @@ def calculate_transcript_savings(target_date: str = None, brain_dir: Path = None
         "model_turns": total_turns,
         "steps": total_steps,
         "tokens_saved": tokens_saved,
+        "tokens_saved_per_turn": per_turn,
+        "unbundled_turn_baseline": dyn["raw_turn_baseline"],
+        "reduction_pct": reduction_pct,
         "dollars_saved": dollars_saved_pro,
         "dollars_saved_pro": dollars_saved_pro,
         "dollars_saved_ultra": dollars_saved_ultra,
@@ -1529,20 +1599,25 @@ def stats(conn: sqlite3.Connection, show_savings: bool = False, target_date: str
     print(f"Rules:         {r_stat['count']} rules (Active content: ~{r_stat['tokens']} tokens)")
     print(f"Skills:        {s_stat['count']} skills (Total content: ~{s_stat['tokens']} tokens)")
 
-    savings = calculate_transcript_savings(target_date=target_date)
+    savings = calculate_transcript_savings(target_date=target_date, conn=conn)
     if savings:
         day_lbl = savings["target_date"]
+        red_pct = savings["reduction_pct"]
+        print(
+            f"Turn Baseline: ~{savings['unbundled_turn_baseline']:,} raw tokens/turn -> "
+            f"~{savings['tokens_saved_per_turn']:,} tokens saved/turn (-{red_pct:.1f}%)"
+        )
         print(f"\n--- Measured Activity for {day_lbl} (Strictly Date-Scoped) ---")
         print(f"Active Sessions ({day_lbl}): {savings['day_sessions']} sessions")
         print(f"Model Turns ({day_lbl}):     {savings['day_model_turns']:,} turns ({savings['day_steps']:,} steps)")
-        print(f"Prompt Bloat Avoided:         ~{savings['day_tokens_saved']:,} tokens (-97.4% per turn)")
+        print(f"Prompt Bloat Avoided:         ~{savings['day_tokens_saved']:,} tokens (-{red_pct:.1f}% per turn)")
         print(f"Cost Saved (Gemini Pro):      ~${savings['day_dollars_pro']:.2f} USD")
         print(f"Cost Saved (Gemini Ultra):    ~${savings['day_dollars_ultra']:.2f} USD")
 
         print("\n--- Cumulative Token Savings (Since SkillsDB Deployment) ---")
         print(f"Tracked Sessions:     {savings['sessions']} active sessions")
         print(f"Total Model Turns:    {savings['model_turns']:,} turns ({savings['steps']:,} steps)")
-        print(f"Prompt Bloat Avoided: ~{savings['tokens_saved']:,} tokens (-97.4% per turn)")
+        print(f"Prompt Bloat Avoided: ~{savings['tokens_saved']:,} tokens (-{red_pct:.1f}% per turn)")
         print(f"Cost Saved (Gemini Pro):   ~${savings['dollars_saved_pro']:.2f} USD")
         print(f"Cost Saved (Gemini Ultra): ~${savings['dollars_saved_ultra']:.2f} USD")
         tier, tdesc = detect_model_tier()

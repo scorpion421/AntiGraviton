@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Unified Cross-Platform One-Command Installer for the AntiGraviton Complete Suite (v1.4.5).
+Unified Cross-Platform One-Command Installer for the AntiGraviton Complete Suite (v1.4.6).
 
 Supports Linux (systemd --user / rootless daemon), macOS (launchd LaunchAgent), and Windows.
 Deploys:
 1. Non-destructive upgrade preservation of existing runtime_config, Gitea tokens, learned workspaces, and user-learned rules
-2. SkillsDB Context & Memory Engine (v3.7.5) + customizations-db Plugin + shell PATH integration
+2. SkillsDB Context & Memory Engine (v3.7.6) + customizations-db Plugin + shell PATH integration
 3. Antigravity Gitea Local Service (v1.1.2) on loopback (127.0.0.1:3000) with crash auto-recovery and optional 03:00 backup timer
 4. Zero-touch local Gitea Admin user (with optional explicit password) & API Token provisioning into SkillsDB
 5. Strict /api/healthz verification gate, organic workspace discovery, and interactive capability briefing
@@ -268,9 +268,9 @@ def backup_existing_state(db_path: Path) -> Dict:
         conn = sqlite3.connect(db_path)
         cur = conn.cursor()
         try:
-            cur.execute("SELECT key, value FROM runtime_config")
-            for k, v in cur.fetchall():
-                state["runtime_config"][k] = v
+            cur.execute("SELECT key, value, updated_at FROM runtime_config")
+            for k, v, ts in cur.fetchall():
+                state["runtime_config"][k] = [v, ts]
         except Exception:
             pass
         try:
@@ -294,13 +294,24 @@ def restore_existing_state(db_path: Path, state: Dict) -> None:
         return
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
-    for k, v in state.get("runtime_config", {}).items():
+    for k, entry in state.get("runtime_config", {}).items():
+        if isinstance(entry, list) and len(entry) >= 2:
+            v, ts = entry[0], entry[1]
+        else:
+            v, ts = entry, None
         if v and v not in ("{}", "[]"):
-            cur.execute(
-                "INSERT INTO runtime_config (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP",
-                (k, v),
-            )
+            if ts:
+                cur.execute(
+                    "INSERT INTO runtime_config (key, value, updated_at) VALUES (?, ?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                    (k, v, ts),
+                )
+            else:
+                cur.execute(
+                    "INSERT INTO runtime_config (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP",
+                    (k, v),
+                )
     learned_rules = state.get("learned_rules", [])
     for r in learned_rules:
         cur.execute(
@@ -331,7 +342,7 @@ def install_antigraviton(
 ) -> None:
     suite_root = Path(__file__).parent.resolve()
     version_file = suite_root / "VERSION"
-    suite_version = version_file.read_text(encoding="utf-8-sig").strip() if version_file.exists() else "1.4.5"
+    suite_version = version_file.read_text(encoding="utf-8-sig").strip() if version_file.exists() else "1.4.6"
     user_home = Path.home()
     gemini_dir = user_home / ".gemini"
     target_db_path = gemini_dir / "database" / "customizations.db"
@@ -357,7 +368,7 @@ def install_antigraviton(
         preserved_state = {"runtime_config": {}, "learned_rules": []}
 
     # STEP 2: Deploy SkillsDB Core & Antigravity Plugin
-    print("[2/5] Deploying SkillsDB Engine (v3.7.5) and customizations-db Plugin...")
+    print("[2/5] Deploying SkillsDB Engine (v3.7.6) and customizations-db Plugin...")
     deploy_py = suite_root / "deploy.py"
     subprocess.run([sys.executable, str(deploy_py), "--source", str(suite_root), "--target", str(gemini_dir)], check=True)
     ensure_posix_shell_path(gemini_dir / "antigravity" / "bin")

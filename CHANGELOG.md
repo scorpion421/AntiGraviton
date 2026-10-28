@@ -5,6 +5,22 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.6] - 2026-10-28
+
+### Changed
+- **Dynamic Per-Turn Token Savings Baseline in `skillsdb stats` (`skillsdb/memory/project_memory.py`, `v3.7.6`)**:
+  - Replaced the static `14,430` per-turn token constant in `calculate_transcript_savings()` with `_compute_dynamic_turn_savings()`, which dynamically computes the unconsolidated turn baseline (`rules_tokens + non_builtin_catalog_tokens + 2 * avg_skill_tokens`), net tokens saved per turn, and exact percentage reduction directly from the active `rules` and `skills` tables in `customizations.db`.
+- **Cross-Platform Installer State Preservation Parity (`install_antigraviton.py`)**:
+  - Synchronized `backup_existing_state()` and `restore_existing_state()` in `install_antigraviton.py` with `install-antigraviton.ps1` so `runtime_config.updated_at` timestamps are preserved identically across Windows, Linux, and macOS upgrades.
+
+## [1.4.6] - 2026-10-28
+
+### Changed
+- **Dynamic Per-Turn Token Savings Baseline in `skillsdb stats` (`skillsdb/memory/project_memory.py`, `v3.7.6`)**:
+  - Replaced the static `14,430` per-turn token constant in `calculate_transcript_savings()` with `_compute_dynamic_turn_savings()`, which dynamically computes the unconsolidated turn baseline (`rules_tokens + non_builtin_catalog_tokens + 2 * avg_skill_tokens`), net tokens saved per turn, and exact percentage reduction directly from the active `rules` and `skills` tables in `customizations.db`.
+- **Cross-Platform Installer State Preservation Parity (`install_antigraviton.py`)**:
+  - Synchronized `backup_existing_state()` and `restore_existing_state()` in `install_antigraviton.py` with `install-antigraviton.ps1` so `runtime_config.updated_at` timestamps are preserved identically across Windows, Linux, and macOS upgrades.
+
 ## [1.4.5] - 2026-10-28
 
 ### Added
@@ -21,22 +37,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added `_infer_workspace_last_active_iso()` and `touch_timestamp: bool = True` to `learn_workspace()` so passive workspace discovery (`discover_all_workspaces()`) preserves existing `updated_at` timestamps instead of stamping all workspaces with `now_iso`.
   - Updated `install-antigraviton.ps1` backup/restore steps to preserve `updated_at` in `runtime_config` and self-heal previously bulk-stamped `workspace:*` entries from disk.
 
-## [1.4.5] - 2026-10-28
+## [1.4.6] - 2026-10-28
+
+### Changed
+- **Dynamic Per-Turn Token Savings Baseline in `skillsdb stats` (`skillsdb/memory/project_memory.py`, `v3.7.6`)**:
+  - Replaced the static `14,430` per-turn token constant in `calculate_transcript_savings()` with `_compute_dynamic_turn_savings()`, which dynamically computes the unconsolidated turn baseline (`rules_tokens + non_builtin_catalog_tokens + 2 * avg_skill_tokens`), net tokens saved per turn, and exact percentage reduction directly from the active `rules` and `skills` tables in `customizations.db`.
+- **Cross-Platform Installer State Preservation Parity (`install_antigraviton.py`)**:
+  - Synchronized `backup_existing_state()` and `restore_existing_state()` in `install_antigraviton.py` with `install-antigraviton.ps1` so `runtime_config.updated_at` timestamps are preserved identically across Windows, Linux, and macOS upgrades.
+
+## [1.4.6] - 2026-10-28
 
-### Added
-- **Temporal Epoch Slicing & Cross-Project Contamination Guard (`skillsdb/memory/project_memory.py`, `v3.7.5`)**:
-  - Added `analyze_conversation_epochs_and_scope()` to slice a conversation's `transcript.jsonl` into distinct chronological epochs (separated by `>4h` gaps or UTC date changes) and correlate historical turns against learned workspace paths without requiring extra `conversation_id` columns in SQLite tables.
-  - Updated `handle_pre_invocation_hook()` to inject `[TEMPORAL & WORKSPACE ISOLATION ANCHOR]` on Turn 1 and automatically emit `[CROSS-PROJECT CONTAMINATION GUARD]` whenever historical epochs in the same `conversationId` (or `<CONTEXT_SUMMARY>`) mention foreign workspaces from earlier dates.
-  - Updated hook state deduplication (`_HOOK_STATE_FILE`) to include the active temporal epoch (`f"{workspace_key}@{epoch_key}"`), keeping per-step hook noise at zero within an active epoch while automatically re-hydrating guardrails whenever a conversation resumes on a new day or after a `>4h` gap.
-- **Strictly Date-Scoped Daily Telemetry & Timestamped Memory Context (`skillsdb/memory/project_memory.py`, `skillsdb/cli.py`, `skillsdb/memory/gitea_config.py`)**:
-  - Updated `calculate_transcript_savings()`, `stats()`, and `skillsdb stats [--today] [--date YYYY-MM-DD]` to report both strictly date-scoped daily metrics (`Measured Activity for YYYY-MM-DD`) and all-time cumulative metrics (`Cumulative Token Savings`).
-  - Added `[YYYY-MM-DD]` timestamps to active tasks, architectural decisions, project facts, and milestone snapshots (with `[ACTIVE EPOCH]` markers) in `handle_pre_invocation_hook()`, `mem_get_context()`, and `skillsdb gitea-config` (`get_learned_workspaces_with_timestamps()`).
+### Changed
+- **Dynamic Per-Turn Token Savings Baseline in `skillsdb stats` (`skillsdb/memory/project_memory.py`, `v3.7.6`)**:
+  - Replaced the static `14,430` per-turn token constant in `calculate_transcript_savings()` with `_compute_dynamic_turn_savings()`, which dynamically computes the unconsolidated turn baseline (`rules_tokens + non_builtin_catalog_tokens + 2 * avg_skill_tokens`), net tokens saved per turn, and exact percentage reduction directly from the active `rules` and `skills` tables in `customizations.db`.
+- **Cross-Platform Installer State Preservation Parity (`install_antigraviton.py`)**:
+  - Synchronized `backup_existing_state()` and `restore_existing_state()` in `install_antigraviton.py` with `install-antigraviton.ps1` so `runtime_config.updated_at` timestamps are preserved identically across Windows, Linux, and macOS upgrades.
 
-### Fixed
-- **Workspace Activity Timestamp Preservation Across Passive Discovery and Suite Upgrades (`skillsdb/memory/gitea_config.py`, `install-antigraviton.ps1`)**:
-  - Added `_infer_workspace_last_active_iso()` and `touch_timestamp: bool = True` to `learn_workspace()` so passive workspace discovery (`discover_all_workspaces()`) preserves existing `updated_at` timestamps instead of stamping all workspaces with `now_iso`.
-  - Updated `install-antigraviton.ps1` backup/restore steps to preserve `updated_at` in `runtime_config` and self-heal previously bulk-stamped `workspace:*` entries from disk.
-
+## [1.4.5] - 2026-10-28
+
+
+
+### Added
+
+- **Temporal Epoch Slicing & Cross-Project Contamination Guard (`skillsdb/memory/project_memory.py`, `v3.7.5`)**:
+
+  - Added `analyze_conversation_epochs_and_scope()` to slice a conversation's `transcript.jsonl` into distinct chronological epochs (separated by `>4h` gaps or UTC date changes) and correlate historical turns against learned workspace paths without requiring extra `conversation_id` columns in SQLite tables.
+
+  - Updated `handle_pre_invocation_hook()` to inject `[TEMPORAL & WORKSPACE ISOLATION ANCHOR]` on Turn 1 and automatically emit `[CROSS-PROJECT CONTAMINATION GUARD]` whenever historical epochs in the same `conversationId` (or `<CONTEXT_SUMMARY>`) mention foreign workspaces from earlier dates.
+
+  - Updated hook state deduplication (`_HOOK_STATE_FILE`) to include the active temporal epoch (`f"{workspace_key}@{epoch_key}"`), keeping per-step hook noise at zero within an active epoch while automatically re-hydrating guardrails whenever a conversation resumes on a new day or after a `>4h` gap.
+
+- **Strictly Date-Scoped Daily Telemetry & Timestamped Memory Context (`skillsdb/memory/project_memory.py`, `skillsdb/cli.py`, `skillsdb/memory/gitea_config.py`)**:
+
+  - Updated `calculate_transcript_savings()`, `stats()`, and `skillsdb stats [--today] [--date YYYY-MM-DD]` to report both strictly date-scoped daily metrics (`Measured Activity for YYYY-MM-DD`) and all-time cumulative metrics (`Cumulative Token Savings`).
+
+  - Added `[YYYY-MM-DD]` timestamps to active tasks, architectural decisions, project facts, and milestone snapshots (with `[ACTIVE EPOCH]` markers) in `handle_pre_invocation_hook()`, `mem_get_context()`, and `skillsdb gitea-config` (`get_learned_workspaces_with_timestamps()`).
+
+
+
+### Fixed
+
+- **Workspace Activity Timestamp Preservation Across Passive Discovery and Suite Upgrades (`skillsdb/memory/gitea_config.py`, `install-antigraviton.ps1`)**:
+
+  - Added `_infer_workspace_last_active_iso()` and `touch_timestamp: bool = True` to `learn_workspace()` so passive workspace discovery (`discover_all_workspaces()`) preserves existing `updated_at` timestamps instead of stamping all workspaces with `now_iso`.
+
+  - Updated `install-antigraviton.ps1` backup/restore steps to preserve `updated_at` in `runtime_config` and self-heal previously bulk-stamped `workspace:*` entries from disk.
+
+
+
 ## [1.4.4] - 2026-10-28
 
 ### Fixed

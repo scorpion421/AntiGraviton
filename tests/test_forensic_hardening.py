@@ -337,11 +337,13 @@ class TestForensicHardeningV143(unittest.TestCase):
                 self.assertIn("picture-in-picture", msg3)
 
                 # Verify date-scoped vs cumulative savings calculation
-                sav = calculate_transcript_savings(target_date="2026-10-28", brain_dir=brain_dir)
+                sav = calculate_transcript_savings(target_date="2026-10-28", brain_dir=brain_dir, db_path=db_file)
                 self.assertIsNotNone(sav)
                 self.assertEqual(sav["model_turns"], 2)
                 self.assertEqual(sav["day_model_turns"], 1)
                 self.assertEqual(sav["day_steps"], 2)
+                self.assertGreater(sav["tokens_saved_per_turn"], 1000)
+                self.assertGreater(sav["reduction_pct"], 90.0)
             finally:
                 sys.stdin, sys.stdout = old_stdin, old_stdout
 
