@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from ..config import (
     __version__,
+    __suite_version__,
     DB_DIR,
     DB_PATH,
     GLOBAL_PLUGINS_PATH,
@@ -38,6 +39,18 @@ def find_repo_root() -> Path:
     return None
 
 
+def _extract_skillsdb_version_from_release(tag: str, name: str, body: str) -> str:
+    """Extracts the SkillsDB engine version (e.g. 3.7.2) from an AntiGraviton release title or body."""
+    combined = f"{name or ''}\n{body or ''}"
+    m = re.search(r"SkillsDB\s+[(`'\"]*v?(\d+\.\d+\.\d+)", combined, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    m2 = re.search(r"\bv(3\.\d+\.\d+)\b", combined)
+    if m2:
+        return m2.group(1)
+    return tag
+
+
 def get_latest_release_info() -> dict:
     """Queries GitHub API for the latest release of AntiGraviton / SkillsDB."""
     urls = [
@@ -53,11 +66,16 @@ def get_latest_release_info() -> dict:
             with urllib.request.urlopen(req, timeout=5) as response:
                 if response.status == 200:
                     data = json.loads(response.read().decode("utf-8"))
+                    raw_tag = data.get("tag_name", "").lstrip("v")
+                    rel_name = data.get("name", "")
+                    rel_body = data.get("body", "")
+                    engine_ver = _extract_skillsdb_version_from_release(raw_tag, rel_name, rel_body)
                     return {
-                        "tag": data.get("tag_name", "").lstrip("v"),
-                        "name": data.get("name", ""),
+                        "tag": raw_tag,
+                        "skillsdb_version": engine_ver,
+                        "name": rel_name,
                         "published_at": data.get("published_at", "")[:10],
-                        "body": data.get("body", "")
+                        "body": rel_body,
                     }
         except Exception:
             continue
@@ -65,28 +83,48 @@ def get_latest_release_info() -> dict:
 
 
 def check_update(quiet: bool = False) -> dict:
-    """Compares local version with latest GitHub release."""
+    """Compares local version with latest GitHub release (comparing both SkillsDB engine and AntiGraviton suite versions)."""
     info = get_latest_release_info()
     if not info or not info["tag"]:
         if not quiet:
             print("[INFO] Could not check for updates (GitHub offline or rate-limited).")
         return None
 
-    latest_str = info["tag"]
+    suite_tag = info["tag"]
+    latest_engine = info.get("skillsdb_version") or suite_tag
+    local_suite = globals().get("__suite_version__", "1.4.2")
+    repo_root = find_repo_root()
+    if repo_root and (repo_root / "VERSION").exists():
+        try:
+            v_txt = (repo_root / "VERSION").read_text(encoding="utf-8").strip().lstrip("v")
+            if v_txt:
+                local_suite = v_txt
+        except Exception:
+            pass
+
     has_update = False
     try:
         def parse_ver(v):
             return [int(x) for x in re.sub(r"[^0-9.]", "", v).split(".") if x]
-        has_update = parse_ver(latest_str) > parse_ver(__version__)
+
+        p_latest_engine = parse_ver(latest_engine)
+        p_local_engine = parse_ver(__version__)
+        p_suite_tag = parse_ver(suite_tag)
+        p_local_suite = parse_ver(local_suite)
+
+        if p_latest_engine and p_latest_engine[0] >= 3:
+            has_update = p_latest_engine > p_local_engine
+        if not has_update and p_suite_tag and p_local_suite and p_suite_tag[0] == p_local_suite[0]:
+            has_update = p_suite_tag > p_local_suite
     except Exception:
-        has_update = latest_str != __version__
+        has_update = (latest_engine != __version__) and (suite_tag != local_suite)
 
     if not quiet:
         print("\n================ SKILLSDB UPDATE CHECK ================")
-        print(f"Current Version: v{__version__}")
-        print(f"Latest Version:  v{latest_str} (Published: {info['published_at']})")
+        print(f"Current Version: AntiGraviton v{local_suite} (SkillsDB v{__version__})")
+        print(f"Latest Version:  AntiGraviton v{suite_tag} (SkillsDB v{latest_engine}, Published: {info['published_at']})")
         if has_update:
-            print(f"\n[UPDATE AVAILABLE] A newer version of SkillsDB is available!")
+            print(f"\n[UPDATE AVAILABLE] A newer version of AntiGraviton / SkillsDB is available!")
             print(f"Release Name: {info['name']}")
             print("\nRun 'skillsdb update' to safely upgrade.")
         else:
@@ -96,7 +134,9 @@ def check_update(quiet: bool = False) -> dict:
     return {
         "has_update": has_update,
         "current": __version__,
-        "latest": latest_str,
+        "latest": latest_engine,
+        "suite_current": local_suite,
+        "suite_latest": suite_tag,
         "name": info["name"]
     }
 

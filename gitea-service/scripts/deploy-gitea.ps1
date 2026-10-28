@@ -53,6 +53,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $false
 $ProgressPreference = "SilentlyContinue"
 
 Write-Host "============================================================" -ForegroundColor Cyan
@@ -148,6 +149,7 @@ if (-not (Test-Path $configPath)) {
     if ($updatedIni -notmatch "(?m)^\s*\[indexer\]") {
         $updatedIni = $updatedIni.TrimEnd() + "`r`n`r`n[indexer]`r`nISSUE_INDEXER_TYPE = db`r`nREPO_INDEXER_ENABLED = false`r`n"
     }
+    $updatedIni = [regex]::Replace($updatedIni, "(?m)^\s*DISABLE_GRAVATAR\s*=[^\r\n]*\r?\n?", "")
 
     if ($updatedIni -ne $rawIni) {
         Set-Content -Path $configPath -Value $updatedIni -Encoding UTF8

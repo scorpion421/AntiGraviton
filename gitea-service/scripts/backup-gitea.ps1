@@ -42,6 +42,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $false
 $ProgressPreference = "SilentlyContinue"
 
 $resolvedInstall = (Resolve-Path $InstallPath).Path

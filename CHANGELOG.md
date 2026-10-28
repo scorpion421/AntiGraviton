@@ -5,6 +5,28 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.2] - 2026-10-28
+
+### Added
+- **Antigravity `v2.28.0` Turn-1 user prompt FTS5 skill pre-routing (`skillsdb/memory/project_memory.py`, `v3.7.2`)**:
+  - Added `_extract_hook_user_message()` and integrated incoming `v2.28.0+` user prompt payloads (`userMessage`, `userPrompt`, `prompt`, `message`) into `handle_pre_invocation_hook()` so top matching domain micro-skills are automatically pre-routed via synonym-expanded FTS5 on Turn 1 without requiring an extra CLI roundtrip.
+- **Antigravity `v2.27.0` / `v2.28.0` `PreToolUse` guardrail support for `write_file` and `edit_file` (`skillsdb/core/guardrails.py`, `plugin/hooks.json`)**:
+  - Extended `handle_pre_tool_guardrail_hook()` to inspect modern Antigravity tool schemas (`write_file` -> `Path`, `Content`; `edit_file` -> `Path`, `Replacement`) and `ReplacementChunks` (`multi_replace_file_content`) alongside legacy `TargetFile`, `CodeContent`, and `ReplacementContent` fields.
+  - Registered the `PreToolUse` guardrail handler in `plugin/hooks.json` for `write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content`.
+
+### Changed
+- **Expanded model tier classification for Antigravity `v2.24.0` through `v2.28.0` and IDE `v2.6.0` (`skillsdb/core/detector.py`)**:
+  - Updated `_classify_model_string()` to map Vertex AI `Claude Opus 5.5` (`claude opus`, `claude-opus`, `opus 5`) to `TIER_ULTRA`, `Claude Sonnet 5.5` (`claude sonnet`, `claude-sonnet`, `sonnet 5`) to `TIER_STANDARD`, and `gemini-3.6-flash` / `Gemini 3.6 Flash` to `TIER_LEAN`.
+- **Strict YAML frontmatter formatting for Antigravity `v2.25.0+` and CLI `v1.4.0` `agy plugin validate` (`.agents/skills/install-antigraviton/SKILL.md`)**:
+  - Converted the `description:` frontmatter field in `.agents/skills/install-antigraviton/SKILL.md` to a multiline YAML block scalar (`>-`) and updated all suite version references to `v1.4.2` (`SkillsDB v3.7.2`).
+
+### Fixed
+- **Dual suite and engine version comparison in `skillsdb check-update` (`skillsdb/updater/merger.py`, `skillsdb/config.py`)**:
+  - Added `_extract_skillsdb_version_from_release()` and `__suite_version__` so `check_update()` accurately compares both the SkillsDB engine version (`3.7.2`) and the AntiGraviton suite tag (`1.4.2`) instead of comparing a `1.x.y` suite tag directly against `3.x.y`.
+- **PowerShell 7.6 `NativeCommandError` resilience and Gitea `1.22+` `DISABLE_GRAVATAR` deprecation removal (`install-antigraviton.ps1`, `gitea-service/scripts/deploy-gitea.ps1`, `gitea-service/scripts/backup-gitea.ps1`, `gitea-service/custom/conf/app.example.ini`)**:
+  - Set `$PSNativeCommandUseErrorActionPreference = $false` across PowerShell installers and wrapped Step 4 `gitea.exe` CLI invocations in `install-antigraviton.ps1` with `$ErrorActionPreference = "Continue"` so `stderr` notices never abort user/token provisioning under PowerShell 7.6.
+  - Removed deprecated `DISABLE_GRAVATAR = true` from `gitea-service/custom/conf/app.example.ini` and added automatic cleanup of legacy `DISABLE_GRAVATAR` lines in `app.ini` during service deployment and upgrades.
+
 ## [1.4.1] - 2026-10-24
 
 ### Added

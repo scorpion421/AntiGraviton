@@ -17,6 +17,7 @@ from .writer_queue import get_writer_queue, flush_journals
 from ..platform.windows_utf8 import ensure_windows_utf8_manifests
 from .gitea_sync import _is_temp_workspace, _is_excluded_workspace_path, save_code_commit, get_workspace_git_telemetry, learn_workspace, flush_all_pending_pushes, setup_workspace_git
 from ..search.fts import detect_cwd_hints
+from ..search.synonyms import expand_query_with_synonyms
 
 _HOOK_STATE_FILE = Path(tempfile.gettempdir()) / "skillsdb_hook_state.json"
 _VERIFIED_PROJECT_DBS: set[str] = set()
@@ -840,6 +841,22 @@ def mem_prune(conn: sqlite3.Connection, max_snapshots: int = 10, max_age_days: i
     print(f"Project memory pruned: {pruned_orphans} orphaned conversation snapshots removed, {pruned_expired} old snapshots trimmed. Vacuum complete.")
 
 
+def _extract_hook_user_message(payload: dict) -> str:
+    """Extracts the current user message from an Antigravity v2.28.0+ hook payload."""
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("userMessage", "userPrompt", "prompt", "message"):
+        val = payload.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+        if isinstance(val, dict):
+            for subkey in ("userMessage", "content", "text", "prompt"):
+                subval = val.get(subkey)
+                if isinstance(subval, str) and subval.strip():
+                    return subval.strip()
+    return ""
+
+
 def handle_pre_invocation_hook():
     """
     Handles Antigravity PreInvocation lifecycle hook with 100% autonomy:
@@ -952,13 +969,22 @@ def handle_pre_invocation_hook():
 
         learn_workspace(root_path)
 
-        # 1. Autonomous Directory Scoping (Zero-effort skill routing)
-        cwd_hints = detect_cwd_hints(proj_path)
-        if cwd_hints and DB_PATH.exists():
-            try:
-                with managed_connection(DB_PATH) as gconn:
-                    gcursor = gconn.cursor()
-                    fts_query = " OR ".join(cwd_hints[:8])
+    # 1. Autonomous Directory Scoping & Antigravity v2.28.0+ User Prompt Pre-Routing
+    cwd_hints = detect_cwd_hints(proj_path) if has_valid_workspace else []
+    user_msg = _extract_hook_user_message(payload)
+    if (cwd_hints or user_msg) and DB_PATH.exists():
+        try:
+            with managed_connection(DB_PATH) as gconn:
+                gcursor = gconn.cursor()
+                query_terms = []
+                if user_msg:
+                    query_terms.extend(expand_query_with_synonyms(user_msg, gconn)[:10])
+                for h in cwd_hints[:8]:
+                    if h not in query_terms:
+                        query_terms.append(h)
+                matched_skills = []
+                if query_terms:
+                    fts_query = " OR ".join(query_terms[:12])
                     gcursor.execute("""
                     SELECT s.name, s.description FROM skills_fts f
                     JOIN skills s ON f.rowid = s.id
@@ -966,15 +992,18 @@ def handle_pre_invocation_hook():
                     ORDER BY rank LIMIT 3;
                     """, (fts_query,))
                     matched_skills = gcursor.fetchall()
-                if matched_skills:
+            if matched_skills:
+                if cwd_hints:
                     lines.append(f"[AUTONOMOUS DIRECTORY SCOPING: {', '.join(cwd_hints)}]")
-                    lines.append("Domain micro-skills pre-routed for current workspace:")
-                    for ms in matched_skills:
-                        desc = ms['description'][:95] + "..." if len(ms['description']) > 95 else ms['description']
-                        lines.append(f"  * {ms['name']}: {desc}")
-                    lines.append("")
-            except Exception:
-                pass
+                else:
+                    lines.append("[AUTONOMOUS PROMPT SKILL PRE-ROUTING (Turn 1)]")
+                lines.append("Domain micro-skills pre-routed for current workspace:")
+                for ms in matched_skills:
+                    desc = ms['description'][:95] + "..." if len(ms['description']) > 95 else ms['description']
+                    lines.append(f"  * {ms['name']}: {desc}")
+                lines.append("")
+        except Exception:
+            pass
 
     if has_valid_workspace and db_path and db_path.exists():
         try:

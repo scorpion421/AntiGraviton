@@ -183,6 +183,65 @@ class TestGuardrailsAndHooks(unittest.TestCase):
             sys.stdin = old_stdin
             sys.stdout = old_stdout
 
+    def test_v1_4_2_write_file_edit_file_and_user_message_hook(self):
+        """Verifies Antigravity v2.27.0/v2.28.0 write_file/edit_file PreToolUse guardrails and userMessage prompt skill pre-routing."""
+        import uuid
+        old_stdin = sys.stdin
+        old_stdout = sys.stdout
+        try:
+            # 1. write_file with forbidden em-dash in Content must be denied
+            p_write = {
+                "toolCall": {
+                    "name": "write_file",
+                    "args": {
+                        "Path": "C:/test/app.py",
+                        "Content": "msg = 'Bad \u2014 dash'",
+                    },
+                }
+            }
+            sys.stdin = io.StringIO(json.dumps(p_write))
+            out_w = io.StringIO()
+            sys.stdout = out_w
+            handle_pre_tool_guardrail_hook()
+            res_w = json.loads(out_w.getvalue())
+            self.assertEqual(res_w.get("decision"), "deny")
+
+            # 2. edit_file with clean Replacement must be allowed
+            p_edit = {
+                "toolCall": {
+                    "name": "edit_file",
+                    "args": {
+                        "Path": "C:/test/app.py",
+                        "Target": "old = 1",
+                        "Replacement": "old = 2  # clean ASCII hyphen - ok",
+                    },
+                }
+            }
+            sys.stdin = io.StringIO(json.dumps(p_edit))
+            out_e = io.StringIO()
+            sys.stdout = out_e
+            handle_pre_tool_guardrail_hook()
+            res_e = json.loads(out_e.getvalue())
+            self.assertEqual(res_e.get("decision"), "allow")
+
+            # 3. PreInvocation with v2.28.0 userMessage should pre-route matching skills
+            p_inv = {
+                "conversationId": f"test-v142-{uuid.uuid4()}",
+                "invocationNum": 1,
+                "workspacePaths": [],
+                "userMessage": "Create a scheduled automation and build a Flutter responsive layout",
+            }
+            sys.stdin = io.StringIO(json.dumps(p_inv))
+            out_i = io.StringIO()
+            sys.stdout = out_i
+            handle_pre_invocation_hook()
+            res_i = json.loads(out_i.getvalue())
+            msg_i = res_i["injectSteps"][0]["ephemeralMessage"]
+            self.assertIn("Domain micro-skills pre-routed", msg_i)
+        finally:
+            sys.stdin = old_stdin
+            sys.stdout = old_stdout
+
 
 if __name__ == "__main__":
     unittest.main()

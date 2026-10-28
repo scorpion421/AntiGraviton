@@ -1,7 +1,7 @@
-# AntiGraviton complete suite (`v1.4.0`)
+# AntiGraviton complete suite (`v1.4.2`)
 
 **Turnkey agentic development environment for Google Antigravity IDE**  
-*Combining **SkillsDB (`v3.7.0`)** + **Antigravity Gitea Windows service (`v1.1.1`)** in a single one-command distribution.*
+*Combining **SkillsDB (`v3.7.2`)** + **Antigravity Gitea Windows service (`v1.1.2`)** in a single one-command distribution.*
 
 ---
 
@@ -11,20 +11,20 @@
 
 It bundles two tightly integrated systems into a single repository and installer:
 
-1. **SkillsDB context and memory engine (`v3.7.0`)**:
-   - **On-demand micro-skill routing**: Replaces static plugin prompt bloat (~35,000 tokens/turn) with a compact (~450 token) routing directive and surgical SQLite FTS5 micro-skill retrieval (`--summary`, `--section`).
+1. **SkillsDB context and memory engine (`v3.7.2`)**:
+   - **On-demand micro-skill routing**: Replaces static plugin prompt bloat (~35,000 tokens/turn) with a compact (~450 token) routing directive, Antigravity `v2.28.0+` Turn-1 prompt pre-routing, and surgical SQLite FTS5 micro-skill retrieval (`--summary`, `--section`).
    - **Persistent episodic project memory (`.agents/memory.db`)**: Automatically records architectural decisions, milestone snapshots, and workspace telemetry across sessions so every new conversation starts with full project context.
    - **Organic on-demand workspace learning**: Ships with zero hardcoded paths or credentials. Automatically learns project paths as you work (`mem-init`, `mem-save-snapshot`, `gitea-init`) and discovers Antigravity IDE workspaces from `~/.gemini/config/projects/*.json` and `~/.gemini/antigravity/scratch`.
-2. **Antigravity Gitea local Windows service (`v1.1.1`)**:
+2. **Antigravity Gitea local Windows service (`v1.1.2`)**:
    - **Standalone developer default (zero Active Directory dependency)**: Works out of the box on any Windows developer machine using your local Windows username (`$env:USERNAME`), automatically generating cryptographic config secrets, provisioning your local Gitea admin account, and binding a scoped API token into SkillsDB. Optional Active Directory (LDAP) and `User` vs. `User.adm` role separation can be enabled on demand at any time.
-   - **Isolated loopback Git server (`127.0.0.1:3000`)**: Sub-second (`< 0.5s`) automated Git backup for every milestone snapshot and file checkpoint without external cloud latency, pre-configured with LevelDB-free immediate queues (`TYPE = immediate`) for conflict-free `gitea dump` backups on Windows.
+   - **Isolated loopback Git server (`127.0.0.1:3000`)**: Sub-second (`< 0.5s`) automated Git backup for every milestone snapshot and file checkpoint without external cloud latency, pre-configured with LevelDB-free immediate queues (`TYPE = immediate`) and SQLite database issue indexing (`ISSUE_INDEXER_TYPE = db`) for conflict-free `gitea dump` backups on Windows.
    - **Multi-layered fault-tolerance and auto-recovery**: Configured with Windows Service Control Manager (SCM) auto-restart (`15s/30s/60s`), non-elevated interactive user start/stop permissions (`sc.exe sdset`), autonomous agent service wake-up (`ensure_gitea_online()`), and cross-workspace catch-up synchronization (`flush_all_pending_pushes()`).
 
 ---
 
 ## 2. Measured impact in daily development
 
-| Metric | Standard Antigravity setup | AntiGraviton suite (`v1.4.0`) | Real-world improvement |
+| Metric | Standard Antigravity setup | AntiGraviton suite (`v1.4.2`) | Real-world improvement |
 | :--- | :--- | :--- | :--- |
 | **System and plugin context load** | ~35,000 tokens / turn | **~1,500 tokens / turn** | **~95% lower base overhead** |
 | **Token consumption (60-turn session, benchmarked on Gemini 4 Argon High)** | ~3.39M input tokens | **~0.83M input tokens** | **~75.5% total token savings (4x session capacity)** |
@@ -60,13 +60,13 @@ Beyond providing persistent project memory and automated Gitea backups, **AntiGr
 * **The IDE behavior**: Antigravity executes plugin hooks with `cwd` set to `~/.gemini/config/plugins/customizations-db`, and in Antigravity `v2.26.0+`, terminal commands spawned outside of a project (`ANTIGRAVITY_PROJECT_ID=outside-of-project`) start directly inside the application installation folder (`%LOCALAPPDATA%\Programs\antigravity`). Naive directory detection would mistake either the user profile (`C:\Users\<User>`) or the Antigravity binary directory itself for a software project.
 * **How AntiGraviton `v1.4.0+` fixes it**: Enforces a comprehensive `_is_protected_non_workspace()` and `_is_excluded_workspace_path()` boundary guard blocking `Path.home()`, `~/.gemini/*`, the `~/.gemini/antigravity/scratch` container root, OS temp directories, and all application installation roots (`%LOCALAPPDATA%\Programs\*`, `%APPDATA%\Antigravity`, `%ProgramFiles%`, and `ANTIGRAVITY_AGENTAPI_EXE` parent paths) from ever being scanned or initialized as a project workspace.
 
-### D. Frontier model renaming (`Gemini 4 Argon` & `Gemini 4 Carbon`) and reverse transcript inspection
-* **The IDE behavior**: When Google introduces new frontier model identifiers (such as `Gemini 4 Argon` and `Gemini 4 Carbon` in `v2.26.0`) or when a developer switches models mid-session via the IDE dropdown, a `<USER_SETTINGS_CHANGE>` event is appended to `transcript.jsonl`.
-* **How AntiGraviton `v1.4.0+` fixes it**: `detect_model_tier()` scans the tail of `transcript.jsonl` in reverse chronological order for `<USER_SETTINGS_CHANGE>` events and maps `Gemini 4 Argon` and `Gemini 4 Carbon` (`argon`, `carbon`, `gemini 4`) directly to `TIER_ULTRA` (16-thread high-concurrency mode), while mapping automation `Flash Lite` presets to `TIER_LEAN`.
+### D. Frontier model renaming (`Gemini 4 Argon`, `Gemini 4 Carbon`, `Claude Opus 5.5`) and reverse transcript inspection
+* **The IDE behavior**: When Google introduces new frontier model identifiers (such as `Gemini 4 Argon`, `Gemini 4 Carbon`, `gemini-3.6-flash`, and Vertex AI `Claude Opus 5.5` / `Claude Sonnet 5.5` in `v2.24.0` through `v2.28.0`) or when a developer switches models mid-session via the IDE dropdown, a `<USER_SETTINGS_CHANGE>` event is appended to `transcript.jsonl`.
+* **How AntiGraviton `v1.4.2+` fixes it**: `detect_model_tier()` scans the tail of `transcript.jsonl` in reverse chronological order for `<USER_SETTINGS_CHANGE>` events and maps `Gemini 4 Argon`, `Gemini 4 Carbon`, and `Claude Opus 5.5` (`argon`, `carbon`, `gemini 4`, `claude opus`) directly to `TIER_ULTRA` (16-thread high-concurrency mode), `Claude Sonnet 5.5` and `Gemini Pro` to `TIER_STANDARD`, and `Gemini 3.8/3.6 Flash` and `Flash Lite` presets to `TIER_LEAN`.
 
-### E. Windows UTF-8 manifest reset and builtin skill drift on every IDE update
-* **The IDE behavior**: Every Antigravity IDE update replaces `Antigravity.exe` and `language_server.exe` (wiping out external `<activeCodePage>UTF-8</activeCodePage>` `.manifest` files so Windows child processes fall back to legacy codepages `cp1252`/`cp850`) and updates bundled skills under `~/.gemini/antigravity/builtin/skills` (`builtin/.checksum`).
-* **How AntiGraviton `v1.4.0+` fixes it**: On Turn 1 (`handle_pre_invocation_hook()`), as well as during `deploy.py` and `skillsdb update`, SkillsDB automatically verifies and silently restores missing Windows UTF-8 `.manifest` files (`ensure_windows_utf8_manifests()`) and synchronizes any updated Antigravity builtin skills and their `docs/*.md` and `references/*.md` sub-documents into `customizations.db` (`sync_builtin_skills()`) whenever `builtin/.checksum` changes.
+### E. Windows UTF-8 manifest reset, builtin skill drift, and `v2.27.0+` tool schema updates
+* **The IDE behavior**: Every Antigravity IDE update replaces `Antigravity.exe` and `language_server.exe` (wiping out external `<activeCodePage>UTF-8</activeCodePage>` `.manifest` files so Windows child processes fall back to legacy codepages `cp1252`/`cp850`), updates bundled skills under `~/.gemini/antigravity/builtin/skills` (`builtin/.checksum`), and in `v2.27.0`/`v2.28.0` transitioned file modification tools to `write_file` (`Path`, `Content`) and `edit_file` (`Path`, `Replacement`) while adding user prompt pass-through to `PreInvocation` hooks.
+* **How AntiGraviton `v1.4.2+` fixes it**: On Turn 1 (`handle_pre_invocation_hook()`), SkillsDB automatically verifies and restores missing Windows UTF-8 `.manifest` files (`ensure_windows_utf8_manifests()`), synchronizes updated Antigravity builtin skills and their `docs/*.md` and `references/*.md` sub-documents into `customizations.db` (`sync_builtin_skills()`), pre-routes domain micro-skills directly from the incoming `v2.28.0` user prompt, and enforces deterministic `PreToolUse` guardrails across both modern (`write_file`, `edit_file`) and legacy (`write_to_file`, `replace_file_content`, `multi_replace_file_content`) tool schemas.
 
 ---
 
@@ -103,7 +103,7 @@ powershell -ExecutionPolicy Bypass -File .\install-antigraviton.ps1
 
 ```text
 AntiGraviton/
-|-- VERSION                        # SemVer 2.0.0 suite release version (1.4.0)
+|-- VERSION                        # SemVer 2.0.0 suite release version (1.4.2)
 |-- CHANGELOG.md                   # SemVer release history
 |-- README.md                      # Suite documentation
 |-- install-antigraviton.ps1       # Unified 1-command installer (SkillsDB + Gitea + Auto-Token)
@@ -114,7 +114,7 @@ AntiGraviton/
 |   `-- skills/
 |       `-- install-antigraviton/
 |           `-- SKILL.md           # Antigravity IDE 1-prompt onboarding skill
-|-- skillsdb/                      # Modular Python package source (v3.7.0)
+|-- skillsdb/                      # Modular Python package source (v3.7.2)
 |   |-- config.py
 |   |-- schema.py
 |   |-- guardrails.py
@@ -125,7 +125,7 @@ AntiGraviton/
 |   |-- customizations.db          # Sanitized central SQLite database (zero hardcoded paths)
 |   `-- db_manager.py              # Standalone compiled CLI manager
 |-- plugin/                        # Antigravity IDE customizations-db plugin
-|-- gitea-service/                 # Antigravity Gitea Windows service distribution (v1.1.1)
+|-- gitea-service/                 # Antigravity Gitea Windows service distribution (v1.1.2)
 |   |-- INSTALL.md
 |   |-- scripts/
 |   |   `-- deploy-gitea.ps1       # SCM service installer with auto-recovery & sdset ACLs

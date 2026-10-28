@@ -30,11 +30,19 @@ def _classify_model_string(text: str) -> str | None:
     if not text:
         return None
     low = text.lower()
-    if any(k in low for k in ("argon", "carbon", "gemini 4", "gemini-4", "gemini-ultra", "gemini-2.0-ultra", "gemini-3.0-ultra", "ultra")):
+    if any(k in low for k in (
+        "argon", "carbon", "gemini 4", "gemini-4", "gemini-ultra",
+        "gemini-2.0-ultra", "gemini-3.0-ultra", "claude opus", "claude-opus", "opus 5", "ultra"
+    )):
         return TIER_ULTRA
-    if any(k in low for k in ("gemini 3.8 flash", "gemini-flash", "flash-lite", "flash lite", "flash (")):
+    if any(k in low for k in (
+        "gemini 3.8 flash", "gemini 3.6 flash", "gemini-3.6-flash", "gemini-3.8-flash",
+        "gemini-flash", "flash-lite", "flash lite", "flash ("
+    )):
         return TIER_LEAN
-    if any(k in low for k in ("gemini-pro", "gemini pro", "pro (")):
+    if any(k in low for k in (
+        "gemini-pro", "gemini pro", "claude sonnet", "claude-sonnet", "sonnet 5", "pro ("
+    )):
         return TIER_STANDARD
     return None
 

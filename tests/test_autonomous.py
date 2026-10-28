@@ -239,10 +239,21 @@ print("Hello World")
         self.assertFalse(db_manager._is_protected_non_workspace(valid_scratch_proj))
         self.assertFalse(db_manager._is_excluded_workspace_path(valid_scratch_proj))
 
-        # Verify Gemini 4 Argon / Carbon -> ULTRA and Flash Lite -> LEAN
+        # Verify Gemini 4 Argon / Carbon / Claude Opus 5.5 -> ULTRA, Claude Sonnet 5.5 -> STANDARD, and Flash Lite / 3.6 Flash -> LEAN
         self.assertEqual(db_manager._classify_model_string("Gemini 4 Argon (High)"), db_manager.TIER_ULTRA)
         self.assertEqual(db_manager._classify_model_string("Gemini 4 Carbon"), db_manager.TIER_ULTRA)
+        self.assertEqual(db_manager._classify_model_string("Claude Opus 5.5"), db_manager.TIER_ULTRA)
+        self.assertEqual(db_manager._classify_model_string("Claude Sonnet 5.5"), db_manager.TIER_STANDARD)
+        self.assertEqual(db_manager._classify_model_string("gemini-3.6-flash-medium"), db_manager.TIER_LEAN)
         self.assertEqual(db_manager._classify_model_string("Flash Lite"), db_manager.TIER_LEAN)
+        self.assertEqual(
+            db_manager._extract_skillsdb_version_from_release(
+                "1.4.2",
+                "AntiGraviton v1.4.2 (SkillsDB v3.7.2 + Antigravity Gitea Service v1.1.2)",
+                "",
+            ),
+            "3.7.2",
+        )
 
     def test_v1_4_0_compile_skill_directory_with_subdocs(self):
         sim_skill = self.test_db_dir / "sim_builtin_skill"
