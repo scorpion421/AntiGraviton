@@ -19,12 +19,16 @@ UTF8_MANIFEST_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 
 def get_antigravity_paths() -> Path:
     """Detect Antigravity installation root directory on Windows."""
-    candidates = [
-        Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "antigravity",
-        Path(os.environ.get("PROGRAMFILES", "")) / "antigravity",
-        Path(os.environ.get("PROGRAMFILES(X86)", "")) / "antigravity",
+    specs = [
+        ("LOCALAPPDATA", ("Programs", "antigravity")),
+        ("PROGRAMFILES", ("antigravity",)),
+        ("PROGRAMFILES(X86)", ("antigravity",)),
     ]
-    for c in candidates:
+    for env_key, sub_parts in specs:
+        base = os.environ.get(env_key)
+        if not base:
+            continue
+        c = Path(base).joinpath(*sub_parts)
         if c.exists() and (c / "Antigravity.exe").exists():
             return c
     return None
@@ -141,9 +145,12 @@ def fix_utf8(check_only: bool = False):
         return
 
     # 1. Write Antigravity.exe.manifest
+    wrote_exe = False
+    wrote_ls = False
     try:
         exe_manifest.write_text(UTF8_MANIFEST_XML.strip() + "\n", encoding="utf-8")
         print(f"[OK] Application manifest deployed: {exe_manifest}")
+        wrote_exe = True
     except Exception as e:
         print(f"[FAIL] Could not write {exe_manifest}: {e}")
 
@@ -152,6 +159,7 @@ def fix_utf8(check_only: bool = False):
         ls_manifest.parent.mkdir(parents=True, exist_ok=True)
         ls_manifest.write_text(UTF8_MANIFEST_XML.strip() + "\n", encoding="utf-8")
         print(f"[OK] Application manifest deployed: {ls_manifest}")
+        wrote_ls = True
     except Exception as e:
         print(f"[FAIL] Could not write {ls_manifest}: {e}")
 
@@ -167,6 +175,9 @@ def fix_utf8(check_only: bool = False):
     except Exception as e:
         print(f"[WARN] Could not update environment variables in registry: {e}")
 
-    print("\n[SUCCESS] Antigravity UTF-8 configuration deployed successfully!")
-    print("Restart Antigravity to activate native UTF-8 process code page.")
+    if wrote_exe and wrote_ls:
+        print("\n[SUCCESS] Antigravity UTF-8 configuration deployed successfully!")
+        print("Restart Antigravity to activate native UTF-8 process code page.")
+    else:
+        print("\n[WARN] Some UTF-8 manifest files could not be written (elevation may be required for Program Files).")
     print("=============================================================\n")

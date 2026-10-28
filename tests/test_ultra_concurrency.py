@@ -44,7 +44,8 @@ class TestUltraConcurrency(unittest.TestCase):
         cursor = t_conn.cursor()
         cursor.execute("PRAGMA journal_mode;")
         mode = cursor.fetchone()[0]
-        self.assertEqual(mode.lower(), "wal")
+        expected_mode = "truncate" if db_manager._is_network_path(self.test_db_path) else "wal"
+        self.assertEqual(mode.lower(), expected_mode)
         cursor.execute("PRAGMA busy_timeout;")
         timeout = cursor.fetchone()[0]
         self.assertEqual(timeout, 30000)

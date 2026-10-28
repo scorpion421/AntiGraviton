@@ -14,8 +14,8 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-__version__ = "3.7.2"
-__suite_version__ = "1.4.2"
+__version__ = "3.7.3"
+__suite_version__ = "1.4.3"
 
 # Model capability tiers
 TIER_LEAN = "lean"          # Gemini Flash, Flash-Lite, micro-skills, minimal token footprint
@@ -45,13 +45,13 @@ ARCHIVED_PLUGINS_PATH = GEMINI_DIR / "plugins_archive"
 BUILTIN_SKILLS_PATH = GEMINI_DIR / "antigravity" / "builtin" / "skills"
 
 # Default network share fallback for team synchronization
-DEFAULT_REMOTE_SHARE = Path(os.environ.get("SKILLSDB_REMOTE_SHARE", str(Path.home() / ".gemini" / "share" / "customizations.db")))
+DEFAULT_REMOTE_SHARE = Path(os.environ.get("SKILLSDB_REMOTE_SHARE") or str(Path.home() / ".gemini" / "share" / "customizations.db"))
 
 # Gitea integration settings (configured via runtime_config in customizations.db or environment variables)
-GITEA_DEFAULT_URL = os.environ.get("SKILLSDB_GITEA_URL", "http://127.0.0.1:3000")
+GITEA_DEFAULT_URL = os.environ.get("SKILLSDB_GITEA_URL") or "http://127.0.0.1:3000"
 GITEA_DEFAULT_USER = os.environ.get("SKILLSDB_GITEA_USER", "")
 GITEA_DEFAULT_TOKEN = os.environ.get("SKILLSDB_GITEA_TOKEN", "")
-GITEA_SERVICE_NAME = os.environ.get("SKILLSDB_GITEA_SERVICE", "gitea")
+GITEA_SERVICE_NAME = os.environ.get("SKILLSDB_GITEA_SERVICE") or "gitea"
 
 
 def estimate_tokens(text: str) -> int:

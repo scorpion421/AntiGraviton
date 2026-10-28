@@ -116,6 +116,7 @@ def sync_changelog_releases(
     sync_github: bool = False,
     overwrite_existing: bool = False,
     db_path: Path = DB_PATH,
+    repo_name: Optional[str] = None,
 ) -> List[str]:
     """
     Synchronizes all version entries from CHANGELOG.md (Keep a Changelog 1.1.0 format)
@@ -134,7 +135,19 @@ def sync_changelog_releases(
     token = config.get("token")
     owner = config.get("user")
     base_url = config.get("url")
-    repo_name = project_root.name
+    resolved_repo_name = repo_name or project_root.name
+    git_cfg = project_root / ".git" / "config"
+    if not repo_name and git_cfg.exists():
+        try:
+            raw_cfg = git_cfg.read_text(encoding="utf-8", errors="ignore")
+            for m in re.finditer(r"^\s*url\s*=\s*https?://(?:[^@/\s]+@)?([^/\s]+)/([^/\s]+)/([^\s/]+?)(?:\.git)?\s*$", raw_cfg, re.MULTILINE):
+                host_port, _, rname = m.groups()
+                if "localhost:3000" in host_port or "127.0.0.1:3000" in host_port or (base_url and host_port in base_url):
+                    resolved_repo_name = rname
+                    break
+        except Exception:
+            pass
+    repo_name = resolved_repo_name
     synced_tags: List[str] = []
 
     if shutil.which("git") and (project_root / ".git" / "HEAD").exists():

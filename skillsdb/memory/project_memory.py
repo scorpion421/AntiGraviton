@@ -17,10 +17,25 @@ from .writer_queue import get_writer_queue, flush_journals
 from ..platform.windows_utf8 import ensure_windows_utf8_manifests
 from .gitea_sync import _is_temp_workspace, _is_excluded_workspace_path, save_code_commit, get_workspace_git_telemetry, learn_workspace, flush_all_pending_pushes, setup_workspace_git
 from ..search.fts import detect_cwd_hints
-from ..search.synonyms import expand_query_with_synonyms
+from ..search.synonyms import expand_query_with_synonyms, build_safe_fts_query
 
 _HOOK_STATE_FILE = Path(tempfile.gettempdir()) / "skillsdb_hook_state.json"
 _VERIFIED_PROJECT_DBS: set[str] = set()
+
+
+def _resolve_db_file(conn: sqlite3.Connection, db_path: Path = None) -> Path | None:
+    """Resolves the filesystem Path for a SQLite connection, returning None for :memory: databases."""
+    if db_path:
+        return Path(db_path)
+    if not conn:
+        return None
+    try:
+        row = conn.execute("PRAGMA database_list;").fetchone()
+        if row and row[2]:
+            return Path(row[2])
+    except sqlite3.Error:
+        pass
+    return None
 _REQUIRED_PROJECT_TABLES = frozenset({
     "project_decisions",
     "session_snapshots",
@@ -98,19 +113,22 @@ def _project_schema_ready(conn: sqlite3.Connection) -> bool:
 
 def init_project_db(conn: sqlite3.Connection):
     """Initializes tables for architectural decisions, snapshots, project facts, tasks, verifications, and handoffs."""
-    db_key = None
+    db_file = None
     try:
         row = conn.execute("PRAGMA database_list;").fetchone()
         if row and row[2]:
-            db_key = f"{os.path.abspath(row[2])}:{os.path.getsize(row[2]) if os.path.exists(row[2]) else 0}"
-            if db_key in _VERIFIED_PROJECT_DBS:
+            db_file = os.path.abspath(row[2])
+            file_size = os.path.getsize(db_file) if os.path.exists(db_file) else 0
+            if file_size > 0 and f"{db_file}:{file_size}" in _VERIFIED_PROJECT_DBS:
                 return
     except sqlite3.Error:
         pass
 
     if _project_schema_ready(conn):
-        if db_key:
-            _VERIFIED_PROJECT_DBS.add(db_key)
+        if db_file and os.path.exists(db_file):
+            file_size = os.path.getsize(db_file)
+            if file_size > 0:
+                _VERIFIED_PROJECT_DBS.add(f"{db_file}:{file_size}")
         return
 
     cursor = conn.cursor()
@@ -212,8 +230,10 @@ def init_project_db(conn: sqlite3.Connection):
     );
     """)
     conn.commit()
-    if db_key:
-        _VERIFIED_PROJECT_DBS.add(db_key)
+    if db_file and os.path.exists(db_file):
+        file_size = os.path.getsize(db_file)
+        if file_size > 0:
+            _VERIFIED_PROJECT_DBS.add(f"{db_file}:{file_size}")
 
 
 def mem_init(project_root: Path = None):
@@ -241,11 +261,11 @@ def mem_save_decision(
     """Saves an architectural decision using WriterQueue if path is available to prevent lock contention."""
     now_iso = datetime.now(timezone.utc).isoformat()
     full_content = f"{content.strip()}\nRationale: {rationale.strip()}" if rationale and rationale.strip() else content
-    target_path = db_path or (Path(conn.cursor().execute("PRAGMA database_list;").fetchone()[2]) if conn else None)
+    target_path = _resolve_db_file(conn, db_path)
     if conn and conn.in_transaction:
         conn.commit()
 
-    if target_path and Path(target_path).exists():
+    if target_path and target_path.is_file():
         wq = get_writer_queue(target_path)
         def _write(cur):
             cur.execute("""
@@ -280,7 +300,9 @@ def mem_save_snapshot(conn: sqlite3.Connection, summary: str, conversation_id: s
     """Saves a session milestone snapshot and links it with an automated Git/Gitea commit."""
     now_iso = datetime.now(timezone.utc).isoformat()
     cid = conversation_id or os.environ.get("ANTIGRAVITY_CONVERSATION_ID") or "default"
-    target_path = db_path or (Path(conn.cursor().execute("PRAGMA database_list;").fetchone()[2]) if conn else None)
+    target_path = _resolve_db_file(conn, db_path)
+    if conn and conn.in_transaction:
+        conn.commit()
 
     commit_hash = None
     auto_files = files_touched
@@ -334,7 +356,7 @@ def mem_save_snapshot(conn: sqlite3.Connection, summary: str, conversation_id: s
         fts_parts.append(commit_hash[:7])
     fts_content = " ".join(fts_parts)
 
-    if target_path and Path(target_path).exists():
+    if target_path and target_path.is_file():
         wq = get_writer_queue(target_path)
         def _write(cur):
             cur.execute("""
@@ -370,7 +392,7 @@ def mem_save_snapshot(conn: sqlite3.Connection, summary: str, conversation_id: s
 def mem_save_fact(conn: sqlite3.Connection, key: str, value: str, reason: str = None, db_path: Path = None):
     """Saves a key-value fact or configuration item with active reconciliation and tombstone history."""
     now_iso = datetime.now(timezone.utc).isoformat()
-    target_path = db_path or (Path(conn.cursor().execute("PRAGMA database_list;").fetchone()[2]) if conn else None)
+    target_path = _resolve_db_file(conn, db_path)
 
     cursor = conn.cursor() if conn else None
     existing_val = None
@@ -382,8 +404,10 @@ def mem_save_fact(conn: sqlite3.Connection, key: str, value: str, reason: str = 
                 existing_val = erow[0]
         except Exception:
             pass
+    if conn and conn.in_transaction:
+        conn.commit()
 
-    if target_path and Path(target_path).exists():
+    if target_path and target_path.is_file():
         wq = get_writer_queue(target_path)
         def _write(cur):
             cur.execute("SELECT value FROM project_facts WHERE key = ?;", (key,))
@@ -397,6 +421,7 @@ def mem_save_fact(conn: sqlite3.Connection, key: str, value: str, reason: str = 
             INSERT OR REPLACE INTO project_facts (key, value, updated_at, deprecated_at, superseded_by)
             VALUES (?, ?, ?, NULL, NULL);
             """, (key, value, now_iso))
+            cur.execute("DELETE FROM project_memory_fts WHERE source_table = 'fact' AND title_or_key = ?;", (key,))
             cur.execute("""
             INSERT INTO project_memory_fts (source_table, title_or_key, content)
             VALUES ('fact', ?, ?);
@@ -412,6 +437,7 @@ def mem_save_fact(conn: sqlite3.Connection, key: str, value: str, reason: str = 
         INSERT OR REPLACE INTO project_facts (key, value, updated_at, deprecated_at, superseded_by)
         VALUES (?, ?, ?, NULL, NULL);
         """, (key, value, now_iso))
+        cursor.execute("DELETE FROM project_memory_fts WHERE source_table = 'fact' AND title_or_key = ?;", (key,))
         cursor.execute("""
         INSERT INTO project_memory_fts (source_table, title_or_key, content)
         VALUES ('fact', ?, ?);
@@ -435,8 +461,10 @@ def mem_deprecate_fact(conn: sqlite3.Connection, key: str, reason: str = "deprec
         return False
 
     old_val = row[0]
-    target_path = db_path or (Path(conn.cursor().execute("PRAGMA database_list;").fetchone()[2]) if conn else None)
-    if target_path and Path(target_path).exists():
+    target_path = _resolve_db_file(conn, db_path)
+    if conn and conn.in_transaction:
+        conn.commit()
+    if target_path and target_path.is_file():
         wq = get_writer_queue(target_path)
         def _write(cur):
             cur.execute("""
@@ -446,6 +474,7 @@ def mem_deprecate_fact(conn: sqlite3.Connection, key: str, reason: str = "deprec
             INSERT INTO fact_history (key, old_value, new_value, reason, created_at)
             VALUES (?, ?, ?, ?, ?);
             """, (key, old_val, "[TOMBSTONE]", reason, now_iso))
+            cur.execute("DELETE FROM project_memory_fts WHERE source_table = 'fact' AND title_or_key = ?;", (key,))
         wq.execute_write(_write)
     else:
         cursor.execute("""
@@ -455,6 +484,7 @@ def mem_deprecate_fact(conn: sqlite3.Connection, key: str, reason: str = "deprec
         INSERT INTO fact_history (key, old_value, new_value, reason, created_at)
         VALUES (?, ?, ?, ?, ?);
         """, (key, old_val, "[TOMBSTONE]", reason, now_iso))
+        cursor.execute("DELETE FROM project_memory_fts WHERE source_table = 'fact' AND title_or_key = ?;", (key,))
         conn.commit()
 
     print(f"Project fact deprecated (tombstoned): '{key}' (Reason: {reason})")
@@ -514,8 +544,10 @@ def mem_task_add(conn: sqlite3.Connection, title: str, description: str = "", pr
     if status not in ('pending', 'in_progress', 'completed', 'blocked'):
         status = 'pending'
 
-    target_path = db_path or (Path(conn.cursor().execute("PRAGMA database_list;").fetchone()[2]) if conn else None)
-    if target_path and Path(target_path).exists():
+    target_path = _resolve_db_file(conn, db_path)
+    if conn and conn.in_transaction:
+        conn.commit()
+    if target_path and target_path.is_file():
         wq = get_writer_queue(target_path)
         def _write(cur):
             cur.execute("""
@@ -569,8 +601,10 @@ def mem_task_update(conn: sqlite3.Connection, task_id: int, status: str = None, 
         print(f"Error: Invalid priority '{new_priority}'. Allowed: low, med, high, critical")
         return False
 
-    target_path = db_path or (Path(conn.cursor().execute("PRAGMA database_list;").fetchone()[2]) if conn else None)
-    if target_path and Path(target_path).exists():
+    target_path = _resolve_db_file(conn, db_path)
+    if conn and conn.in_transaction:
+        conn.commit()
+    if target_path and target_path.is_file():
         wq = get_writer_queue(target_path)
         def _write(cur):
             cur.execute("""
@@ -578,6 +612,7 @@ def mem_task_update(conn: sqlite3.Connection, task_id: int, status: str = None, 
             SET title = ?, description = ?, status = ?, priority = ?, updated_at = ?
             WHERE id = ?;
             """, (new_title, new_desc, new_status, new_priority, now_iso, task_id))
+            cur.execute("DELETE FROM project_memory_fts WHERE source_table = 'task' AND title_or_key LIKE ?;", (f"Task #{task_id}:%",))
             cur.execute("""
             INSERT INTO project_memory_fts (source_table, title_or_key, content)
             VALUES ('task', ?, ?);
@@ -589,6 +624,7 @@ def mem_task_update(conn: sqlite3.Connection, task_id: int, status: str = None, 
         SET title = ?, description = ?, status = ?, priority = ?, updated_at = ?
         WHERE id = ?;
         """, (new_title, new_desc, new_status, new_priority, now_iso, task_id))
+        cursor.execute("DELETE FROM project_memory_fts WHERE source_table = 'task' AND title_or_key LIKE ?;", (f"Task #{task_id}:%",))
         cursor.execute("""
         INSERT INTO project_memory_fts (source_table, title_or_key, content)
         VALUES ('task', ?, ?);
@@ -637,30 +673,46 @@ def mem_task_list(conn: sqlite3.Connection, status: str = None, as_json: bool = 
 
 def mem_task_clear(conn: sqlite3.Connection, only_completed: bool = True, db_path: Path = None):
     """Clears completed tasks (or all tasks)."""
-    target_path = db_path or (Path(conn.cursor().execute("PRAGMA database_list;").fetchone()[2]) if conn else None)
-    if target_path and Path(target_path).exists():
+    target_path = _resolve_db_file(conn, db_path)
+    if conn and conn.in_transaction:
+        conn.commit()
+    if target_path and target_path.is_file():
         wq = get_writer_queue(target_path)
         def _write(cur):
             if only_completed:
+                cur.execute("SELECT id FROM project_tasks WHERE status = 'completed';")
+                cids = [r[0] for r in cur.fetchall()]
                 cur.execute("DELETE FROM project_tasks WHERE status = 'completed';")
+                deleted_rows = cur.rowcount
+                for cid_val in cids:
+                    cur.execute("DELETE FROM project_memory_fts WHERE source_table = 'task' AND title_or_key LIKE ?;", (f"Task #{cid_val}:%",))
+                return deleted_rows
             else:
                 cur.execute("DELETE FROM project_tasks;")
-            return cur.rowcount
+                deleted_rows = cur.rowcount
+                cur.execute("DELETE FROM project_memory_fts WHERE source_table = 'task';")
+                return deleted_rows
         deleted = wq.execute_write(_write)
     else:
         cursor = conn.cursor()
         if only_completed:
+            cursor.execute("SELECT id FROM project_tasks WHERE status = 'completed';")
+            cids = [r[0] for r in cursor.fetchall()]
             cursor.execute("DELETE FROM project_tasks WHERE status = 'completed';")
+            deleted = cursor.rowcount
+            for cid_val in cids:
+                cursor.execute("DELETE FROM project_memory_fts WHERE source_table = 'task' AND title_or_key LIKE ?;", (f"Task #{cid_val}:%",))
         else:
             cursor.execute("DELETE FROM project_tasks;")
-        deleted = cursor.rowcount
+            deleted = cursor.rowcount
+            cursor.execute("DELETE FROM project_memory_fts WHERE source_table = 'task';")
         conn.commit()
 
     target_str = "completed tasks" if only_completed else "all tasks"
     print(f"Cleared {deleted} {target_str} from project task board.")
 
 
-def mem_compact(conn: sqlite3.Connection, summary: str = None, next_steps: str = None, archive_completed: bool = True, project_root: Path = None, db_path: Path = None, silent: bool = False):
+def mem_compact(conn: sqlite3.Connection, summary: str = None, next_steps: str = None, archive_completed: bool = True, project_root: Path = None, db_path: Path = None, silent: bool = False, auto_commit: bool = True):
     """Compacts episodic project memory into a distilled snapshot and vacuums DB."""
     root = project_root or find_project_root()
     flush_journals(root, conn)
@@ -683,20 +735,31 @@ def mem_compact(conn: sqlite3.Connection, summary: str = None, next_steps: str =
     )
     snap_summary = summary or default_summary
 
-    target_path = db_path or (Path(cursor.execute("PRAGMA database_list;").fetchone()[2]) if conn else None)
+    target_path = _resolve_db_file(conn, db_path)
+    if conn and conn.in_transaction:
+        conn.commit()
 
     if archive_completed and completed_count > 0:
-        if target_path and Path(target_path).exists():
+        if target_path and target_path.is_file():
             wq = get_writer_queue(target_path)
             def _write_del(cur):
+                cur.execute("SELECT id FROM project_tasks WHERE status = 'completed';")
+                cids = [r[0] for r in cur.fetchall()]
                 cur.execute("DELETE FROM project_tasks WHERE status = 'completed';")
-                return cur.rowcount
+                deleted_rows = cur.rowcount
+                for cid_val in cids:
+                    cur.execute("DELETE FROM project_memory_fts WHERE source_table = 'task' AND title_or_key LIKE ?;", (f"Task #{cid_val}:%",))
+                return deleted_rows
             wq.execute_write(_write_del)
         else:
+            cursor.execute("SELECT id FROM project_tasks WHERE status = 'completed';")
+            cids = [r[0] for r in cursor.fetchall()]
             cursor.execute("DELETE FROM project_tasks WHERE status = 'completed';")
+            for cid_val in cids:
+                cursor.execute("DELETE FROM project_memory_fts WHERE source_table = 'task' AND title_or_key LIKE ?;", (f"Task #{cid_val}:%",))
             conn.commit()
 
-    mem_save_snapshot(conn, snap_summary, conversation_id=cid, next_steps=next_steps, db_path=target_path, silent=silent)
+    mem_save_snapshot(conn, snap_summary, conversation_id=cid, next_steps=next_steps, db_path=target_path, silent=silent, auto_commit=auto_commit)
 
     try:
         conn.execute("PRAGMA incremental_vacuum;")
@@ -780,13 +843,20 @@ def mem_search(conn: sqlite3.Connection, query: str):
     """FTS5 search across project facts, decisions, and session milestones."""
     cursor = conn.cursor()
     print(f"\n--- Search results for '{query}' in Project Memory ---\n")
-    cursor.execute("""
-    SELECT source_table, title_or_key, content
-    FROM project_memory_fts
-    WHERE project_memory_fts MATCH ?
-    LIMIT 10;
-    """, (query,))
-    rows = cursor.fetchall()
+    safe_fts = build_safe_fts_query([query])
+    if not safe_fts:
+        print("No matching project memory entries.")
+        return
+    try:
+        cursor.execute("""
+        SELECT source_table, title_or_key, content
+        FROM project_memory_fts
+        WHERE project_memory_fts MATCH ?
+        LIMIT 10;
+        """, (safe_fts,))
+        rows = cursor.fetchall()
+    except sqlite3.OperationalError:
+        rows = []
     if not rows:
         print("No matching project memory entries.")
         return
@@ -895,7 +965,12 @@ def handle_pre_invocation_hook():
         try:
             state = {}
             if _HOOK_STATE_FILE.exists():
-                state = json.loads(_HOOK_STATE_FILE.read_text(encoding="utf-8"))
+                try:
+                    loaded = json.loads(_HOOK_STATE_FILE.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        state = loaded
+                except Exception:
+                    state = {}
             if state.get(cid) == workspace_key:
                 print(json.dumps({"injectSteps": []}))
                 return
@@ -984,14 +1059,15 @@ def handle_pre_invocation_hook():
                         query_terms.append(h)
                 matched_skills = []
                 if query_terms:
-                    fts_query = " OR ".join(query_terms[:12])
-                    gcursor.execute("""
-                    SELECT s.name, s.description FROM skills_fts f
-                    JOIN skills s ON f.rowid = s.id
-                    WHERE skills_fts MATCH ?
-                    ORDER BY rank LIMIT 3;
-                    """, (fts_query,))
-                    matched_skills = gcursor.fetchall()
+                    fts_query = build_safe_fts_query(query_terms, max_terms=12)
+                    if fts_query:
+                        gcursor.execute("""
+                        SELECT s.name, s.description FROM skills_fts f
+                        JOIN skills s ON f.rowid = s.id
+                        WHERE skills_fts MATCH ?
+                        ORDER BY rank LIMIT 3;
+                        """, (fts_query,))
+                        matched_skills = gcursor.fetchall()
             if matched_skills:
                 if cwd_hints:
                     lines.append(f"[AUTONOMOUS DIRECTORY SCOPING: {', '.join(cwd_hints)}]")
@@ -999,7 +1075,8 @@ def handle_pre_invocation_hook():
                     lines.append("[AUTONOMOUS PROMPT SKILL PRE-ROUTING (Turn 1)]")
                 lines.append("Domain micro-skills pre-routed for current workspace:")
                 for ms in matched_skills:
-                    desc = ms['description'][:95] + "..." if len(ms['description']) > 95 else ms['description']
+                    raw_desc = ms["description"] or ""
+                    desc = raw_desc[:95] + "..." if len(raw_desc) > 95 else raw_desc
                     lines.append(f"  * {ms['name']}: {desc}")
                 lines.append("")
         except Exception:
@@ -1011,14 +1088,14 @@ def handle_pre_invocation_hook():
                 init_project_db(conn)
                 cursor = conn.cursor()
 
-                # 2. Autonomous Auto-Compaction check (prunes completed tasks automatically)
+                # 2. Autonomous Auto-Compaction check (prunes completed tasks automatically without dirtying Git history)
                 cursor.execute("SELECT COUNT(*) FROM project_tasks WHERE status = 'completed';")
                 completed_count = cursor.fetchone()[0]
                 if completed_count >= 3:
-                    mem_compact(conn, summary=f"[AUTO-COMPACTED] Pruned {completed_count} completed tasks and consolidated state.", archive_completed=True, project_root=root_path, db_path=db_path, silent=True)
+                    mem_compact(conn, summary=f"[AUTO-COMPACTED] Pruned {completed_count} completed tasks and consolidated state.", archive_completed=True, project_root=root_path, db_path=db_path, silent=True, auto_commit=False)
 
                 mem_lines = []
-                git_telem = get_workspace_git_telemetry(root_path)
+                git_telem = get_workspace_git_telemetry(root_path, auto_recover=False)
                 if git_telem:
                     mem_lines.append(git_telem)
 

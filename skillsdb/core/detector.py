@@ -3,18 +3,19 @@ Resilient multi-stage Gemini model tier detection, profile management, and local
 """
 
 import os
+import re
 import json
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
-from ..config import TIER_LEAN, TIER_STANDARD, TIER_ULTRA, TIER_LOCAL, TIER_OFFLINE, DB_PATH
+from ..config import TIER_LEAN, TIER_STANDARD, TIER_ULTRA, TIER_LOCAL, TIER_OFFLINE, DB_PATH, __version__
 from .db import get_connection, init_db
 
 
 def check_local_endpoint(url: str = "http://localhost:11434/api/tags", timeout: float = 1.0) -> dict:
     """Checks availability of local inference engines (Ollama, vLLM, Codestral local)."""
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "SkillsDB/3.3"})
+        req = urllib.request.Request(url, headers={"User-Agent": f"SkillsDB/{__version__}"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             if resp.status == 200:
                 data = json.loads(resp.read().decode("utf-8"))
@@ -31,19 +32,22 @@ def _classify_model_string(text: str) -> str | None:
         return None
     low = text.lower()
     if any(k in low for k in (
-        "argon", "carbon", "gemini 4", "gemini-4", "gemini-ultra",
-        "gemini-2.0-ultra", "gemini-3.0-ultra", "claude opus", "claude-opus", "opus 5", "ultra"
+        "argon", "carbon", "gemini 4", "gemini-4", "gemini-ultra", "gemini ultra",
+        "gemini-2.0-ultra", "gemini-3.0-ultra", "gemini 3.1 pro", "gemini-3.1-pro",
+        "claude opus", "claude-opus", "opus 5", "pro (high)"
     )):
         return TIER_ULTRA
     if any(k in low for k in (
         "gemini 3.8 flash", "gemini 3.6 flash", "gemini-3.6-flash", "gemini-3.8-flash",
-        "gemini-flash", "flash-lite", "flash lite", "flash ("
-    )):
+        "gemini-flash", "gemini flash", "flash-lite", "flash lite", "flash ("
+    )) or re.search(r"\bgemini[- ]\d+(?:\.\d+)?[- ]flash\b", low):
         return TIER_LEAN
     if any(k in low for k in (
         "gemini-pro", "gemini pro", "claude sonnet", "claude-sonnet", "sonnet 5", "pro ("
-    )):
+    )) or re.search(r"\b(?:gemini[- ]\d+(?:\.\d+)?[- ]pro|claude[- ]\d+(?:\.\d+)?[- ]sonnet)\b", low):
         return TIER_STANDARD
+    if low.strip() == "ultra":
+        return TIER_ULTRA
     return None
 
 
@@ -57,7 +61,10 @@ def detect_model_tier(cid: str = None, db_path: Path = None, model_name_hint: st
       - 'local' / 'offline': Air-gapped local model (Codestral, Ollama, vLLM).
     """
     # Stage 1: Explicit environment variable or hook modelName hint
-    env_tier = (model_name_hint or os.environ.get("SKILLSDB_MODEL_TIER") or os.environ.get("ANTIGRAVITY_MODEL", "")).strip().lower()
+    clean_hint = (model_name_hint or "").strip()
+    if clean_hint.lower() == "auto":
+        clean_hint = ""
+    env_tier = (clean_hint or os.environ.get("SKILLSDB_MODEL_TIER") or os.environ.get("ANTIGRAVITY_MODEL") or "").strip().lower()
     if env_tier and env_tier != "auto":
         if env_tier in [TIER_LEAN, TIER_STANDARD, TIER_ULTRA, TIER_LOCAL, TIER_OFFLINE]:
             return env_tier, f"Environment variable SKILLSDB_MODEL_TIER={env_tier}"
@@ -77,10 +84,12 @@ def detect_model_tier(cid: str = None, db_path: Path = None, model_name_hint: st
     try:
         if target_db.exists():
             conn = get_connection(target_db)
-            cursor = conn.cursor()
-            cursor.execute("SELECT value FROM runtime_config WHERE key = 'model_tier';")
-            row = cursor.fetchone()
-            conn.close()
+            try:
+                cursor = conn.cursor()
+                cursor.execute("SELECT value FROM runtime_config WHERE key = 'model_tier';")
+                row = cursor.fetchone()
+            finally:
+                conn.close()
             if row and row[0]:
                 val = row[0].strip().lower()
                 if val in [TIER_LEAN, TIER_STANDARD, TIER_ULTRA, TIER_LOCAL, TIER_OFFLINE]:
@@ -118,7 +127,7 @@ def detect_model_tier(cid: str = None, db_path: Path = None, model_name_hint: st
 
             # Pass 1: Find the most recent explicit <USER_SETTINGS_CHANGE> Model Selection event
             settings_matches = re.findall(
-                r"<USER_SETTINGS_CHANGE>(?:\\n|\s)*The user changed (?:the )?setting [`'\"]?Model Selection[`'\"]? from [^<]+? to ([^.<\n\\]+)\.",
+                r"<USER_SETTINGS_CHANGE>(?:\\n|\s)*The user changed (?:the )?setting (?:\\[\"'`]|[\"'`])?Model Selection(?:\\[\"'`]|[\"'`])? from [^<]+? to ([^\n<\\]+?)\.(?=\s|\\n|<|\"|$)",
                 tail_text,
             )
             for target_model in reversed(settings_matches):
@@ -148,28 +157,32 @@ def set_profile(tier_name: str, db_path: Path = None):
     """Explicitly sets or resets the persistent model profile in SQLite."""
     target_db = db_path or DB_PATH
     conn = get_connection(target_db)
-    init_db(conn)
-    cursor = conn.cursor()
-    tier = tier_name.strip().lower()
-    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        init_db(conn)
+        cursor = conn.cursor()
+        tier = tier_name.strip().lower()
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        if tier == "auto":
+            cursor.execute("DELETE FROM runtime_config WHERE key = 'model_tier';")
+            conn.commit()
+        elif tier in [TIER_LEAN, TIER_STANDARD, TIER_ULTRA, TIER_LOCAL, TIER_OFFLINE]:
+            cursor.execute("""
+            INSERT OR REPLACE INTO runtime_config (key, value, updated_at)
+            VALUES ('model_tier', ?, ?);
+            """, (tier, now_iso))
+            conn.commit()
+        else:
+            print(f"Error: Unknown profile '{tier_name}'. Choose from: ultra, standard, lean, local, offline, auto.")
+            return
+    finally:
+        conn.close()
 
     if tier == "auto":
-        cursor.execute("DELETE FROM runtime_config WHERE key = 'model_tier';")
-        conn.commit()
-        conn.close()
         current, src = detect_model_tier(db_path=target_db)
         print(f"[OK] Model profile reset to AUTO. Current detected tier: {current.upper()} ({src})")
-    elif tier in [TIER_LEAN, TIER_STANDARD, TIER_ULTRA, TIER_LOCAL, TIER_OFFLINE]:
-        cursor.execute("""
-        INSERT OR REPLACE INTO runtime_config (key, value, updated_at)
-        VALUES ('model_tier', ?, ?);
-        """, (tier, now_iso))
-        conn.commit()
-        conn.close()
-        print(f"[OK] Model profile explicitly set to: {tier.upper()}")
     else:
-        conn.close()
-        print(f"Error: Unknown profile '{tier_name}'. Choose from: ultra, standard, lean, local, offline, auto.")
+        print(f"[OK] Model profile explicitly set to: {tier.upper()}")
 
 
 def get_profile(cid: str = None):

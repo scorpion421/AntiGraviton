@@ -31,8 +31,13 @@ def extract_skill_sections(content: str) -> list[dict]:
             continue
         body_lines.append(line)
 
+    in_fence = False
     for line in body_lines:
-        header_match = re.match(r"^(#{1,6})\s+(.+)$", line)
+        if re.match(r"^\s*(`{3,}|~{3,})", line):
+            in_fence = not in_fence
+            current_lines.append(line)
+            continue
+        header_match = re.match(r"^(#{1,6})\s+(.+)$", line) if not in_fence else None
         if header_match:
             if current_lines:
                 sec_text = "\n".join(current_lines).strip()
@@ -65,15 +70,18 @@ def extract_skill_sections(content: str) -> list[dict]:
 def fetch_single_skill(skill_name: str, db_path: Path = DB_PATH, summary: bool = False, section: str = None) -> dict:
     """Thread-safe single skill reader for parallel executors."""
     conn = get_thread_connection(db_path)
-    cursor = conn.cursor()
-    cursor.execute("""
-    SELECT name, plugin_name, category, description, content, token_estimate
-    FROM skills
-    WHERE name = ? OR name LIKE ?
-    LIMIT 1;
-    """, (skill_name, f"%{skill_name}%"))
-    row = cursor.fetchone()
-    conn.close()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+        SELECT name, plugin_name, category, description, content, token_estimate
+        FROM skills
+        WHERE name = ? OR name LIKE ?
+        ORDER BY CASE WHEN name = ? THEN 0 ELSE 1 END
+        LIMIT 1;
+        """, (skill_name, f"%{skill_name}%", skill_name))
+        row = cursor.fetchone()
+    finally:
+        conn.close()
     if not row:
         return {"name": skill_name, "found": False, "content": None, "token_estimate": 0, "tokens": 0}
 
@@ -137,24 +145,28 @@ def get_skills_parallel(skill_names: list[str], max_workers: int = 16, as_json: 
 
 def search_single_query(query: str, db_path: Path = DB_PATH, limit: int = 4) -> list[dict]:
     """Thread-safe FTS5 search query."""
-    conn = get_thread_connection(db_path)
-    cursor = conn.cursor()
-    words = re.findall(r"[a-zA-Z0-9_-]{3,}", query)
+    words = [
+        w for w in re.findall(r"[a-zA-Z0-9äöüÄÖÜß_]{2,}", (query or "").lower())
+        if w not in ("and", "or", "not", "near")
+    ]
     if not words:
-        conn.close()
         return []
-    fts_query = " OR ".join(words[:10])
-    cursor.execute("""
-    SELECT s.name, s.plugin_name, s.category, s.description, s.token_estimate, rank
-    FROM skills_fts f
-    JOIN skills s ON f.rowid = s.id
-    WHERE skills_fts MATCH ?
-    ORDER BY rank
-    LIMIT ?;
-    """, (fts_query, limit))
-    rows = cursor.fetchall()
-    conn.close()
-    return [{"name": r["name"], "plugin": r["plugin_name"], "category": r["category"], "description": r["description"], "tokens": r["token_estimate"]} for r in rows]
+    fts_query = " OR ".join(f'"{w}"' for w in words[:10])
+    conn = get_thread_connection(db_path)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+        SELECT s.name, s.plugin_name, s.category, s.description, s.token_estimate, rank
+        FROM skills_fts f
+        JOIN skills s ON f.rowid = s.id
+        WHERE skills_fts MATCH ?
+        ORDER BY rank
+        LIMIT ?;
+        """, (fts_query, limit))
+        rows = cursor.fetchall()
+    finally:
+        conn.close()
+    return [{"name": r["name"], "plugin": r["plugin_name"], "category": r["category"], "description": r["description"] or "", "tokens": r["token_estimate"]} for r in rows]
 
 
 def search_multi_parallel(queries: list[str], max_workers: int = 16, limit_per_query: int = 4, as_json: bool = False, db_path: Path = DB_PATH) -> dict:
@@ -182,7 +194,8 @@ def search_multi_parallel(queries: list[str], max_workers: int = 16, limit_per_q
                 if "error" in m:
                     print(f"  * Error: {m['error']}")
                 else:
-                    print(f"  * [{m['plugin']}] {m['name']} (~{m['tokens']} tokens) - {m['description'][:80]}...")
+                    desc_snip = (m.get("description") or "")[:80]
+                    print(f"  * [{m['plugin']}] {m['name']} (~{m['tokens']} tokens) - {desc_snip}...")
         else:
             print("  * No matches.")
         print()
@@ -204,10 +217,12 @@ def get_cluster(domain: str, max_workers: int = 16, as_json: bool = False, summa
 def benchmark_concurrency(num_queries: int = 20, max_workers: int = 16, db_path: Path = DB_PATH):
     """Compares sequential vs. parallel multi-query throughput on customizations.db."""
     conn = get_connection(db_path)
-    cursor = conn.cursor()
-    cursor.execute("SELECT name FROM skills ORDER BY id LIMIT ?;", (num_queries,))
-    names = [r[0] for r in cursor.fetchall()]
-    conn.close()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM skills ORDER BY id LIMIT ?;", (num_queries,))
+        names = [r[0] for r in cursor.fetchall()]
+    finally:
+        conn.close()
 
     if not names:
         print("Not enough skills in database for benchmark.")

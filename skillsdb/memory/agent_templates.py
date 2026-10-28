@@ -47,23 +47,38 @@ DEFAULT_TEMPLATES = [
 ]
 
 
+def _safe_parse_json_list(val) -> List[str]:
+    if isinstance(val, list):
+        return val
+    if isinstance(val, str):
+        try:
+            parsed = json.loads(val)
+            return parsed if isinstance(parsed, list) else []
+        except Exception:
+            return []
+    return []
+
+
 def init_agent_templates(conn: sqlite3.Connection):
     """Initializes the agent_templates table and seeds default built-in templates."""
     cursor = conn.cursor()
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS agent_templates (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        role TEXT NOT NULL,
-        system_prompt TEXT NOT NULL,
-        skills TEXT DEFAULT '[]',
-        tools TEXT DEFAULT '[]',
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-    );
-    """)
+    cursor.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_templates';")
+    if not cursor.fetchone():
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_templates (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            role TEXT NOT NULL,
+            system_prompt TEXT NOT NULL,
+            skills TEXT DEFAULT '[]',
+            tools TEXT DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        """)
 
     now_iso = datetime.now(timezone.utc).isoformat()
+    changed = False
     for tmpl in DEFAULT_TEMPLATES:
         cursor.execute("SELECT id FROM agent_templates WHERE id = ?;", (tmpl["id"],))
         if not cursor.fetchone():
@@ -73,8 +88,10 @@ def init_agent_templates(conn: sqlite3.Connection):
             INSERT INTO agent_templates (id, name, role, system_prompt, skills, tools, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?);
             """, (tmpl["id"], tmpl["name"], tmpl["role"], tmpl["system_prompt"], skills_json, tools_json, now_iso, now_iso))
+            changed = True
 
-    conn.commit()
+    if changed or conn.in_transaction:
+        conn.commit()
 
 
 def list_agent_templates(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
@@ -86,8 +103,8 @@ def list_agent_templates(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     results = []
     for r in rows:
         d = dict(r)
-        d["skills"] = json.loads(d["skills"]) if isinstance(d["skills"], str) else d["skills"]
-        d["tools"] = json.loads(d["tools"]) if isinstance(d["tools"], str) else d["tools"]
+        d["skills"] = _safe_parse_json_list(d.get("skills"))
+        d["tools"] = _safe_parse_json_list(d.get("tools"))
         results.append(d)
     return results
 
@@ -101,8 +118,8 @@ def get_agent_template(conn: sqlite3.Connection, agent_id: str) -> Optional[Dict
     if not row:
         return None
     d = dict(row)
-    d["skills"] = json.loads(d["skills"]) if isinstance(d["skills"], str) else d["skills"]
-    d["tools"] = json.loads(d["tools"]) if isinstance(d["tools"], str) else d["tools"]
+    d["skills"] = _safe_parse_json_list(d.get("skills"))
+    d["tools"] = _safe_parse_json_list(d.get("tools"))
     return d
 
 
@@ -123,8 +140,15 @@ def register_agent_template(
     tools_json = json.dumps(tools or [], ensure_ascii=True)
 
     cursor.execute("""
-    INSERT OR REPLACE INTO agent_templates (id, name, role, system_prompt, skills, tools, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+    INSERT INTO agent_templates (id, name, role, system_prompt, skills, tools, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+        name = excluded.name,
+        role = excluded.role,
+        system_prompt = excluded.system_prompt,
+        skills = excluded.skills,
+        tools = excluded.tools,
+        updated_at = excluded.updated_at;
     """, (agent_id, name, role, system_prompt, skills_json, tools_json, now_iso, now_iso))
     conn.commit()
 

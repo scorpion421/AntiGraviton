@@ -117,11 +117,12 @@ TOOLS_REGISTRY = [
 
 def handle_tool_call(name: str, args: Dict[str, Any]) -> str:
     """Executes an MCP tool call and returns text content."""
+    if not isinstance(args, dict):
+        args = {}
     conn = get_connection(DB_PATH)
-    init_db(conn)
-
     try:
-        if name == "skillsdb_get_rules":
+        init_db(conn)
+        if name in ("skillsdb_get_rules", "skillsdb_rules"):
             cursor = conn.cursor()
             cursor.execute("SELECT key, name, content FROM rules WHERE is_active = 1 ORDER BY key;")
             rows = cursor.fetchall()
@@ -130,7 +131,7 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> str:
                 lines.append(f"\n## Rule: {r['name']} ({r['key']})\n{r['content']}")
             return "\n".join(lines)
 
-        elif name == "skillsdb_suggest_skills":
+        elif name in ("skillsdb_suggest_skills", "skillsdb_suggest"):
             task = args.get("task", "")
             cwd_str = args.get("cwd")
             cwd_p = Path(cwd_str) if cwd_str else None
@@ -153,7 +154,7 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> str:
                 get_skill(conn, sname, summary=summ, section=sec)
             return f.getvalue()
 
-        elif name == "skillsdb_guardrail_check":
+        elif name in ("skillsdb_guardrail_check", "skillsdb_guardrail"):
             text = args.get("text", "")
             auto_fix = args.get("auto_fix", False)
             violations = check_text(text)
@@ -178,8 +179,8 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> str:
             sym = args.get("symbol")
             if sym:
                 res = slice_fim_symbol(fpath, sym)
-            elif line_num:
-                res = slice_fim(fpath, line_num)
+            elif line_num is not None:
+                res = slice_fim(fpath, int(line_num))
             else:
                 return "Error: Specify either 'line' or 'symbol' to slice."
             return format_fim_block(res)
@@ -222,6 +223,7 @@ def run_mcp_server():
     sys.stderr.flush()
 
     while True:
+        req_id = None
         try:
             line = sys.stdin.readline()
             if not line:
@@ -231,9 +233,13 @@ def run_mcp_server():
                 continue
 
             req = json.loads(line)
+            if not isinstance(req, dict):
+                continue
             req_id = req.get("id")
             method = req.get("method")
-            params = req.get("params", {})
+            params = req.get("params") or {}
+            if not isinstance(params, dict):
+                params = {}
 
             # Notification handling (no response)
             if req_id is None:
@@ -268,9 +274,25 @@ def run_mcp_server():
                         "tools": TOOLS_REGISTRY
                     }
                 }
+            elif method == "resources/list":
+                resp = {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {
+                        "resources": []
+                    }
+                }
+            elif method == "prompts/list":
+                resp = {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {
+                        "prompts": []
+                    }
+                }
             elif method == "tools/call":
                 tool_name = params.get("name", "")
-                tool_args = params.get("arguments", {})
+                tool_args = params.get("arguments") or {}
                 result_text = handle_tool_call(tool_name, tool_args)
                 resp = {
                     "jsonrpc": "2.0",
@@ -301,3 +323,14 @@ def run_mcp_server():
         except Exception as e:
             sys.stderr.write(f"[{SERVER_NAME}] Error: {e}\n")
             sys.stderr.flush()
+            if req_id is not None:
+                err_resp = {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {
+                        "code": -32603,
+                        "message": str(e),
+                    },
+                }
+                sys.stdout.write(json.dumps(err_resp) + "\n")
+                sys.stdout.flush()

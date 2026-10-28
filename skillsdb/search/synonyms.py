@@ -75,33 +75,54 @@ DEFAULT_SYNONYMS = {
 }
 
 
+_FTS5_RESERVED_WORDS = frozenset({"and", "or", "not", "near"})
+
+
 def init_synonyms(conn: sqlite3.Connection):
     """Populates or updates synonym_synapses table in database."""
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM synonym_synapses;")
     count = cursor.fetchone()[0]
     if count < len(DEFAULT_SYNONYMS):
-        cursor.execute("DELETE FROM synonym_fts;")
         for term, syns in DEFAULT_SYNONYMS.items():
             cursor.execute("""
-            INSERT OR REPLACE INTO synonym_synapses (term, synonyms, language, category)
-            VALUES (?, ?, 'de', 'general');
+            INSERT INTO synonym_synapses (term, synonyms, language, category)
+            VALUES (?, ?, 'de', 'general')
+            ON CONFLICT(term) DO UPDATE SET synonyms = excluded.synonyms;
             """, (term.lower(), syns.lower()))
-        cursor.execute("SELECT rowid, term, synonyms FROM synonym_synapses;")
-        for row in cursor.fetchall():
-            cursor.execute("""
-            INSERT INTO synonym_fts (rowid, term, synonyms)
-            VALUES (?, ?, ?);
-            """, (row[0], row[1], row[2]))
+        cursor.execute("INSERT INTO synonym_fts(synonym_fts) VALUES ('rebuild');")
         conn.commit()
+
+
+def build_safe_fts_query(terms: list[str], max_terms: int = 12) -> str:
+    """Formats a list of search terms into a safe SQLite FTS5 OR expression with quoted tokens."""
+    safe_tokens = []
+    for t in terms:
+        if not t:
+            continue
+        for sub in re.findall(r"[a-zA-Z0-9äöüÄÖÜß_]{2,}", str(t).lower()):
+            if sub not in _FTS5_RESERVED_WORDS and sub not in safe_tokens:
+                safe_tokens.append(sub)
+                if len(safe_tokens) >= max_terms:
+                    break
+        if len(safe_tokens) >= max_terms:
+            break
+    if not safe_tokens:
+        return ""
+    return " OR ".join(f'"{tok}"' for tok in safe_tokens)
 
 
 def expand_query_with_synonyms(query: str, conn: sqlite3.Connection = None) -> list[str]:
     """
     Extracts search terms from query and expands with cross-lingual synonyms.
-    Returns list of terms ready for FTS5 'OR' conjunction.
+    Returns list of sanitized alphanumeric terms ready for FTS5 'OR' conjunction.
     """
-    raw_words = re.findall(r"[a-zA-Z0-9äöüÄÖÜß_-]{3,}", query.lower())
+    if not query or not isinstance(query, str):
+        return []
+    raw_words = [
+        w for w in re.findall(r"[a-zA-Z0-9äöüÄÖÜß_]{3,}", query.lower())
+        if w not in _FTS5_RESERVED_WORDS
+    ]
     if not raw_words:
         return []
 
@@ -110,8 +131,9 @@ def expand_query_with_synonyms(query: str, conn: sqlite3.Connection = None) -> l
     # 1. In-memory dictionary lookup (fast path)
     for word in raw_words:
         if word in DEFAULT_SYNONYMS:
-            syn_words = DEFAULT_SYNONYMS[word].split()
-            expanded.extend(syn_words)
+            for sw in re.findall(r"[a-zA-Z0-9äöüÄÖÜß_]{2,}", DEFAULT_SYNONYMS[word].lower()):
+                if sw not in _FTS5_RESERVED_WORDS:
+                    expanded.append(sw)
 
     # 2. Database lookup (dynamic custom synonyms if table exists)
     if conn:
@@ -121,7 +143,9 @@ def expand_query_with_synonyms(query: str, conn: sqlite3.Connection = None) -> l
                 cursor.execute("SELECT synonyms FROM synonym_synapses WHERE term = ? LIMIT 1;", (word,))
                 row = cursor.fetchone()
                 if row and row[0]:
-                    expanded.extend(row[0].split())
+                    for sw in re.findall(r"[a-zA-Z0-9äöüÄÖÜß_]{2,}", str(row[0]).lower()):
+                        if sw not in _FTS5_RESERVED_WORDS:
+                            expanded.append(sw)
         except Exception:
             pass
 

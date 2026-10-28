@@ -41,53 +41,55 @@ def create_handoff(
     """
     root = project_root or find_project_root()
     conn = get_project_connection(root)
-    cursor = conn.cursor()
+    try:
+        cursor = conn.cursor()
 
-    # 1. Fetch task
-    cursor.execute("SELECT id, title, description, status, priority FROM project_tasks WHERE id = ?;", (task_id,))
-    task_row = cursor.fetchone()
-    if not task_row:
+        # 1. Fetch task
+        cursor.execute("SELECT id, title, description, status, priority FROM project_tasks WHERE id = ?;", (task_id,))
+        task_row = cursor.fetchone()
+        if not task_row:
+            raise ValueError(f"Task ID {task_id} not found on project task board.")
+
+        task_data = dict(task_row)
+
+        # 2. Fetch active facts (excluding deprecated ones)
+        cursor.execute("""
+        SELECT key, value FROM project_facts
+        WHERE deprecated_at IS NULL
+        ORDER BY updated_at DESC LIMIT 5;
+        """)
+        facts = {r["key"]: r["value"] for r in cursor.fetchall()}
+
+        # 3. Fetch latest active architectural decisions
+        cursor.execute("""
+        SELECT title, content FROM project_decisions
+        WHERE is_active = 1
+        ORDER BY updated_at DESC LIMIT 3;
+        """)
+        decisions = [{"title": r["title"], "content": r["content"]} for r in cursor.fetchall()]
+
+        # 4. Filtered context variables
+        scoped_vars = dict(context_vars) if context_vars else {}
+        scoped_vars.setdefault("task_id", task_id)
+        scoped_vars.setdefault("priority", task_data["priority"])
+
+        # 5. Insert handoff record
+        handoff_id = generate_handoff_id()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        vars_json = json.dumps(scoped_vars, ensure_ascii=True)
+
+        cursor.execute("""
+        INSERT INTO task_handoffs (id, task_id, source_role, target_role, context_variables, notes, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?);
+        """, (handoff_id, task_id, source_role, target_role, vars_json, notes, now_iso, now_iso))
+
+        conn.commit()
+    finally:
         conn.close()
-        raise ValueError(f"Task ID {task_id} not found on project task board.")
-
-    task_data = dict(task_row)
-
-    # 2. Fetch active facts (excluding deprecated ones)
-    cursor.execute("""
-    SELECT key, value FROM project_facts
-    WHERE deprecated_at IS NULL
-    ORDER BY updated_at DESC LIMIT 5;
-    """)
-    facts = {r["key"]: r["value"] for r in cursor.fetchall()}
-
-    # 3. Fetch latest active architectural decisions
-    cursor.execute("""
-    SELECT title, content FROM project_decisions
-    WHERE is_active = 1
-    ORDER BY updated_at DESC LIMIT 3;
-    """)
-    decisions = [{"title": r["title"], "content": r["content"]} for r in cursor.fetchall()]
-
-    # 4. Filtered context variables
-    scoped_vars = context_vars or {}
-    scoped_vars.setdefault("task_id", task_id)
-    scoped_vars.setdefault("priority", task_data["priority"])
-
-    # 5. Insert handoff record
-    handoff_id = generate_handoff_id()
-    now_iso = datetime.now(timezone.utc).isoformat()
-    vars_json = json.dumps(scoped_vars, ensure_ascii=True)
-
-    cursor.execute("""
-    INSERT INTO task_handoffs (id, task_id, source_role, target_role, context_variables, notes, status, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?);
-    """, (handoff_id, task_id, source_role, target_role, vars_json, notes, now_iso, now_iso))
-
-    conn.commit()
-    conn.close()
 
     payload = {
         "handoff_id": handoff_id,
+        "id": handoff_id,
         "source_role": source_role,
         "target_role": target_role,
         "task": task_data,
@@ -104,28 +106,34 @@ def create_handoff(
 
 def format_handoff_block(payload: Dict[str, Any]) -> str:
     """Formats a handoff payload into a compact, zero-bloat markdown block for subagent prompts."""
+    hid = payload.get("handoff_id") or payload.get("id") or "unknown"
+    task = payload.get("task") or {}
+    tid = task.get("id", payload.get("task_id", "?"))
+    tstatus = str(task.get("status", "pending")).upper()
+    tprio = str(task.get("priority", "med")).upper()
+    ttitle = task.get("title", "Unlinked or archived task")
     lines = [
-        f"=== AGENT HANDOFF: {payload['handoff_id']} ===",
-        f"Delegation: [{payload['source_role']}] -> [{payload['target_role']}]",
-        f"Active Task: #{payload['task']['id']} [{payload['task']['status'].upper()}] ({payload['task']['priority'].upper()}): {payload['task']['title']}",
+        f"=== AGENT HANDOFF: {hid} ===",
+        f"Delegation: [{payload.get('source_role', 'lead')}] -> [{payload.get('target_role', 'worker')}]",
+        f"Active Task: #{tid} [{tstatus}] ({tprio}): {ttitle}",
     ]
     if payload.get("notes"):
         lines.append(f"Instructions: {payload['notes']}")
 
     ctx_vars = payload.get("context_variables", {})
-    if ctx_vars:
+    if isinstance(ctx_vars, dict) and ctx_vars:
         lines.append("Context Variables:")
         for k, v in ctx_vars.items():
             lines.append(f"  * {k}: {v}")
 
     facts = payload.get("active_facts", {})
-    if facts:
+    if isinstance(facts, dict) and facts:
         lines.append("Active Project Facts:")
         for k, v in facts.items():
             lines.append(f"  * {k}: {v}")
 
     decisions = payload.get("active_decisions", [])
-    if decisions:
+    if isinstance(decisions, list) and decisions:
         lines.append("Architectural Invariants:")
         for d in decisions:
             lines.append(f"  * [{d['title']}]: {d['content']}")
@@ -138,47 +146,73 @@ def list_handoffs(project_root: Optional[Path] = None, status: Optional[str] = N
     """Lists recent agent handoffs."""
     root = project_root or find_project_root()
     conn = get_project_connection(root)
-    cursor = conn.cursor()
+    try:
+        cursor = conn.cursor()
 
-    query = "SELECT id, task_id, source_role, target_role, status, notes, created_at FROM task_handoffs"
-    params = []
-    if status:
-        query += " WHERE status = ?"
-        params.append(status.lower())
-    query += " ORDER BY created_at DESC LIMIT 20;"
+        query = "SELECT id, task_id, source_role, target_role, status, notes, created_at FROM task_handoffs"
+        params = []
+        if status:
+            query += " WHERE status = ?"
+            params.append(status.lower())
+        query += " ORDER BY created_at DESC LIMIT 20;"
 
-    cursor.execute(query, params)
-    rows = cursor.fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
 
 
 def read_handoff(handoff_id: str, project_root: Optional[Path] = None) -> Optional[Dict[str, Any]]:
     """Retrieves full details of a specific handoff."""
     root = project_root or find_project_root()
     conn = get_project_connection(root)
-    cursor = conn.cursor()
+    try:
+        cursor = conn.cursor()
 
-    cursor.execute("SELECT * FROM task_handoffs WHERE id = ?;", (handoff_id,))
-    row = cursor.fetchone()
-    if not row:
+        cursor.execute("SELECT * FROM task_handoffs WHERE id = ?;", (handoff_id,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+
+        hdict = dict(row)
+        hdict["handoff_id"] = hdict["id"]
+        if hdict.get("context_variables"):
+            try:
+                hdict["context_variables"] = json.loads(hdict["context_variables"])
+            except Exception:
+                hdict["context_variables"] = {}
+        else:
+            hdict["context_variables"] = {}
+
+        # Fetch task details
+        cursor.execute("SELECT id, title, description, status, priority FROM project_tasks WHERE id = ?;", (hdict["task_id"],))
+        trow = cursor.fetchone()
+        hdict["task"] = dict(trow) if trow else {
+            "id": hdict.get("task_id", 0),
+            "title": "Archived or deleted task",
+            "description": "",
+            "status": hdict.get("status", "pending"),
+            "priority": hdict["context_variables"].get("priority", "med") if isinstance(hdict["context_variables"], dict) else "med",
+        }
+
+        cursor.execute("""
+        SELECT key, value FROM project_facts
+        WHERE deprecated_at IS NULL
+        ORDER BY updated_at DESC LIMIT 5;
+        """)
+        hdict["active_facts"] = {r["key"]: r["value"] for r in cursor.fetchall()}
+
+        cursor.execute("""
+        SELECT title, content FROM project_decisions
+        WHERE is_active = 1
+        ORDER BY updated_at DESC LIMIT 3;
+        """)
+        hdict["active_decisions"] = [{"title": r["title"], "content": r["content"]} for r in cursor.fetchall()]
+
+        return hdict
+    finally:
         conn.close()
-        return None
-
-    hdict = dict(row)
-    if hdict.get("context_variables"):
-        try:
-            hdict["context_variables"] = json.loads(hdict["context_variables"])
-        except Exception:
-            pass
-
-    # Fetch task details
-    cursor.execute("SELECT id, title, description, status, priority FROM project_tasks WHERE id = ?;", (hdict["task_id"],))
-    trow = cursor.fetchone()
-    hdict["task"] = dict(trow) if trow else {}
-
-    conn.close()
-    return hdict
 
 
 def update_handoff(handoff_id: str, status: str, project_root: Optional[Path] = None) -> bool:
@@ -190,16 +224,18 @@ def update_handoff(handoff_id: str, status: str, project_root: Optional[Path] = 
 
     root = project_root or find_project_root()
     conn = get_project_connection(root)
-    cursor = conn.cursor()
-    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        cursor = conn.cursor()
+        now_iso = datetime.now(timezone.utc).isoformat()
 
-    cursor.execute("""
-    UPDATE task_handoffs
-    SET status = ?, updated_at = ?
-    WHERE id = ?;
-    """, (status_clean, now_iso, handoff_id))
+        cursor.execute("""
+        UPDATE task_handoffs
+        SET status = ?, updated_at = ?
+        WHERE id = ?;
+        """, (status_clean, now_iso, handoff_id))
 
-    changed = cursor.rowcount > 0
-    conn.commit()
-    conn.close()
-    return changed
+        changed = cursor.rowcount > 0
+        conn.commit()
+        return changed
+    finally:
+        conn.close()

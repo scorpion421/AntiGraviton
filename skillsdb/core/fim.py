@@ -29,7 +29,9 @@ def slice_fim(
     total_lines = len(all_lines)
 
     # 1-indexed target line adjusted to 0-index
-    t_idx = max(0, min(total_line - 1 if (total_line := total_lines) else 0, target_line - 1))
+    prefix_lines = max(0, prefix_lines)
+    suffix_lines = max(0, suffix_lines)
+    t_idx = max(0, min(total_lines - 1 if total_lines else 0, target_line - 1))
 
     prefix_start = max(0, t_idx - prefix_lines)
     suffix_end = min(total_lines, t_idx + suffix_lines + 1)
@@ -44,13 +46,14 @@ def slice_fim(
 
     return {
         "file": str(fpath),
-        "target_line": target_line,
-        "prefix_start_line": prefix_start + 1,
-        "prefix_end_line": t_idx,
-        "suffix_start_line": t_idx + 2,
+        "target_line": (t_idx + 1) if total_lines > 0 else 0,
+        "prefix_start_line": (prefix_start + 1) if total_lines > 0 else 0,
+        "prefix_end_line": max(prefix_start + 1, t_idx) if total_lines > 0 else 0,
+        "suffix_start_line": min(suffix_end, t_idx + 2) if total_lines > 0 else 0,
         "suffix_end_line": suffix_end,
         "total_file_lines": total_lines,
         "prefix": prefix_chunk,
+        "middle": target_line_content,
         "target_line_content": target_line_content,
         "suffix": suffix_chunk,
         "full_file_tokens": full_tokens,
@@ -75,8 +78,8 @@ def slice_fim_symbol(
     content = fpath.read_text(encoding="utf-8", errors="replace")
     all_lines = content.splitlines()
 
-    # Search for def, class, func, const, let, var symbol patterns
-    pat = re.compile(rf"\b(?:def|class|function|var|let|const|val|interface|type)\s+{re.escape(symbol_name)}\b")
+    # Search for def, async def, class, func, fn, struct, enum, const, let, var symbol patterns
+    pat = re.compile(rf"\b(?:(?:async\s+)?def|class|function|func|fn|struct|enum|var|let|const|val|interface|type)\s+{re.escape(symbol_name)}\b")
     match_line = None
 
     for idx, line in enumerate(all_lines, 1):

@@ -48,10 +48,41 @@ def safe_deploy_database(source_db_file: Path, target_db_file: Path) -> None:
                         FROM upstream.rules
                         WHERE category != 'learned';
                         """)
+                        cur.execute("SELECT name FROM upstream.sqlite_master WHERE type='table' AND name='synonym_synapses';")
+                        if cur.fetchone():
+                            cur.execute("""
+                            CREATE TABLE IF NOT EXISTS synonym_synapses (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                term TEXT UNIQUE NOT NULL,
+                                synonyms TEXT NOT NULL,
+                                language TEXT DEFAULT 'de',
+                                category TEXT DEFAULT 'general'
+                            );
+                            """)
+                            main_cols = {r[1] for r in cur.execute("PRAGMA main.table_info(synonym_synapses);").fetchall()}
+                            up_cols = {r[1] for r in cur.execute("PRAGMA upstream.table_info(synonym_synapses);").fetchall()}
+                            if "synonyms" in main_cols and "synonyms" in up_cols:
+                                cur.execute("""
+                                INSERT INTO synonym_synapses (term, synonyms, language, category)
+                                SELECT term, synonyms, COALESCE(language, 'de'), COALESCE(category, 'general')
+                                FROM upstream.synonym_synapses
+                                WHERE 1=1
+                                ON CONFLICT(term) DO UPDATE SET synonyms = excluded.synonyms;
+                                """)
+                            elif "expansions" in main_cols and "expansions" in up_cols:
+                                cur.execute("""
+                                INSERT INTO synonym_synapses (term, expansions)
+                                SELECT term, expansions
+                                FROM upstream.synonym_synapses
+                                WHERE 1=1
+                                ON CONFLICT(term) DO UPDATE SET expansions = excluded.expansions;
+                                """)
                         cur.execute("""
-                        INSERT OR REPLACE INTO synonym_synapses (term, synonyms, language, category)
-                        SELECT term, synonyms, language, category
-                        FROM upstream.synonym_synapses;
+                        CREATE TABLE IF NOT EXISTS runtime_config (
+                            key TEXT PRIMARY KEY,
+                            value TEXT NOT NULL,
+                            updated_at TEXT NOT NULL
+                        );
                         """)
                         cur.execute("""
                         INSERT OR REPLACE INTO runtime_config (key, value, updated_at)
@@ -61,10 +92,19 @@ def safe_deploy_database(source_db_file: Path, target_db_file: Path) -> None:
                         """)
                         cur.execute("INSERT INTO rules_fts(rules_fts) VALUES ('rebuild');")
                         cur.execute("INSERT INTO skills_fts(skills_fts) VALUES ('rebuild');")
-                        cur.execute("INSERT INTO synonym_fts(synonym_fts) VALUES ('rebuild');")
+                        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='synonym_fts';")
+                        if cur.fetchone():
+                            cur.execute("INSERT INTO synonym_fts(synonym_fts) VALUES ('rebuild');")
                         conn.commit()
+                    except Exception:
+                        if conn.in_transaction:
+                            conn.rollback()
+                        raise
                     finally:
-                        cur.execute("DETACH DATABASE upstream;")
+                        try:
+                            cur.execute("DETACH DATABASE upstream;")
+                        except sqlite3.Error:
+                            pass
                     conn.execute("PRAGMA wal_checkpoint(PASSIVE);")
                     return
         except Exception:
@@ -128,9 +168,9 @@ def deploy(source_dir: Path = None, target_dir: Path = None):
     target_bin_dir = target_dir / "antigravity" / "bin"
     target_bin_dir.mkdir(parents=True, exist_ok=True)
     cmd_path = target_bin_dir / "skillsdb.cmd"
-    cmd_path.write_text('@echo off\npython "%USERPROFILE%\\.gemini\\database\\db_manager.py" %*\n', encoding="ascii")
+    cmd_path.write_text('@echo off\r\nset "PATH=%USERPROFILE%\\.local\\bin;%PATH%"\r\npython "%USERPROFILE%\\.gemini\\database\\db_manager.py" %*\r\n', encoding="ascii")
     sh_path = target_bin_dir / "skillsdb"
-    sh_path.write_text('#!/bin/sh\npython3 "$HOME/.gemini/database/db_manager.py" "$@"\n', encoding="utf-8")
+    sh_path.write_text('#!/bin/sh\nexport PATH="$HOME/.local/bin:$PATH"\npython3 "$HOME/.gemini/database/db_manager.py" "$@"\n', encoding="utf-8")
     try:
         sh_path.chmod(0o755)
     except Exception:

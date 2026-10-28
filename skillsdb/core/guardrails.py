@@ -94,10 +94,10 @@ def check_text(text: str, filename: str = "<memory>") -> List[Dict[str, Any]]:
             })
 
         # 3. Deppenbindestrich invariant (skip negative rule documentation examples like "never 'Abteilungs-Kontingent'")
-        deppen_match = DEPPENBINDESTRICH_PATTERN.search(line)
-        if deppen_match:
+        for deppen_match in DEPPENBINDESTRICH_PATTERN.finditer(line):
             compound = deppen_match.group()
-            if f"never '{compound}'" not in line and f'never "{compound}"' not in line:
+            prefix = line[max(0, deppen_match.start() - 12):deppen_match.start()].lower()
+            if "never '" not in prefix and 'never "' not in prefix:
                 corrected = compound.replace("-", "")
                 violations.append({
                     "file": filename,
@@ -107,6 +107,7 @@ def check_text(text: str, filename: str = "<memory>") -> List[Dict[str, Any]]:
                     "message": f"Incorrect German compound hyphenation '{compound}'. Write joined as '{corrected}'.",
                     "snippet": line[:100].strip(),
                 })
+                break
 
         # 4. Secret leak checks
         for secret_name, pat in SECRET_PATTERNS:
@@ -137,7 +138,7 @@ def check_text(text: str, filename: str = "<memory>") -> List[Dict[str, Any]]:
                         "snippet": stripped[:100],
                     })
             elif stripped.startswith("## "):
-                if not re.match(r"^## \[(Unreleased|\d+\.\d+\.\d+(?:-[0-9A-Za-z.\-]+)?)\](?: - \d{4}-\d{2}-\d{2})?$", stripped):
+                if not re.match(r"^## \[(Unreleased|\d+\.\d+\.\d+(?:-[0-9A-Za-z.\-]+)?(?:\+[0-9A-Za-z.\-]+)?)\](?: - \d{4}-\d{2}-\d{2})?$", stripped):
                     violations.append({
                         "file": filename,
                         "line": idx,
@@ -153,12 +154,24 @@ def check_text(text: str, filename: str = "<memory>") -> List[Dict[str, Any]]:
     return violations
 
 
+def _is_test_file_path(file_path: Path) -> bool:
+    """Returns True if file_path is a unit test file or inside a test directory."""
+    try:
+        name_low = file_path.name.lower()
+        if name_low.startswith("test_") or name_low.endswith(("_test.py", "_test.dart", ".test.ts", ".test.js", ".spec.ts", ".spec.js")):
+            return True
+        tail_parts = [p.lower() for p in file_path.parts[-3:]]
+        return "tests" in tail_parts
+    except Exception:
+        return False
+
+
 def fix_text(text: str) -> Tuple[str, int]:
     """
     Auto-remediates guardrail violations automatically (zero friction):
     - Converts em-dashes and en-dashes to standard ASCII hyphens.
     - Strips emojis and decorative symbols.
-    - Resolves German compound Deppenbindestriche.
+    - Resolves German compound Deppenbindestriche (preserving quoted negative rule examples).
     Returns (cleaned_text, total_fixes_applied).
     """
     fixes = 0
@@ -175,23 +188,30 @@ def fix_text(text: str) -> Tuple[str, int]:
         fixes += len(emojis)
         text = EMOJI_PATTERN.sub("", text)
 
-    # 3. Fix Deppenbindestriche
-    def _repl_deppen(m):
-        nonlocal fixes
-        fixes += 1
-        parts = m.group().split("-", 1)
-        if len(parts) == 2:
-            return parts[0] + parts[1].lower()
-        return m.group().replace("-", "")
+    # 3. Fix Deppenbindestriche line-by-line (skipping negative rule examples like "never 'Abteilungs-Kontingent'")
+    out_lines = []
+    for line in text.splitlines(keepends=True):
+        def _repl_deppen(m, current_line=line):
+            nonlocal fixes
+            compound = m.group()
+            prefix = current_line[max(0, m.start() - 12):m.start()].lower()
+            if "never '" in prefix or 'never "' in prefix:
+                return compound
+            fixes += 1
+            parts = compound.split("-", 1)
+            if len(parts) == 2:
+                return parts[0] + parts[1].lower()
+            return compound.replace("-", "")
 
-    text = DEPPENBINDESTRICH_PATTERN.sub(_repl_deppen, text)
+        out_lines.append(DEPPENBINDESTRICH_PATTERN.sub(_repl_deppen, line))
+    text = "".join(out_lines)
 
     return text, fixes
 
 
 def fix_file(file_path: Path) -> int:
     """Auto-fixes formatting and invariant violations in a file in-place."""
-    if file_path.suffix.lower() in SKIP_EXTENSIONS:
+    if file_path.suffix.lower() in SKIP_EXTENSIONS or _is_test_file_path(file_path):
         return 0
     try:
         content = file_path.read_text(encoding="utf-8")
@@ -207,7 +227,7 @@ def check_file(file_path: Path) -> List[Dict[str, Any]]:
     """Inspects a single file for guardrail violations."""
     if file_path.suffix.lower() in SKIP_EXTENSIONS:
         return []
-    if "tests" in file_path.parts or file_path.name.startswith("test_"):
+    if _is_test_file_path(file_path):
         return []
     try:
         content = file_path.read_text(encoding="utf-8", errors="replace")
@@ -320,11 +340,13 @@ def verify_task(
         }
 
     conn = get_project_connection(root)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, title, status, priority FROM project_tasks WHERE id = ?;", (task_id,))
-    task = cursor.fetchone()
-    if not task:
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, title, description, status, priority FROM project_tasks WHERE id = ?;", (task_id,))
+        task = cursor.fetchone()
+    finally:
         conn.close()
+    if not task:
         return {
             "verified": False,
             "task_id": task_id,
@@ -341,7 +363,6 @@ def verify_task(
 
     if not guard_res["passed"]:
         if strict:
-            conn.close()
             return {
                 "verified": False,
                 "task_id": task_id,
@@ -365,7 +386,6 @@ def verify_task(
                 timeout=120
             )
             if test_proc.returncode != 0:
-                conn.close()
                 err_snippet = (test_proc.stderr or test_proc.stdout)[:300].strip()
                 return {
                     "verified": False,
@@ -375,7 +395,6 @@ def verify_task(
                 }
             verification_details.append(f"Test command passed: '{test_cmd}' (exit 0)")
         except Exception as e:
-            conn.close()
             return {
                 "verified": False,
                 "task_id": task_id,
@@ -384,19 +403,29 @@ def verify_task(
 
     # 3. Successful Verification Gate Passed: Update Task State
     details_str = "; ".join(verification_details) if verification_details else "Verified successfully"
-    cursor.execute("""
-    UPDATE project_tasks
-    SET status = 'completed', updated_at = ?
-    WHERE id = ?;
-    """, (now_iso, task_id))
-
-    cursor.execute("""
-    INSERT INTO task_verifications (task_id, verifier_type, passed, details, created_at)
-    VALUES (?, 'evaluator_optimizer', 1, ?, ?);
-    """, (task_id, details_str, now_iso))
-
-    conn.commit()
-    conn.close()
+    conn = get_project_connection(root)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+        UPDATE project_tasks
+        SET status = 'completed', updated_at = ?
+        WHERE id = ?;
+        """, (now_iso, task_id))
+        cursor.execute(
+            "DELETE FROM project_memory_fts WHERE source_table = 'task' AND title_or_key LIKE ?;",
+            (f"Task #{task_id}:%",),
+        )
+        cursor.execute(
+            "INSERT INTO project_memory_fts (source_table, title_or_key, content) VALUES ('task', ?, ?);",
+            (f"Task #{task_id}: {task['title']}", f"completed {task['priority']} {task['description'] or ''}"),
+        )
+        cursor.execute("""
+        INSERT INTO task_verifications (task_id, verifier_type, passed, details, created_at)
+        VALUES (?, 'evaluator_optimizer', 1, ?, ?);
+        """, (task_id, details_str, now_iso))
+        conn.commit()
+    finally:
+        conn.close()
 
     return {
         "verified": True,
@@ -421,54 +450,75 @@ def handle_pre_tool_guardrail_hook():
     try:
         payload_raw = sys.stdin.read()
         payload = json.loads(payload_raw) if payload_raw.strip() else {}
-    except Exception:
-        print(json.dumps({"decision": "allow"}))
-        return
-
-    tool_call = payload.get("toolCall", {})
-    args = tool_call.get("args") or tool_call.get("arguments") or payload.get("tool_input") or {}
-    target_file = str(args.get("Path") or args.get("TargetFile") or args.get("path") or "<tool_input>")
-
-    cmd_line = args.get("CommandLine", "")
-    if isinstance(cmd_line, str) and re.search(r"\bgit\s+tag\s+(?:-f|--force)\s+v?\d+\.\d+\.\d+\b", cmd_line):
-        reason = (
-            "SkillsDB Guardrail Blocked Command (semver-immutability): "
-            "Never overwrite an already published release tag in place (git tag -f is forbidden by SemVer 2.0.0 rule). "
-            "Increment VERSION and CHANGELOG.md to a new MAJOR.MINOR.PATCH version and publish a new release instead."
-        )
-        print(json.dumps({"decision": "deny", "reason": reason}))
-        return
-
-    try:
-        target_path = Path(target_file)
-        if "tests" in target_path.parts or target_path.name.startswith("test_"):
+        if not isinstance(payload, dict):
             print(json.dumps({"decision": "allow"}))
             return
-    except Exception:
-        pass
 
-    content_items = []
-    for field_key in ("Content", "Replacement", "CodeContent", "ReplacementContent"):
-        if field_key in args and isinstance(args[field_key], str):
-            content_items.append((field_key, args[field_key]))
-    if "ReplacementChunks" in args and isinstance(args["ReplacementChunks"], list):
-        for chunk in args["ReplacementChunks"]:
-            if isinstance(chunk, dict):
-                chunk_str = chunk.get("ReplacementContent") or chunk.get("Replacement")
-                if isinstance(chunk_str, str):
-                    content_items.append(("ReplacementChunks", chunk_str))
+        tool_call = payload.get("toolCall")
+        if not isinstance(tool_call, dict):
+            tool_call = {}
+        raw_args = tool_call.get("args") or tool_call.get("arguments") or payload.get("tool_input") or {}
+        if isinstance(raw_args, str):
+            try:
+                raw_args = json.loads(raw_args)
+            except Exception:
+                raw_args = {}
+        args = raw_args if isinstance(raw_args, dict) else {}
+        target_file = str(
+            args.get("Path")
+            or args.get("TargetFile")
+            or args.get("AbsolutePath")
+            or args.get("path")
+            or args.get("file_path")
+            or args.get("target_file")
+            or "<tool_input>"
+        )
 
-    for field_name, content in content_items:
-        violations = check_text(content, filename=target_file)
-        critical_violations = [v for v in violations if v.get("severity") == "CRITICAL"]
-        if critical_violations:
-            first = critical_violations[0]
+        cmd_line = args.get("CommandLine") or args.get("command") or ""
+        if isinstance(cmd_line, str) and re.search(
+            r"\bgit\b[^\n;|&]*\btag\b(?=[^\n;|&]*(?:\s-f\b|\s--force\b|\s-[a-zA-Z]*f[a-zA-Z]*\b))[^\n;|&]*\bv?\d+\.\d+\.\d+\b",
+            cmd_line,
+        ):
             reason = (
-                f"SkillsDB Guardrail Blocked Code Modification ({first['rule']}): "
-                f"{first['message']} In snippet: '{first['snippet']}'"
+                "SkillsDB Guardrail Blocked Command (semver-immutability): "
+                "Never overwrite an already published release tag in place (git tag -f is forbidden by SemVer 2.0.0 rule). "
+                "Increment VERSION and CHANGELOG.md to a new MAJOR.MINOR.PATCH version and publish a new release instead."
             )
             print(json.dumps({"decision": "deny", "reason": reason}))
             return
+
+        try:
+            target_path = Path(target_file)
+            if _is_test_file_path(target_path):
+                print(json.dumps({"decision": "allow"}))
+                return
+        except Exception:
+            pass
+
+        content_items = []
+        for field_key in ("Content", "Replacement", "CodeContent", "ReplacementContent", "content", "replacement", "new_string"):
+            if field_key in args and isinstance(args[field_key], str):
+                content_items.append((field_key, args[field_key]))
+        if "ReplacementChunks" in args and isinstance(args["ReplacementChunks"], list):
+            for chunk in args["ReplacementChunks"]:
+                if isinstance(chunk, dict):
+                    chunk_str = chunk.get("ReplacementContent") or chunk.get("Replacement")
+                    if isinstance(chunk_str, str):
+                        content_items.append(("ReplacementChunks", chunk_str))
+
+        for field_name, content in content_items:
+            violations = check_text(content, filename=target_file)
+            critical_violations = [v for v in violations if v.get("severity") == "CRITICAL"]
+            if critical_violations:
+                first = critical_violations[0]
+                reason = (
+                    f"SkillsDB Guardrail Blocked Code Modification ({first['rule']}): "
+                    f"{first['message']} In snippet: '{first['snippet']}'"
+                )
+                print(json.dumps({"decision": "deny", "reason": reason}))
+                return
+    except Exception:
+        pass
 
     print(json.dumps({"decision": "allow"}))
 

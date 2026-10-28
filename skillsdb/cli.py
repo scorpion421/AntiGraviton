@@ -430,7 +430,7 @@ def main(argv: list[str] = None):
             try:
                 if args.symbol:
                     res = slice_fim_symbol(fpath, args.symbol, prefix_lines=args.prefix, suffix_lines=args.suffix)
-                elif args.line:
+                elif args.line is not None:
                     res = slice_fim(fpath, args.line, prefix_lines=args.prefix, suffix_lines=args.suffix)
                 else:
                     print("Error: Specify either --line <number> or --symbol <name>.")
@@ -444,6 +444,8 @@ def main(argv: list[str] = None):
                 print(f"Error: {e}")
                 sys.exit(1)
             return
+        print("Usage: skillsdb fim slice <file_path> [--line <N> | --symbol <NAME>] [--prefix 25] [--suffix 25] [--json]")
+        return
 
     # Route Agent Templates Command
     if args.command == "agent":
@@ -523,6 +525,8 @@ def main(argv: list[str] = None):
                     print(f"  Output: {res['snippet']}")
                 sys.exit(1)
             return
+        print("Usage: skillsdb guardrail {check,verify-task} ...")
+        return
 
     # Route handoff commands
     if args.command == "handoff":
@@ -580,6 +584,8 @@ def main(argv: list[str] = None):
                 print(f"Failed to update handoff '{args.id}'.")
                 sys.exit(1)
             return
+        print("Usage: skillsdb handoff {create,list,read,update} ...")
+        return
 
     # Route Gitea commands
     if args.command == "gitea-status":
@@ -591,6 +597,7 @@ def main(argv: list[str] = None):
         else:
             proj_root = Path(args.project) if getattr(args, "project", None) else find_project_root()
             sync_gh = getattr(args, "github", False)
+            force_rel = getattr(args, "releases", False)
             ok = sync_workspace(
                 proj_root,
                 message=args.message,
@@ -598,11 +605,17 @@ def main(argv: list[str] = None):
                 sync_github=sync_gh,
                 repo_name=getattr(args, "name", None),
                 allow_existing=getattr(args, "use_existing", False),
+                _skip_auto_release=force_rel,
             )
             if not ok:
                 sys.exit(2)
-            if getattr(args, "releases", False):
-                tags = sync_changelog_releases(proj_root, sync_github=sync_gh, overwrite_existing=True)
+            if force_rel:
+                tags = sync_changelog_releases(
+                    proj_root,
+                    sync_github=sync_gh,
+                    overwrite_existing=True,
+                    repo_name=getattr(args, "name", None),
+                )
                 if tags:
                     print(f"  [OK] Force-synced Keep a Changelog releases: {', '.join(tags)}")
         return
@@ -715,6 +728,20 @@ def main(argv: list[str] = None):
             pconn.close()
         return
 
+    # Route standalone commands that manage or do not require an open central DB connection
+    if args.command == "fix-utf8":
+        fix_utf8(check_only=getattr(args, "check", False))
+        return
+    elif args.command == "check-update":
+        check_update()
+        return
+    elif args.command == "update":
+        if getattr(args, "check", False):
+            check_update()
+        else:
+            update_plugin(force=getattr(args, "force", False))
+        return
+
     # Route central DB commands
     conn = get_connection(DB_PATH)
     try:
@@ -733,15 +760,6 @@ def main(argv: list[str] = None):
             learn_rule(conn, args.key, args.name, args.content, category=args.category, scope=args.scope)
         elif args.command == "doctor":
             doctor(conn)
-        elif args.command == "fix-utf8":
-            fix_utf8(check_only=getattr(args, "check", False))
-        elif args.command == "check-update":
-            check_update()
-        elif args.command == "update":
-            if getattr(args, "check", False):
-                check_update()
-            else:
-                update_plugin(force=getattr(args, "force", False))
         elif args.command == "search":
             search(conn, args.query)
         elif args.command == "suggest":

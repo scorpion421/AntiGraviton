@@ -83,7 +83,19 @@ class WriterQueue:
         return val
 
     def _worker(self):
-        conn = get_connection(self.db_path, is_project_db=True)
+        try:
+            conn = get_connection(self.db_path, is_project_db=True)
+        except Exception as err:
+            while not self.queue.empty():
+                try:
+                    task = self.queue.get_nowait()
+                    try:
+                        task(None)
+                    finally:
+                        self.queue.task_done()
+                except Exception:
+                    pass
+            return
 
         while not self._stop_event.is_set() or not self.queue.empty():
             try:
@@ -192,27 +204,46 @@ def flush_journals(project_root: Path, conn: sqlite3.Connection) -> int:
                     etype = rec.get("type")
                     data = rec.get("data", {})
                     if etype == "fact":
+                        fkey = data.get("key")
+                        fval = data.get("value")
                         cursor.execute(
                             """
-                            INSERT OR REPLACE INTO project_facts (key, value, updated_at)
-                            VALUES (?, ?, ?);
+                            INSERT OR REPLACE INTO project_facts (key, value, updated_at, deprecated_at, superseded_by)
+                            VALUES (?, ?, ?, NULL, NULL);
                             """,
-                            (data.get("key"), data.get("value"), data.get("updated_at", "")),
+                            (fkey, fval, data.get("updated_at", "")),
+                        )
+                        cursor.execute("DELETE FROM project_memory_fts WHERE source_table = 'fact' AND title_or_key = ?;", (fkey,))
+                        cursor.execute(
+                            """
+                            INSERT INTO project_memory_fts (source_table, title_or_key, content)
+                            VALUES ('fact', ?, ?);
+                            """,
+                            (fkey, fval or ""),
                         )
                         flushed_count += 1
                     elif etype == "decision":
+                        dtitle = data.get("title")
+                        dcontent = data.get("content")
                         cursor.execute(
                             """
                             INSERT INTO project_decisions (title, content, category, is_active, created_at, updated_at)
                             VALUES (?, ?, ?, 1, ?, ?);
                             """,
                             (
-                                data.get("title"),
-                                data.get("content"),
+                                dtitle,
+                                dcontent,
                                 data.get("category", "architecture"),
                                 data.get("now", ""),
                                 data.get("now", ""),
                             ),
+                        )
+                        cursor.execute(
+                            """
+                            INSERT INTO project_memory_fts (source_table, title_or_key, content)
+                            VALUES ('decision', ?, ?);
+                            """,
+                            (dtitle or "", dcontent or ""),
                         )
                         flushed_count += 1
             jf.unlink(missing_ok=True)

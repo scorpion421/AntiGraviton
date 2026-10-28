@@ -8,7 +8,7 @@ from pathlib import Path
 from ..config import TIER_ULTRA, estimate_tokens
 from ..core.detector import detect_model_tier
 from ..core.concurrency import extract_skill_sections
-from .synonyms import expand_query_with_synonyms
+from .synonyms import expand_query_with_synonyms, build_safe_fts_query
 
 
 def detect_cwd_hints(cwd_path: Path = None) -> list[str]:
@@ -52,7 +52,13 @@ def suggest_skills(conn: sqlite3.Connection, task_description: str, limit: int =
             print("No searchable keywords identified.")
         return
 
-    fts_query = " OR ".join(words[:16])
+    fts_query = build_safe_fts_query(words, max_terms=16)
+    if not fts_query:
+        if as_json:
+            print("[]")
+        else:
+            print("No searchable keywords identified.")
+        return
 
     cursor = conn.cursor()
     cursor.execute("""
@@ -92,10 +98,15 @@ def suggest_skills(conn: sqlite3.Connection, task_description: str, limit: int =
 def search(conn: sqlite3.Connection, query: str):
     """Searches rules and skills via FTS5 with synonym expansion."""
     words = expand_query_with_synonyms(query, conn)
-    fts_query = " OR ".join(words[:12]) if words else query
+    fts_query = build_safe_fts_query(words if words else [query], max_terms=12)
+
+    print(f"\n--- Search results for '{query}' in Customizations Database ---\n")
+    if not fts_query:
+        print("No matching rules.")
+        print("\nNo matching skills.")
+        return
 
     cursor = conn.cursor()
-    print(f"\n--- Search results for '{query}' in Customizations Database ---\n")
 
     cursor.execute("""
     SELECT r.key, r.name, r.category, r.summary, r.token_estimate
@@ -136,7 +147,10 @@ def search(conn: sqlite3.Connection, query: str):
 def get_skill(conn: sqlite3.Connection, name: str, summary: bool = False, section: str = None):
     """Retrieves a skill, skill summary outline, or targeted micro-skill section."""
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM skills WHERE name = ? OR name LIKE ? LIMIT 1;", (name, f"%{name}%"))
+    cursor.execute(
+        "SELECT * FROM skills WHERE name = ? OR name LIKE ? ORDER BY CASE WHEN name = ? THEN 0 ELSE 1 END LIMIT 1;",
+        (name, f"%{name}%", name),
+    )
     skill = cursor.fetchone()
     if not skill:
         print(f"Skill '{name}' not found in database.")
@@ -210,7 +224,10 @@ def get_active_rules(conn: sqlite3.Connection):
 def get_rule(conn: sqlite3.Connection, key: str):
     """Outputs a specific rule by key or name."""
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM rules WHERE key = ? OR name LIKE ? LIMIT 1;", (key, f"%{key}%"))
+    cursor.execute(
+        "SELECT * FROM rules WHERE key = ? OR name LIKE ? ORDER BY CASE WHEN key = ? THEN 0 ELSE 1 END LIMIT 1;",
+        (key, f"%{key}%", key),
+    )
     rule = cursor.fetchone()
     if not rule:
         print(f"Rule '{key}' not found in database.")

@@ -9,6 +9,7 @@ import time
 import json
 import shutil
 import subprocess
+import urllib.parse
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -22,9 +23,9 @@ from .gitea_config import (
 )
 
 
-def check_gitea_health(timeout: float = 3.0) -> Tuple[bool, Dict[str, Any]]:
+def check_gitea_health(timeout: float = 3.0, db_path: Path = DB_PATH) -> Tuple[bool, Dict[str, Any]]:
     """Checks whether the Gitea service is online and returns version info."""
-    config = get_gitea_config()
+    config = get_gitea_config(db_path=db_path)
     version_url = f"{config['url']}/api/v1/version"
     headers = {"User-Agent": "SkillsDB-GiteaSync/1.0"}
     if config.get("token"):
@@ -53,9 +54,9 @@ def check_gitea_health(timeout: float = 3.0) -> Tuple[bool, Dict[str, Any]]:
     return False, {"error": "Unknown status"}
 
 
-def get_gitea_service_status() -> str:
+def get_gitea_service_status(db_path: Path = DB_PATH) -> str:
     """Checks service state for Gitea across Windows (sc.exe), Linux (systemd/pgrep), and macOS (launchctl/pgrep)."""
-    config = get_gitea_config()
+    config = get_gitea_config(db_path=db_path)
     svc_name = config["service_name"]
     if os.name == "nt":
         try:
@@ -94,6 +95,13 @@ def get_gitea_service_status() -> str:
                     sys_unit = Path(f"/etc/systemd/system/{svc_name}.service")
                     if user_unit.exists() or sys_unit.exists():
                         return "STOPPED"
+        if sys.platform == "darwin" and shutil.which("launchctl"):
+            plist = Path.home() / "Library" / "LaunchAgents" / "dev.local.antigraviton.gitea.plist"
+            lproc = subprocess.run(["launchctl", "list"], capture_output=True, text=True, timeout=3)
+            if lproc.returncode == 0 and "dev.local.antigraviton.gitea" in lproc.stdout:
+                return "RUNNING"
+            if plist.exists():
+                return "STOPPED"
         if shutil.which("pgrep"):
             pg = subprocess.run(["pgrep", "-f", "gitea.*web"], capture_output=True, text=True, timeout=3)
             if pg.returncode == 0 and pg.stdout.strip():
@@ -103,9 +111,9 @@ def get_gitea_service_status() -> str:
         return "UNKNOWN"
 
 
-def inspect_remote_repository(repo_name: str) -> Dict[str, Any]:
+def inspect_remote_repository(repo_name: str, db_path: Path = DB_PATH) -> Dict[str, Any]:
     """Checks whether a repository with repo_name already exists on Gitea and returns its metadata."""
-    config = get_gitea_config()
+    config = get_gitea_config(db_path=db_path)
     token = config["token"]
     user = config["user"]
     base_url = config["url"]
@@ -122,7 +130,9 @@ def inspect_remote_repository(repo_name: str) -> Dict[str, Any]:
     if not token or not user:
         return result
 
-    repo_url = f"{base_url}/api/v1/repos/{user}/{repo_name}"
+    quoted_user = urllib.parse.quote(user, safe="")
+    quoted_repo = urllib.parse.quote(repo_name, safe="")
+    repo_url = f"{base_url}/api/v1/repos/{quoted_user}/{quoted_repo}"
     req = urllib.request.Request(
         repo_url,
         headers={
@@ -191,16 +201,18 @@ def ensure_remote_repository(repo_name: str, description: Optional[str] = None) 
     return None
 
 
-def delete_remote_repository(repo_name: str, owner: Optional[str] = None) -> bool:
+def delete_remote_repository(repo_name: str, owner: Optional[str] = None, db_path: Path = DB_PATH) -> bool:
     """Deletes a repository in Gitea via API (primarily used for cleaning up temporary test repositories)."""
-    config = get_gitea_config()
+    config = get_gitea_config(db_path=db_path)
     token = config["token"]
     target_owner = owner or config["user"]
     base_url = config["url"]
     if not token or not target_owner:
         return False
 
-    del_url = f"{base_url}/api/v1/repos/{target_owner}/{repo_name}"
+    quoted_owner = urllib.parse.quote(target_owner, safe="")
+    quoted_repo = urllib.parse.quote(repo_name, safe="")
+    del_url = f"{base_url}/api/v1/repos/{quoted_owner}/{quoted_repo}"
     req = urllib.request.Request(
         del_url,
         method="DELETE",

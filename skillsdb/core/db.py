@@ -35,6 +35,10 @@ def _is_network_path(db_path: Path) -> bool:
     """
     try:
         raw = os.path.abspath(str(db_path))
+        if raw.startswith("\\\\?\\UNC\\"):
+            return True
+        if raw.startswith("\\\\?\\"):
+            raw = raw[4:]
         if raw.startswith("\\\\"):
             return True
         drive, _ = os.path.splitdrive(raw)
@@ -62,6 +66,11 @@ def _apply_pragmas(conn: sqlite3.Connection, is_project_db: bool = False, is_net
     except sqlite3.Error:
         pass
     try:
+        if is_project_db:
+            conn.execute("PRAGMA auto_vacuum = INCREMENTAL;")
+    except sqlite3.Error:
+        pass
+    try:
         if is_network:
             conn.execute("PRAGMA journal_mode = TRUNCATE;")
         else:
@@ -78,8 +87,6 @@ def _apply_pragmas(conn: sqlite3.Connection, is_project_db: bool = False, is_net
             conn.execute("PRAGMA temp_store = MEMORY;")
             conn.execute("PRAGMA mmap_size = 67108864;")
         conn.execute("PRAGMA foreign_keys = ON;")
-        if is_project_db:
-            conn.execute("PRAGMA auto_vacuum = INCREMENTAL;")
     except sqlite3.Error:
         pass
 
@@ -110,9 +117,9 @@ def managed_connection(
     rolls back on exception, and always closes the underlying file handle on exit.
     """
     conn = get_connection(db_path=db_path, is_project_db=is_project_db)
-    if init_schema and not is_project_db:
-        init_db(conn)
     try:
+        if init_schema and not is_project_db:
+            init_db(conn)
         yield conn
         if conn.in_transaction:
             conn.commit()
@@ -173,19 +180,22 @@ def init_db(conn: sqlite3.Connection) -> None:
     Ensures tables and FTS5 virtual tables exist in customizations.db.
     Performs a fast read-only check first so read invocations acquire zero write locks.
     """
-    db_key = None
+    db_file_path = None
     try:
         row = conn.execute("PRAGMA database_list;").fetchone()
         if row and row[2]:
-            db_key = f"{os.path.abspath(row[2])}:{os.path.getsize(row[2]) if os.path.exists(row[2]) else 0}"
-            if db_key in _VERIFIED_CENTRAL_DBS:
+            db_file_path = os.path.abspath(row[2])
+            fsize = os.path.getsize(db_file_path) if os.path.exists(db_file_path) else 0
+            if fsize > 0 and f"{db_file_path}:{fsize}" in _VERIFIED_CENTRAL_DBS:
                 return
     except sqlite3.Error:
         pass
 
     if _central_schema_ready(conn):
-        if db_key:
-            _VERIFIED_CENTRAL_DBS.add(db_key)
+        if db_file_path and os.path.exists(db_file_path):
+            fsize = os.path.getsize(db_file_path)
+            if fsize > 0:
+                _VERIFIED_CENTRAL_DBS.add(f"{db_file_path}:{fsize}")
         return
 
     cursor = conn.cursor()
@@ -271,8 +281,13 @@ def init_db(conn: sqlite3.Connection) -> None:
     """)
 
     conn.commit()
-    if db_key:
-        _VERIFIED_CENTRAL_DBS.add(db_key)
+    if db_file_path and os.path.exists(db_file_path):
+        try:
+            fsize = os.path.getsize(db_file_path)
+            if fsize > 0:
+                _VERIFIED_CENTRAL_DBS.add(f"{db_file_path}:{fsize}")
+        except OSError:
+            pass
 
 
 def checkpoint_wal(db_path: Path = DB_PATH, mode: str = "PASSIVE") -> bool:

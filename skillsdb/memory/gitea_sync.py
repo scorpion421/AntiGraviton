@@ -79,8 +79,8 @@ def ensure_gitea_online(
     is unreachable, automatically attempts to start the service across Windows (sc.exe),
     Linux (systemd --user), and macOS (launchctl) and optionally flushes pending commits.
     """
-    svc_status = get_gitea_service_status()
-    online, v_info = check_gitea_health(timeout=1.5)
+    svc_status = get_gitea_service_status(db_path=db_path)
+    online, v_info = check_gitea_health(timeout=1.5, db_path=db_path)
     recovered = False
     flushed_repos: List[str] = []
 
@@ -103,11 +103,11 @@ def ensure_gitea_online(
                 if start_res.returncode == 0 or "1056" in start_res.stdout:
                     for _ in range(6):
                         time.sleep(0.8)
-                        online, v_info = check_gitea_health(timeout=1.0)
+                        online, v_info = check_gitea_health(timeout=1.0, db_path=db_path)
                         if online:
                             recovered = True
                             break
-                    svc_status = get_gitea_service_status()
+                    svc_status = get_gitea_service_status(db_path=db_path)
             except Exception:
                 pass
         else:
@@ -129,11 +129,11 @@ def ensure_gitea_online(
                 if started:
                     for _ in range(6):
                         time.sleep(0.8)
-                        online, v_info = check_gitea_health(timeout=1.0)
+                        online, v_info = check_gitea_health(timeout=1.0, db_path=db_path)
                         if online:
                             recovered = True
                             break
-                    svc_status = get_gitea_service_status()
+                    svc_status = get_gitea_service_status(db_path=db_path)
             except Exception:
                 pass
 
@@ -189,7 +189,7 @@ def _get_configured_gitea_repo_url(project_root: Path) -> Optional[str]:
         raw = git_cfg.read_text(encoding="utf-8", errors="ignore")
         cfg = get_gitea_config()
         base_url = cfg.get("url", "http://localhost:3000").rstrip("/")
-        for m in re.finditer(r"url\s*=\s*(https?://(?:[^@/\s]+@)?([^/\s]+)/([^/\s]+)/([^\s/]+?)(?:\.git)?)\s*$", raw, re.MULTILINE):
+        for m in re.finditer(r"^\s*url\s*=\s*(https?://(?:[^@/\s]+@)?([^/\s]+)/([^/\s]+)/([^\s/]+?)(?:\.git)?)\s*$", raw, re.MULTILINE):
             _, host_port, owner, rname = m.groups()
             if "localhost:3000" in host_port or "127.0.0.1:3000" in host_port or host_port in base_url:
                 return f"{base_url}/{owner}/{rname}"
@@ -198,12 +198,12 @@ def _get_configured_gitea_repo_url(project_root: Path) -> Optional[str]:
     return None
 
 
-def get_workspace_git_telemetry(project_root: Path, flush_pending: bool = False) -> Optional[str]:
+def get_workspace_git_telemetry(project_root: Path, flush_pending: bool = False, auto_recover: bool = True) -> Optional[str]:
     """
     Returns a compact Git & Gitea status string (~20 tokens), auto-recovers the Gitea
-    service if STOPPED, flushes any pending unpushed commits upon recovery or when
-    flush_pending=True, and emits an unmissable alert if Gitea is offline or if a repository
-    name collision exists on Gitea.
+    service if STOPPED (when auto_recover=True), flushes any pending unpushed commits upon
+    recovery or when flush_pending=True, and emits an unmissable alert if Gitea is offline
+    or if a repository name collision exists on Gitea.
     """
     if not project_root or not (project_root / ".git" / "HEAD").exists():
         return None
@@ -214,7 +214,7 @@ def get_workspace_git_telemetry(project_root: Path, flush_pending: bool = False)
     gitea_online = False
     if not _is_temp_workspace(project_root):
         try:
-            health = ensure_gitea_online(auto_recover=True, flush_pending=flush_pending)
+            health = ensure_gitea_online(auto_recover=auto_recover, flush_pending=flush_pending)
             gitea_online = bool(health.get("online"))
             if not gitea_online:
                 svc_st = health.get("service_status", "STOPPED")
@@ -787,7 +787,7 @@ def save_code_commit(
             if rev_res.returncode == 0:
                 result["commit_hash"] = rev_res.stdout.strip()
 
-            if explicit_message and result["commit_hash"]:
+            if explicit_message and result["commit_hash"] and _has_unpushed_commits(project_root):
                 subj_res = subprocess.run(
                     ["git", "log", "-1", "--format=%s%n%ct%n%B"],
                     cwd=str(project_root),
@@ -981,6 +981,23 @@ def publish_gitea_release(
             allow_existing=True,
             _skip_auto_release=True,
         )
+        post_head_res = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+        )
+        post_head_sha = post_head_res.stdout.strip() if post_head_res.returncode == 0 else ""
+        if existing_tag_sha and post_head_sha and existing_tag_sha != post_head_sha:
+            print(
+                f"  [SEMVER IMMUTABILITY ERROR] Release tag '{final_tag}' already exists at commit {existing_tag_sha[:7]} "
+                f"(current HEAD after sync is {post_head_sha[:7]})."
+            )
+            print(
+                "  Never overwrite an already published release version in place! "
+                "Increment VERSION and CHANGELOG.md to a new SemVer version (MAJOR.MINOR.PATCH) and publish a new release."
+            )
+            return None
 
     if not final_notes:
         log_res = subprocess.run(
@@ -1190,7 +1207,7 @@ def sync_workspace(
                 print(f"  [OK] Already up to date (HEAD: {result.get('commit_hash', '')[:7]} | {repo_url})")
 
         if push and not _skip_auto_release and not _is_temp_workspace(project_root) and (project_root / "CHANGELOG.md").exists():
-            rel_tags = sync_changelog_releases(project_root, sync_github=sync_github)
+            rel_tags = sync_changelog_releases(project_root, sync_github=sync_github, repo_name=target_name)
             if rel_tags:
                 print(f"  [OK] Synced Keep a Changelog releases: {', '.join(rel_tags)}")
             auto_tag, _, _ = _extract_changelog_section(project_root)

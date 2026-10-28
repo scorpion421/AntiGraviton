@@ -92,11 +92,11 @@ def check_update(quiet: bool = False) -> dict:
 
     suite_tag = info["tag"]
     latest_engine = info.get("skillsdb_version") or suite_tag
-    local_suite = globals().get("__suite_version__", "1.4.2")
+    local_suite = globals().get("__suite_version__", "1.4.3")
     repo_root = find_repo_root()
     if repo_root and (repo_root / "VERSION").exists():
         try:
-            v_txt = (repo_root / "VERSION").read_text(encoding="utf-8").strip().lstrip("v")
+            v_txt = (repo_root / "VERSION").read_text(encoding="utf-8-sig").strip().lstrip("v")
             if v_txt:
                 local_suite = v_txt
         except Exception:
@@ -144,40 +144,81 @@ def check_update(quiet: bool = False) -> dict:
 def merge_upstream_database(local_db_path: Path, upstream_db_path: Path) -> dict:
     """Non-destructive differential merge preserving all user-learned rules and runtime configuration."""
     with managed_connection(local_db_path) as conn:
+        init_db(conn)
         cur = conn.cursor()
 
         cur.execute("SELECT COUNT(*) FROM rules WHERE category = 'learned';")
         learned_before = cur.fetchone()[0]
 
         cur.execute("ATTACH DATABASE ? AS upstream;", (str(upstream_db_path),))
+        try:
+            cur.execute("""
+            INSERT OR REPLACE INTO skills (name, plugin_name, category, is_active, description, content, token_estimate, updated_at)
+            SELECT name, plugin_name, category, is_active, description, content, token_estimate, updated_at
+            FROM upstream.skills;
+            """)
+            merged_skills = cur.rowcount
 
-        cur.execute("""
-        INSERT OR REPLACE INTO skills (name, plugin_name, category, is_active, description, content, token_estimate, updated_at)
-        SELECT name, plugin_name, category, is_active, description, content, token_estimate, updated_at
-        FROM upstream.skills;
-        """)
-        merged_skills = cur.rowcount
+            cur.execute("""
+            INSERT OR REPLACE INTO rules (key, name, category, scope, is_active, summary, content, token_estimate, updated_at)
+            SELECT key, name, category, scope, is_active, summary, content, token_estimate, updated_at
+            FROM upstream.rules
+            WHERE category != 'learned';
+            """)
+            merged_rules = cur.rowcount
 
-        cur.execute("""
-        INSERT OR REPLACE INTO rules (key, name, category, scope, is_active, summary, content, token_estimate, updated_at)
-        SELECT key, name, category, scope, is_active, summary, content, token_estimate, updated_at
-        FROM upstream.rules
-        WHERE category != 'learned';
-        """)
-        merged_rules = cur.rowcount
+            cur.execute("SELECT name FROM upstream.sqlite_master WHERE type='table' AND name='synonym_synapses';")
+            if cur.fetchone():
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS synonym_synapses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    term TEXT UNIQUE NOT NULL,
+                    synonyms TEXT NOT NULL,
+                    language TEXT DEFAULT 'de',
+                    category TEXT DEFAULT 'general'
+                );
+                """)
+                main_cols = {r[1] for r in cur.execute("PRAGMA main.table_info(synonym_synapses);").fetchall()}
+                up_cols = {r[1] for r in cur.execute("PRAGMA upstream.table_info(synonym_synapses);").fetchall()}
+                if "synonyms" in main_cols and "synonyms" in up_cols:
+                    cur.execute("""
+                    INSERT INTO synonym_synapses (term, synonyms, language, category)
+                    SELECT term, synonyms, COALESCE(language, 'de'), COALESCE(category, 'general')
+                    FROM upstream.synonym_synapses
+                    WHERE 1=1
+                    ON CONFLICT(term) DO UPDATE SET synonyms = excluded.synonyms;
+                    """)
+                elif "expansions" in main_cols and "expansions" in up_cols:
+                    cur.execute("""
+                    INSERT INTO synonym_synapses (term, expansions)
+                    SELECT term, expansions FROM upstream.synonym_synapses
+                    WHERE 1=1
+                    ON CONFLICT(term) DO UPDATE SET expansions = excluded.expansions;
+                    """)
 
-        cur.execute("INSERT INTO rules_fts(rules_fts) VALUES ('rebuild');")
-        cur.execute("INSERT INTO skills_fts(skills_fts) VALUES ('rebuild');")
+            cur.execute("INSERT INTO rules_fts(rules_fts) VALUES ('rebuild');")
+            cur.execute("INSERT INTO skills_fts(skills_fts) VALUES ('rebuild');")
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='synonym_fts';")
+            if cur.fetchone():
+                cur.execute("INSERT INTO synonym_fts(synonym_fts) VALUES ('rebuild');")
 
-        conn.commit()
-        cur.execute("DETACH DATABASE upstream;")
+            cur.execute("SELECT COUNT(*) FROM rules WHERE category = 'learned';")
+            learned_after = cur.fetchone()[0]
 
-        cur.execute("SELECT COUNT(*) FROM rules WHERE category = 'learned';")
-        learned_after = cur.fetchone()[0]
+            if learned_after < learned_before:
+                conn.rollback()
+                raise RuntimeError("Differential merge aborted: User-learned rules count dropped! Rolled back.")
 
-        if learned_after < learned_before:
-            conn.rollback()
-            raise RuntimeError("Differential merge aborted: User-learned rules count dropped! Rolled back.")
+            conn.commit()
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        finally:
+            try:
+                cur.execute("DETACH DATABASE upstream;")
+            except sqlite3.Error:
+                pass
 
         try:
             conn.execute("PRAGMA wal_checkpoint(PASSIVE);")
@@ -296,12 +337,12 @@ def update_plugin(force: bool = False):
 def parse_skill_frontmatter(content: str) -> tuple[str, str]:
     name = None
     description = None
-    m = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
+    m = re.match(r"^---\s*\r?\n(.*?)\r?\n---", content, re.DOTALL)
     if m:
         frontmatter = m.group(1)
         name_match = re.search(r"^name:\s*(.+)$", frontmatter, re.MULTILINE)
         if name_match:
-            name = name_match.group(1).strip()
+            name = name_match.group(1).strip().strip("'\"")
         desc_match = re.search(r"^description:\s*(?:[>|][-+]?\s*\r?\n)?(.*?)(?=\r?\n[a-zA-Z0-9_-]+:|$)", frontmatter, re.DOTALL | re.MULTILINE)
         if desc_match:
             desc_raw = desc_match.group(1).strip()
@@ -461,7 +502,7 @@ def remove_item(conn: sqlite3.Connection, item_type: str, identifier: str):
         row = cursor.fetchone()
         if row:
             cursor.execute("DELETE FROM skills WHERE id = ?;", (row["id"],))
-            cursor.execute("DELETE FROM skills_fts WHERE rowid = ?;", (row["id"],))
+            cursor.execute("INSERT INTO skills_fts(skills_fts) VALUES ('rebuild');")
             conn.commit()
             print(f"Skill '{identifier}' removed.")
         else:
@@ -471,7 +512,7 @@ def remove_item(conn: sqlite3.Connection, item_type: str, identifier: str):
         row = cursor.fetchone()
         if row:
             cursor.execute("DELETE FROM rules WHERE id = ?;", (row["id"],))
-            cursor.execute("DELETE FROM rules_fts WHERE rowid = ?;", (row["id"],))
+            cursor.execute("INSERT INTO rules_fts(rules_fts) VALUES ('rebuild');")
             conn.commit()
             print(f"Rule '{identifier}' removed.")
         else:
@@ -576,9 +617,10 @@ def doctor(conn: sqlite3.Connection):
     # 5. Global Git Ignore
     try:
         chk = subprocess.run(["git", "config", "--global", "core.excludesfile"], capture_output=True, text=True)
-        ign_path = chk.stdout.strip()
-        if ign_path and Path(ign_path).exists():
-            txt = Path(ign_path).read_text(encoding="utf-8", errors="ignore")
+        ign_path_str = chk.stdout.strip()
+        ign_path = Path(ign_path_str).expanduser() if ign_path_str else None
+        if ign_path and ign_path.exists():
+            txt = ign_path.read_text(encoding="utf-8", errors="ignore")
             if ".agents/memory.db" in txt:
                 print(f"[OK] Global Git Ignore: Configured in {ign_path}")
             else:

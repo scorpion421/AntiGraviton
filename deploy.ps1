@@ -67,6 +67,10 @@ if (-not (Test-Path $sourceDb) -or -not (Test-Path $sourceMgr)) {
     throw "Source database files not found in $SourceDir\database"
 }
 
+$sourcePkg = Join-Path $SourceDir "skillsdb"
+if (Test-Path $sourcePkg) {
+    Copy-Item $sourcePkg -Destination (Join-Path $targetDbDir "skillsdb") -Recurse -Force
+}
 Copy-Item $sourceDb -Destination (Join-Path $targetDbDir "customizations.db") -Force
 Copy-Item $sourceMgr -Destination (Join-Path $targetDbDir "db_manager.py") -Force
 Write-Host "      Database deployed to: $targetDbDir"
@@ -75,7 +79,7 @@ Write-Host "      Database deployed to: $targetDbDir"
 $targetBinDir = Join-Path $TargetDir "antigravity\bin"
 New-Item -ItemType Directory -Force -Path $targetBinDir | Out-Null
 $cmdPath = Join-Path $targetBinDir "skillsdb.cmd"
-$cmdContent = "@echo off`r`npython `"%USERPROFILE%\.gemini\database\db_manager.py`" %*`r`n"
+$cmdContent = "@echo off`r`nset `"PATH=%USERPROFILE%\.local\bin;%PATH%`"`r`npython `"%USERPROFILE%\.gemini\database\db_manager.py`" %*`r`n"
 Set-Content -Path $cmdPath -Value $cmdContent -Encoding ASCII
 Write-Host "      Global CLI wrapper deployed to: $cmdPath"
 

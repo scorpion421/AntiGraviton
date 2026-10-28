@@ -87,7 +87,7 @@ def _is_excluded_workspace_path(project_root: Path, allow_temp_subdirs: bool = F
                 exe_path = Path(os.path.abspath(agent_exe))
                 if len(exe_path.parents) >= 3:
                     app_install_root = exe_path.parents[2]
-                    if app_install_root != home_abs:
+                    if app_install_root != home_abs and len(app_install_root.parts) >= 2:
                         abs_root.relative_to(app_install_root)
                         return True
             except ValueError:
@@ -474,6 +474,8 @@ def discover_all_workspaces(base_dir: Optional[Path] = None, db_path: Path = DB_
             if not p.exists() or not p.is_dir():
                 return
             abs_p = Path(os.path.abspath(str(p)))
+            if _is_excluded_workspace_path(abs_p):
+                return
             norm_key = str(abs_p).lower()
             if norm_key in seen_resolved:
                 return

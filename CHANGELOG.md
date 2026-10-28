@@ -5,6 +5,33 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.3] - 2026-10-28
+
+### Added
+- **Safe FTS5 query sanitizer and exact-match ranking (`skillsdb/search/synonyms.py`, `skillsdb/search/fts.py`, `skillsdb/core/concurrency.py`, `skillsdb/memory/project_memory.py`, `v3.7.3`)**:
+  - Added `build_safe_fts_query()` and `_FTS5_RESERVED_WORDS` to sanitize and double-quote FTS5 search tokens so queries containing hyphens (e.g. `Komposita-Regeln`), punctuation, empty whitespace, or reserved operators (`AND`, `OR`, `NOT`, `NEAR`) never raise `sqlite3.OperationalError`.
+  - Added exact-name match prioritization (`ORDER BY CASE WHEN name = ? THEN 0 ELSE 1 END`) across `get_skill()`, `get_rule()`, `fetch_single_skill()`, and `benchmark_concurrency()`.
+  - Updated `extract_skill_sections()` to track fenced Markdown code blocks (` ``` ` / `~~~`) so `# comments` inside embedded code blocks are never misparsed as Markdown section headings.
+- **Native MCP JSON-RPC 2.0 `resources/list`, `prompts/list`, and tool alias support (`skillsdb/platform/mcp_server.py`)**:
+  - Added handlers for `resources/list` and `prompts/list`, added `skillsdb_suggest` / `skillsdb_rules` / `skillsdb_guardrail` tool aliases matching built-in agent templates, and ensured JSON-RPC 2.0 error responses (`-32603`) are emitted if an exception occurs on a request with an `id`.
+
+### Changed
+- **Fill-in-the-Middle (`FIM`) payload completeness and expanded symbol discovery (`skillsdb/core/fim.py`)**:
+  - Added `"middle"` alongside `"target_line_content"` in `slice_fim()`, clamped out-of-range line numbers safely, and expanded `slice_fim_symbol()` regex patterns to match `async def`, `func`, `fn`, `struct`, and `enum` declarations.
+
+### Fixed
+- **Agent handoff read/format key alignment and full context hydration (`skillsdb/memory/handoff.py`)**:
+  - Fixed `read_handoff()` and `format_handoff_block()` so `skillsdb handoff read <id>` populates `handoff_id`, `active_facts`, and `active_decisions`, and gracefully formats handoffs even if the underlying task was archived or deleted.
+- **Episodic project memory FTS5 synchronization, `:memory:` path resolution, and hook state self-healing (`skillsdb/memory/project_memory.py`, `skillsdb/memory/writer_queue.py`)**:
+  - Added `_resolve_db_file()` so `:memory:` SQLite connections never resolve `PRAGMA database_list` to `Path(".")`.
+  - Synchronized `project_memory_fts` across `mem_save_fact()`, `mem_deprecate_fact()`, `mem_task_update()`, `mem_task_clear()`, `mem_compact()`, `verify_task()`, and `flush_journals()` to eliminate duplicate or stale FTS5 entries.
+  - Hardened `handle_pre_invocation_hook()` to self-heal corrupted `skillsdb_hook_state.json` files and pass `auto_commit=False` during Turn-1 auto-compaction so background task pruning never creates unexpected Git commits.
+- **Differential database merge transaction safety and `synonym_synapses` schema alignment (`skillsdb/updater/merger.py`, `deploy.py`)**:
+  - Fixed `deploy.py` (`safe_deploy_database()`) and `merge_upstream_database()` to use the canonical `synonym_synapses (term, expansions)` schema and verify `learned_after >= learned_before` before committing, and updated `remove_item()` to rebuild external-content FTS5 tables (`INSERT INTO skills_fts(skills_fts) VALUES ('rebuild')`).
+- **Model detector decimal version regex, local extended-length path handling, and bundler import precision (`skillsdb/core/detector.py`, `skillsdb/core/db.py`, `skillsdb/core/guardrails.py`, `build.py`, `plugin/hooks.json`)**:
+  - Updated `<USER_SETTINGS_CHANGE>` regex in `detector.py` to capture model names containing decimal points (`Gemini 3.8 Flash.`, `Claude Opus 5.5.`), and excluded local Windows extended-length paths (`\\?\C:\...`) from `_is_network_path()` in `db.py`.
+  - Updated `guardrails.py` so `fix_file()` skips test suites (`tests/test_*.py`) and `fix_text()` preserves negative rule examples (`never '<compound>'`), quoted `%USERPROFILE%` in `plugin/hooks.json`, and tightened `build.py` relative-import stripping so docstrings starting with `from .git/config` are preserved verbatim.
+
 ## [1.4.2] - 2026-10-28
 
 ### Added
