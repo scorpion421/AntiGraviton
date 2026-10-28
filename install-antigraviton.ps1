@@ -1,13 +1,13 @@
 <#
 .SYNOPSIS
-    Unified One-Command Installer for the AntiGraviton Complete Suite (v1.4.4).
+    Unified One-Command Installer for the AntiGraviton Complete Suite (v1.4.5).
 
 .DESCRIPTION
     Deploys the complete AntiGraviton environment for Google Antigravity IDE across
     all three target scenarios (Enterprise AD/UNC, Desktop with scheduled backup, and Laptop/Secondary Drive):
     0. Automatic PowerShell 7 (pwsh) & Python 3 runtime bootstrap + IDE/Windows Terminal default shell configuration
     1. Non-destructive upgrade preservation of existing runtime_config, Gitea tokens, learned workspaces, and user-learned rules
-    2. SkillsDB Context & Memory Engine (v3.7.4) + customizations-db Plugin + UTF-8 manifest deployment
+    2. SkillsDB Context & Memory Engine (v3.7.5) + customizations-db Plugin + UTF-8 manifest deployment
     3. Antigravity Gitea Local Windows Service (v1.1.2) with 3-tier elevation handling (direct admin, optional DPAPI, or UAC),
        secondary drive NTFS ACL setup, SCM auto-recovery, non-elevated start/stop permissions, and optional 03:00 backup task
     4. Zero-touch local Gitea Admin user (with optional explicit password) & API Token provisioning into SkillsDB
@@ -90,7 +90,7 @@ $ProgressPreference = "SilentlyContinue"
 
 $suiteRoot = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
 $versionFile = Join-Path $suiteRoot "VERSION"
-$suiteVersion = if (Test-Path $versionFile) { (Get-Content $versionFile -Raw).Trim() } else { "1.4.4" }
+$suiteVersion = if (Test-Path $versionFile) { (Get-Content $versionFile -Raw).Trim() } else { "1.4.5" }
 $userHome = if ($env:USERPROFILE) { $env:USERPROFILE } else { [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile) }
 $geminiDir = Join-Path $userHome ".gemini"
 $targetDbPath = Join-Path $geminiDir "database\customizations.db"
@@ -238,9 +238,9 @@ try:
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
     try:
-        cur.execute("SELECT key, value FROM runtime_config")
-        for k, v in cur.fetchall():
-            state["runtime_config"][k] = v
+        cur.execute("SELECT key, value, updated_at FROM runtime_config")
+        for k, v, ts in cur.fetchall():
+            state["runtime_config"][k] = [v, ts]
     except Exception:
         pass
     try:
@@ -263,7 +263,7 @@ except Exception as e:
 # ---------------------------------------------------------------------------
 # STEP 2: Deploy SkillsDB Core & Antigravity Plugin
 # ---------------------------------------------------------------------------
-Write-Host "[2/5] Deploying SkillsDB Engine (v3.7.4) and customizations-db Plugin..."
+Write-Host "[2/5] Deploying SkillsDB Engine (v3.7.5) and customizations-db Plugin..."
 $deployPy = Join-Path $suiteRoot "deploy.py"
 $deployPs1 = Join-Path $suiteRoot "deploy.ps1"
 
@@ -294,13 +294,36 @@ try:
         state = json.load(f)
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
-    for k, v in state.get("runtime_config", {}).items():
+    sys.path.insert(0, os.path.dirname(db_path))
+    try:
+        from db_manager import _infer_workspace_last_active_iso
+    except Exception:
+        _infer_workspace_last_active_iso = None
+    for k, entry in state.get("runtime_config", {}).items():
+        if isinstance(entry, list) and len(entry) >= 2:
+            v, ts = entry[0], entry[1]
+        else:
+            v, ts = entry, None
         if v and v not in ("{}", "[]"):
-            cur.execute(
-                "INSERT INTO runtime_config (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP",
-                (k, v)
-            )
+            if str(k).startswith("workspace:") and _infer_workspace_last_active_iso:
+                if not ts or str(ts).startswith("2026-10-28 12:18") or str(ts).startswith("2026-10-28 10:14"):
+                    try:
+                        from pathlib import Path as _P
+                        ts = _infer_workspace_last_active_iso(_P(str(v)))
+                    except Exception:
+                        pass
+            if ts:
+                cur.execute(
+                    "INSERT INTO runtime_config (key, value, updated_at) VALUES (?, ?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                    (k, v, ts)
+                )
+            else:
+                cur.execute(
+                    "INSERT INTO runtime_config (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP",
+                    (k, v)
+                )
     learned_rules = state.get("learned_rules", [])
     for r in learned_rules:
         cur.execute(
@@ -640,7 +663,7 @@ Write-Host "============================================================" -Foreg
 Write-Host "AntiGraviton Complete Suite v$suiteVersion is active!" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host "1. Active Core Capabilities:" -ForegroundColor Green
-Write-Host "   - SkillsDB Engine (v3.7.4): ~95% token reduction via on-demand FTS5 micro-skills"
+Write-Host "   - SkillsDB Engine (v3.7.5): ~95% token reduction via on-demand FTS5 micro-skills"
 Write-Host "   - Episodic Project Memory : .agents/memory.db (decisions, facts, tasks, snapshots)"
 Write-Host "   - Local Gitea Service     : http://127.0.0.1:$GiteaPort (Owner: $GiteaAdminUser, auto-recovery active)"
 Write-Host "   - Deterministic Guardrails: Secret-leak prevention & formatting invariants"

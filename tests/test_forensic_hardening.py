@@ -197,5 +197,155 @@ class TestForensicHardeningV143(unittest.TestCase):
                 self.assertFalse(tokens[1].startswith('"'))
 
 
+    def test_conversation_epoch_slicing_and_cross_project_guard(self):
+        import sys
+        import uuid
+        from skillsdb.memory.project_memory import (
+            analyze_conversation_epochs_and_scope,
+            calculate_transcript_savings,
+            handle_pre_invocation_hook,
+        )
+        from skillsdb.memory.gitea_config import (
+            learn_workspace,
+            get_learned_workspaces_with_timestamps,
+        )
+
+        scratch_base = Path(__file__).resolve().parent / "scratch"
+        scratch_base.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=str(scratch_base), prefix="epoch_suite_") as tmp:
+            root = Path(tmp)
+            db_file = root / "test_customizations.db"
+            with managed_connection(db_file) as c:
+                init_db(c)
+
+            ws_active = root / "AntiGraviton"
+            ws_foreign = root / "Vivaldi_Enterprise_PiP" / "picture-in-picture"
+            (ws_active / ".agents").mkdir(parents=True, exist_ok=True)
+            (ws_foreign / ".agents").mkdir(parents=True, exist_ok=True)
+            (ws_active / "README.md").write_text("# AntiGraviton\n", encoding="utf-8")
+            (ws_foreign / "README.md").write_text("# Vivaldi PiP\n", encoding="utf-8")
+
+            learn_workspace(ws_active, db_path=db_file, touch_timestamp=True)
+            learn_workspace(ws_foreign, db_path=db_file, touch_timestamp=False)
+
+            # Force a known historical timestamp on ws_foreign and verify passive touch_timestamp=False preserves it
+            with managed_connection(db_file) as c:
+                c.execute(
+                    "UPDATE runtime_config SET updated_at = '2026-10-21 11:50:51' WHERE key LIKE 'workspace:%picture-in-picture%';"
+                )
+                c.commit()
+            learn_workspace(ws_foreign, db_path=db_file, touch_timestamp=False)
+            ws_with_ts = get_learned_workspaces_with_timestamps(db_path=db_file)
+            self.assertIn("picture-in-picture", ws_with_ts)
+            self.assertEqual(ws_with_ts["picture-in-picture"][1], "2026-10-21")
+
+            # Create multi-epoch transcript across 2026-10-21 and 2026-10-28
+            brain_dir = root / "brain"
+            cid = f"test-epoch-{uuid.uuid4()}"
+            log_dir = brain_dir / cid / ".system_generated" / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            tfile = log_dir / "transcript.jsonl"
+            lines_ep1 = [
+                json.dumps({
+                    "step_index": 10,
+                    "type": "USER_INPUT",
+                    "source": "USER_EXPLICIT",
+                    "created_at": "2026-10-21T11:50:51Z",
+                    "content": "Where is config.json for Vivaldi picture-in-picture?",
+                }),
+                json.dumps({
+                    "step_index": 11,
+                    "type": "PLANNER_RESPONSE",
+                    "source": "MODEL",
+                    "created_at": "2026-10-21T11:51:10Z",
+                    "content": "Answered Vivaldi question.",
+                }),
+            ]
+            tfile.write_text("\n".join(lines_ep1) + "\n", encoding="utf-8")
+
+            # Hook Call 1 in Epoch 1: injects Turn-1 guardrails
+            payload = {
+                "conversationId": cid,
+                "invocationNum": 1,
+                "workspacePaths": [str(ws_active)],
+                "brainDir": str(brain_dir),
+                "dbPath": str(db_file),
+            }
+            old_stdin, old_stdout = sys.stdin, sys.stdout
+            try:
+                sys.stdin = io.StringIO(json.dumps(payload))
+                out1 = io.StringIO()
+                sys.stdout = out1
+                handle_pre_invocation_hook()
+                res1 = json.loads(out1.getvalue())
+                self.assertEqual(len(res1.get("injectSteps", [])), 1)
+
+                # Hook Call 2 in same Epoch 1: deduplicated (empty injectSteps)
+                sys.stdin = io.StringIO(json.dumps(payload))
+                out2 = io.StringIO()
+                sys.stdout = out2
+                handle_pre_invocation_hook()
+                res2 = json.loads(out2.getvalue())
+                self.assertEqual(res2.get("injectSteps"), [])
+
+                # Append Epoch 2 on 2026-10-28 to transcript.jsonl
+                lines_ep2 = [
+                    json.dumps({
+                        "step_index": 50,
+                        "type": "USER_INPUT",
+                        "source": "USER_EXPLICIT",
+                        "created_at": "2026-10-28T13:00:00Z",
+                        "content": "What did we save today with AntiGraviton?",
+                    }),
+                    json.dumps({
+                        "step_index": 51,
+                        "type": "PLANNER_RESPONSE",
+                        "source": "MODEL",
+                        "created_at": "2026-10-28T13:00:15Z",
+                        "content": "Computed today savings.",
+                    }),
+                ]
+                with open(tfile, "a", encoding="utf-8") as f:
+                    f.write("\n".join(lines_ep2) + "\n")
+
+                ep_info = analyze_conversation_epochs_and_scope(
+                    cid=cid,
+                    active_workspace=ws_active,
+                    db_path=db_file,
+                    brain_dir=brain_dir,
+                )
+                self.assertEqual(ep_info["epoch_count"], 2)
+                self.assertEqual(ep_info["active_epoch"]["date"], "2026-10-28")
+                self.assertEqual(len(ep_info["foreign_project_mentions"]), 1)
+                self.assertEqual(ep_info["foreign_project_mentions"][0]["date"], "2026-10-21")
+                self.assertIn("picture-in-picture", ep_info["foreign_project_mentions"][0]["project"])
+
+                # Hook Call 3 in new Epoch 2: automatically re-fires because epoch_key advanced!
+                sys.stdin = io.StringIO(json.dumps(payload))
+                out3 = io.StringIO()
+                sys.stdout = out3
+                handle_pre_invocation_hook()
+                res3 = json.loads(out3.getvalue())
+                self.assertEqual(len(res3.get("injectSteps", [])), 1)
+                msg3 = res3["injectSteps"][0]["ephemeralMessage"]
+                self.assertIn("[TEMPORAL & WORKSPACE ISOLATION ANCHOR]", msg3)
+
+                self.assertIn("[CROSS-PROJECT CONTAMINATION GUARD]", msg3)
+
+                self.assertIn("picture-in-picture", msg3)
+                self.assertIn("[CROSS-PROJECT CONTAMINATION GUARD]", msg3)
+                self.assertIn("picture-in-picture", msg3)
+
+                # Verify date-scoped vs cumulative savings calculation
+                sav = calculate_transcript_savings(target_date="2026-10-28", brain_dir=brain_dir)
+                self.assertIsNotNone(sav)
+                self.assertEqual(sav["model_turns"], 2)
+                self.assertEqual(sav["day_model_turns"], 1)
+                self.assertEqual(sav["day_steps"], 2)
+            finally:
+                sys.stdin, sys.stdout = old_stdin, old_stdout
+
+
 if __name__ == "__main__":
     unittest.main()
+

@@ -208,12 +208,42 @@ def _scrub_workspace_git_config_credentials(project_root: Path, db_path: Path = 
     return False
 
 
-def learn_workspace(project_root: Path, db_path: Path = DB_PATH) -> Optional[str]:
+def _infer_workspace_last_active_iso(ws_path: Path) -> str:
+    """Infers the real last-active ISO-8601 UTC timestamp of a workspace from its .agents/memory.db, .git/logs/HEAD, or source files."""
+    best_mtime = 0.0
+    try:
+        candidates = [
+            ws_path / ".agents" / "memory.db",
+            ws_path / ".git" / "logs" / "HEAD",
+            ws_path / ".git" / "index",
+            ws_path / ".git" / "HEAD",
+        ]
+        for c in candidates:
+            if c.exists():
+                mt = c.stat().st_mtime
+                if mt > best_mtime:
+                    best_mtime = mt
+        if best_mtime == 0.0:
+            for item in ws_path.iterdir():
+                if item.name not in (".git", ".agents", "node_modules", "__pycache__"):
+                    mt = item.stat().st_mtime
+                    if mt > best_mtime:
+                        best_mtime = mt
+        if best_mtime == 0.0:
+            best_mtime = ws_path.stat().st_mtime
+    except Exception:
+        pass
+    if best_mtime > 0.0:
+        return datetime.fromtimestamp(best_mtime, tz=timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat()
+
+
+def learn_workspace(project_root: Path, db_path: Path = DB_PATH, touch_timestamp: bool = True) -> Optional[str]:
     """
     Organically learns and persists a project workspace path on demand into runtime_config.
-    If the project moves to a new drive or folder, opening it in Antigravity automatically
-    updates 'workspace:<name>' to the new location. Also scrubs any legacy embedded tokens
-    from .git/config into customizations.db.
+    If touch_timestamp=True (active session work), updates updated_at to current UTC time.
+    If touch_timestamp=False (passive background discovery), preserves existing updated_at
+    or infers the real last-modified timestamp from disk.
     """
     if not project_root or _is_excluded_workspace_path(project_root):
         return None
@@ -243,26 +273,30 @@ def learn_workspace(project_root: Path, db_path: Path = DB_PATH) -> Optional[str
                     new_is_scratch = False
 
                 cur.execute(
-                    "SELECT key, value FROM runtime_config WHERE LOWER(key) = LOWER(?);",
+                    "SELECT key, value, updated_at FROM runtime_config WHERE LOWER(key) = LOWER(?);",
                     (ws_key,),
                 )
                 existing_rows = cur.fetchall()
                 skip_insert = False
-                for ex_key, ex_val in existing_rows:
+                preserved_ts = None
+                for ex_key, ex_val, ex_ts in existing_rows:
                     if new_is_scratch and ex_val and Path(ex_val).exists():
                         try:
                             Path(os.path.abspath(str(ex_val))).relative_to(scratch_abs)
                         except ValueError:
                             skip_insert = True
                             break
+                    if ex_key == ws_key and ex_val == str(abs_root) and ex_ts:
+                        preserved_ts = ex_ts
                     if ex_key != ws_key:
                         execute_with_retry(cur, "DELETE FROM runtime_config WHERE key = ?;", (ex_key,))
 
                 if not skip_insert:
+                    target_ts = now_iso if touch_timestamp else (preserved_ts or _infer_workspace_last_active_iso(abs_root))
                     execute_with_retry(
                         cur,
                         "INSERT OR REPLACE INTO runtime_config (key, value, updated_at) VALUES (?, ?, ?);",
-                        (ws_key, str(abs_root), now_iso),
+                        (ws_key, str(abs_root), target_ts),
                     )
                 conn.commit()
         return str(abs_root)
@@ -485,7 +519,7 @@ def discover_all_workspaces(base_dir: Optional[Path] = None, db_path: Path = DB_
             if has_agents or has_git or has_files:
                 seen_resolved.add(norm_key)
                 workspaces.append(abs_p)
-                learn_workspace(abs_p, db_path=db_path)
+                learn_workspace(abs_p, db_path=db_path, touch_timestamp=False)
         except Exception:
             pass
 
@@ -530,13 +564,33 @@ def discover_all_workspaces(base_dir: Optional[Path] = None, db_path: Path = DB_
     return workspaces
 
 
+def get_learned_workspaces_with_timestamps(db_path: Path = DB_PATH) -> Dict[str, Tuple[str, str]]:
+    """Returns learned workspaces mapped as name -> (path_str, last_active_date_str)."""
+    learned = get_learned_workspaces(db_path=db_path, prune_missing=True)
+    ts_map: Dict[str, str] = {}
+    if db_path and Path(db_path).exists():
+        try:
+            with managed_connection(db_path) as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT key, updated_at FROM runtime_config WHERE key LIKE 'workspace:%';")
+                for k, upd in cur.fetchall():
+                    ts_map[k.split("workspace:", 1)[1]] = (upd or "")[:10]
+        except Exception:
+            pass
+    result: Dict[str, Tuple[str, str]] = {}
+    for name, path_str in learned.items():
+        dt = ts_map.get(name) or _infer_workspace_last_active_iso(Path(path_str))[:10]
+        result[name] = (path_str, dt)
+    return result
+
+
 def gitea_config_summary(auto_detect: bool = False, db_path: Path = DB_PATH):
-    """Displays active Gitea configuration and organically learned project paths."""
+    """Displays active Gitea configuration and organically learned project paths with last-active timestamps."""
     if auto_detect:
         discover_all_workspaces(db_path=db_path)
 
     cfg = get_gitea_config(db_path=db_path)
-    learned = get_learned_workspaces(db_path=db_path, prune_missing=True)
+    learned_ts = get_learned_workspaces_with_timestamps(db_path=db_path)
     tok = cfg.get("token", "")
     masked_tok = f"{tok[:6]}...{tok[-4:]}" if len(tok) > 10 else ("(set)" if tok else "(not set)")
 
@@ -546,7 +600,7 @@ def gitea_config_summary(auto_detect: bool = False, db_path: Path = DB_PATH):
     print(f"Gitea URL:          {cfg.get('url')}")
     print(f"Repository Owner:   {cfg.get('user') or '(auto-learned on init)'}")
     print(f"API Token:          {masked_tok}")
-    print(f"Learned Workspaces: {len(learned)} projects tracked on demand")
-    for name, path_str in sorted(learned.items(), key=lambda x: x[0].lower()):
-        print(f"  * {name:30} -> {path_str}")
+    print(f"Learned Workspaces: {len(learned_ts)} projects tracked on demand")
+    for name, (path_str, dt) in sorted(learned_ts.items(), key=lambda x: x[0].lower()):
+        print(f"  * {name:30} [{dt}] -> {path_str}")
     print("=" * 60)

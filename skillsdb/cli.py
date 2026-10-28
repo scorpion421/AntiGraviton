@@ -85,6 +85,7 @@ from .memory.project_memory import (
     mem_get_context,
     mem_search,
     mem_prune,
+    analyze_conversation_epochs_and_scope,
     handle_pre_invocation_hook,
     stats,
 )
@@ -197,6 +198,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     stats_parser = subparsers.add_parser("stats", help="Show database statistics and token savings")
     stats_parser.add_argument("--savings", action="store_true", help="Display measured token and cost savings")
+    stats_parser.add_argument("--today", action="store_true", help="Highlight today's date-scoped turn and token savings")
+    stats_parser.add_argument("--date", default=None, help="Filter daily activity stats by UTC date (YYYY-MM-DD)")
 
     export_parser = subparsers.add_parser("export-skill", help="Export a skill into a project workspace")
     export_parser.add_argument("name", help="Skill name")
@@ -773,7 +776,7 @@ def main(argv: list[str] = None):
         elif args.command == "list":
             list_all(conn)
         elif args.command == "stats":
-            stats(conn, show_savings=getattr(args, "savings", False))
+            stats(conn, show_savings=getattr(args, "savings", False), target_date=getattr(args, "date", None))
         elif args.command == "export-skill":
             export_skill(conn, args.name, args.target)
         elif args.command == "profile":

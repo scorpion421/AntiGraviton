@@ -54,8 +54,8 @@ if sys.platform == "win32":
 # SECTION: skillsdb.config
 # =====================================================================
 # Ensure UTF-8 output encoding across Windows PowerShell and CMD
-__version__ = "3.7.4"
-__suite_version__ = "1.4.4"
+__version__ = "3.7.5"
+__suite_version__ = "1.4.5"
 
 # Model capability tiers
 TIER_LEAN = "lean"          # Gemini Flash, Flash-Lite, micro-skills, minimal token footprint
@@ -2805,12 +2805,42 @@ def _scrub_workspace_git_config_credentials(project_root: Path, db_path: Path = 
     return False
 
 
-def learn_workspace(project_root: Path, db_path: Path = DB_PATH) -> Optional[str]:
+def _infer_workspace_last_active_iso(ws_path: Path) -> str:
+    """Infers the real last-active ISO-8601 UTC timestamp of a workspace from its .agents/memory.db, .git/logs/HEAD, or source files."""
+    best_mtime = 0.0
+    try:
+        candidates = [
+            ws_path / ".agents" / "memory.db",
+            ws_path / ".git" / "logs" / "HEAD",
+            ws_path / ".git" / "index",
+            ws_path / ".git" / "HEAD",
+        ]
+        for c in candidates:
+            if c.exists():
+                mt = c.stat().st_mtime
+                if mt > best_mtime:
+                    best_mtime = mt
+        if best_mtime == 0.0:
+            for item in ws_path.iterdir():
+                if item.name not in (".git", ".agents", "node_modules", "__pycache__"):
+                    mt = item.stat().st_mtime
+                    if mt > best_mtime:
+                        best_mtime = mt
+        if best_mtime == 0.0:
+            best_mtime = ws_path.stat().st_mtime
+    except Exception:
+        pass
+    if best_mtime > 0.0:
+        return datetime.fromtimestamp(best_mtime, tz=timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat()
+
+
+def learn_workspace(project_root: Path, db_path: Path = DB_PATH, touch_timestamp: bool = True) -> Optional[str]:
     """
     Organically learns and persists a project workspace path on demand into runtime_config.
-    If the project moves to a new drive or folder, opening it in Antigravity automatically
-    updates 'workspace:<name>' to the new location. Also scrubs any legacy embedded tokens
-    from .git/config into customizations.db.
+    If touch_timestamp=True (active session work), updates updated_at to current UTC time.
+    If touch_timestamp=False (passive background discovery), preserves existing updated_at
+    or infers the real last-modified timestamp from disk.
     """
     if not project_root or _is_excluded_workspace_path(project_root):
         return None
@@ -2840,26 +2870,30 @@ def learn_workspace(project_root: Path, db_path: Path = DB_PATH) -> Optional[str
                     new_is_scratch = False
 
                 cur.execute(
-                    "SELECT key, value FROM runtime_config WHERE LOWER(key) = LOWER(?);",
+                    "SELECT key, value, updated_at FROM runtime_config WHERE LOWER(key) = LOWER(?);",
                     (ws_key,),
                 )
                 existing_rows = cur.fetchall()
                 skip_insert = False
-                for ex_key, ex_val in existing_rows:
+                preserved_ts = None
+                for ex_key, ex_val, ex_ts in existing_rows:
                     if new_is_scratch and ex_val and Path(ex_val).exists():
                         try:
                             Path(os.path.abspath(str(ex_val))).relative_to(scratch_abs)
                         except ValueError:
                             skip_insert = True
                             break
+                    if ex_key == ws_key and ex_val == str(abs_root) and ex_ts:
+                        preserved_ts = ex_ts
                     if ex_key != ws_key:
                         execute_with_retry(cur, "DELETE FROM runtime_config WHERE key = ?;", (ex_key,))
 
                 if not skip_insert:
+                    target_ts = now_iso if touch_timestamp else (preserved_ts or _infer_workspace_last_active_iso(abs_root))
                     execute_with_retry(
                         cur,
                         "INSERT OR REPLACE INTO runtime_config (key, value, updated_at) VALUES (?, ?, ?);",
-                        (ws_key, str(abs_root), now_iso),
+                        (ws_key, str(abs_root), target_ts),
                     )
                 conn.commit()
         return str(abs_root)
@@ -3082,7 +3116,7 @@ def discover_all_workspaces(base_dir: Optional[Path] = None, db_path: Path = DB_
             if has_agents or has_git or has_files:
                 seen_resolved.add(norm_key)
                 workspaces.append(abs_p)
-                learn_workspace(abs_p, db_path=db_path)
+                learn_workspace(abs_p, db_path=db_path, touch_timestamp=False)
         except Exception:
             pass
 
@@ -3127,13 +3161,33 @@ def discover_all_workspaces(base_dir: Optional[Path] = None, db_path: Path = DB_
     return workspaces
 
 
+def get_learned_workspaces_with_timestamps(db_path: Path = DB_PATH) -> Dict[str, Tuple[str, str]]:
+    """Returns learned workspaces mapped as name -> (path_str, last_active_date_str)."""
+    learned = get_learned_workspaces(db_path=db_path, prune_missing=True)
+    ts_map: Dict[str, str] = {}
+    if db_path and Path(db_path).exists():
+        try:
+            with managed_connection(db_path) as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT key, updated_at FROM runtime_config WHERE key LIKE 'workspace:%';")
+                for k, upd in cur.fetchall():
+                    ts_map[k.split("workspace:", 1)[1]] = (upd or "")[:10]
+        except Exception:
+            pass
+    result: Dict[str, Tuple[str, str]] = {}
+    for name, path_str in learned.items():
+        dt = ts_map.get(name) or _infer_workspace_last_active_iso(Path(path_str))[:10]
+        result[name] = (path_str, dt)
+    return result
+
+
 def gitea_config_summary(auto_detect: bool = False, db_path: Path = DB_PATH):
-    """Displays active Gitea configuration and organically learned project paths."""
+    """Displays active Gitea configuration and organically learned project paths with last-active timestamps."""
     if auto_detect:
         discover_all_workspaces(db_path=db_path)
 
     cfg = get_gitea_config(db_path=db_path)
-    learned = get_learned_workspaces(db_path=db_path, prune_missing=True)
+    learned_ts = get_learned_workspaces_with_timestamps(db_path=db_path)
     tok = cfg.get("token", "")
     masked_tok = f"{tok[:6]}...{tok[-4:]}" if len(tok) > 10 else ("(set)" if tok else "(not set)")
 
@@ -3143,9 +3197,9 @@ def gitea_config_summary(auto_detect: bool = False, db_path: Path = DB_PATH):
     print(f"Gitea URL:          {cfg.get('url')}")
     print(f"Repository Owner:   {cfg.get('user') or '(auto-learned on init)'}")
     print(f"API Token:          {masked_tok}")
-    print(f"Learned Workspaces: {len(learned)} projects tracked on demand")
-    for name, path_str in sorted(learned.items(), key=lambda x: x[0].lower()):
-        print(f"  * {name:30} -> {path_str}")
+    print(f"Learned Workspaces: {len(learned_ts)} projects tracked on demand")
+    for name, (path_str, dt) in sorted(learned_ts.items(), key=lambda x: x[0].lower()):
+        print(f"  * {name:30} [{dt}] -> {path_str}")
     print("=" * 60)
 
 
@@ -5662,7 +5716,7 @@ def mem_get_context(conn: sqlite3.Connection, max_decisions: int = 5, project_ro
             print(f"  Next Steps: {last_snap['next_steps']}")
 
     cursor.execute("""
-    SELECT id, title, status, priority FROM project_tasks
+    SELECT id, title, status, priority, updated_at FROM project_tasks
     WHERE status IN ('pending', 'in_progress', 'blocked')
     ORDER BY 
         CASE status WHEN 'in_progress' THEN 1 WHEN 'pending' THEN 2 ELSE 3 END,
@@ -5673,24 +5727,27 @@ def mem_get_context(conn: sqlite3.Connection, max_decisions: int = 5, project_ro
     if open_tasks:
         print("\nActive Task Board:")
         for t in open_tasks:
-            print(f"  * [#{t['id']}] [{t['status'].upper():11}] ({t['priority'].upper():8}): {t['title']}")
+            t_dt = f" [{str(t['updated_at'])[:10]}]" if t['updated_at'] else ""
+            print(f"  * [#{t['id']}] [{t['status'].upper():11}] ({t['priority'].upper():8}){t_dt}: {t['title']}")
 
     cursor.execute("""
-    SELECT title, content, category FROM project_decisions
+    SELECT title, content, category, updated_at FROM project_decisions
     WHERE is_active = 1 ORDER BY updated_at DESC LIMIT ?;
     """, (max_decisions,))
     decisions = cursor.fetchall()
     if decisions:
         print("\nActive Architectural Decisions:")
         for d in decisions:
-            print(f"  * [{d['category'].upper()}] {d['title']}: {d['content']}")
+            d_dt = f" [{str(d['updated_at'])[:10]}]" if d['updated_at'] else ""
+            print(f"  * [{d['category'].upper()}]{d_dt} {d['title']}: {d['content']}")
 
-    cursor.execute("SELECT key, value FROM project_facts WHERE deprecated_at IS NULL ORDER BY updated_at DESC;")
+    cursor.execute("SELECT key, value, updated_at FROM project_facts WHERE deprecated_at IS NULL ORDER BY updated_at DESC;")
     facts = cursor.fetchall()
     if facts:
         print("\nProject Facts & Configs:")
         for f in facts:
-            print(f"  * {f['key']}: {f['value']}")
+            f_dt = f" [{str(f['updated_at'])[:10]}]" if f['updated_at'] else ""
+            print(f"  * {f['key']}{f_dt}: {f['value']}")
 
     if not last_snap and not decisions and not facts and not open_tasks:
         print("No memory records found in project database.")
@@ -5785,14 +5842,198 @@ def _extract_hook_user_message(payload: dict) -> str:
     return ""
 
 
+def analyze_conversation_epochs_and_scope(
+    cid: str = None,
+    active_workspace: Path = None,
+    db_path: Path = DB_PATH,
+    brain_dir: Path = None,
+    epoch_gap_hours: float = 4.0,
+) -> dict:
+    """
+    Slices a conversation's transcript.jsonl into temporal epochs (separated by >4h gaps
+    or UTC date changes) and detects foreign workspace mentions in historical epochs to
+    prevent cross-project context bleeding across multi-day conversations without adding
+    extra conversation_id columns to SQLite tables.
+    """
+    result = {
+        "cid": str(cid or ""),
+        "epoch_key": "epoch-1",
+        "epoch_count": 0,
+        "active_epoch": None,
+        "epochs": [],
+        "foreign_project_mentions": [],
+    }
+    if not cid:
+        return result
+
+    b_dir = Path(brain_dir) if brain_dir else (Path.home() / ".gemini" / "antigravity" / "brain")
+    t_file = b_dir / str(cid) / ".system_generated" / "logs" / "transcript.jsonl"
+    if not t_file.exists():
+        return result
+
+    user_steps = []
+    try:
+        with open(t_file, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if '"USER_INPUT"' not in line and '"USER_EXPLICIT"' not in line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                if d.get("type") != "USER_INPUT" and d.get("source") != "USER_EXPLICIT":
+                    continue
+                ts_str = str(d.get("created_at") or "").strip()
+                if not ts_str:
+                    continue
+                try:
+                    ts_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                except Exception:
+                    ts_dt = None
+                user_steps.append({
+                    "step_index": int(d.get("step_index") or 0),
+                    "created_at": ts_str,
+                    "date": ts_str[:10],
+                    "dt": ts_dt,
+                    "content": str(d.get("content") or ""),
+                })
+    except Exception:
+        return result
+
+    if not user_steps:
+        return result
+
+    raw_epochs = []
+    curr = {
+        "epoch_index": 1,
+        "date": user_steps[0]["date"],
+        "start_ts": user_steps[0]["created_at"],
+        "end_ts": user_steps[0]["created_at"],
+        "step_start": user_steps[0]["step_index"],
+        "step_end": user_steps[0]["step_index"],
+        "turn_count": 1,
+        "steps": [user_steps[0]],
+    }
+    prev_step = user_steps[0]
+    gap_seconds = max(0.25, float(epoch_gap_hours)) * 3600.0
+
+    for st in user_steps[1:]:
+        new_epoch = False
+        if st["date"] != prev_step["date"]:
+            new_epoch = True
+        elif st["dt"] is not None and prev_step["dt"] is not None:
+            if (st["dt"] - prev_step["dt"]).total_seconds() > gap_seconds:
+                new_epoch = True
+        if new_epoch:
+            raw_epochs.append(curr)
+            curr = {
+                "epoch_index": len(raw_epochs) + 1,
+                "date": st["date"],
+                "start_ts": st["created_at"],
+                "end_ts": st["created_at"],
+                "step_start": st["step_index"],
+                "step_end": st["step_index"],
+                "turn_count": 1,
+                "steps": [st],
+            }
+        else:
+            curr["end_ts"] = st["created_at"]
+            curr["step_end"] = st["step_index"]
+            curr["turn_count"] += 1
+            curr["steps"].append(st)
+        prev_step = st
+    raw_epochs.append(curr)
+
+    clean_epochs = [{k: v for k, v in ep.items() if k != "steps"} for ep in raw_epochs]
+    result["epochs"] = clean_epochs
+    result["epoch_count"] = len(clean_epochs)
+    result["active_epoch"] = clean_epochs[-1]
+    result["epoch_key"] = f"epoch-{len(clean_epochs)}-{clean_epochs[-1]['date']}"
+
+    # Cross-project contamination guard across historical epochs (epochs[:-1])
+    if len(raw_epochs) > 1:
+        stop_tokens = {
+            "antigravity", "workspace", "workspaces", "project", "projects", "python",
+            "gemini", "skillsdb", "gitea", "github", "users", "appdata", "local",
+            "roaming", "program", "programs", "source", "repos", "documents", "desktop",
+            "scratch", "default", "master", "main", "build", "release", "enterprise",
+            "portable", "service", "server", "client", "system", "config", "database",
+        }
+        active_norm = ""
+        active_tokens = set()
+        if active_workspace:
+            try:
+                active_norm = os.path.normcase(os.path.abspath(str(active_workspace)))
+                for part in Path(active_norm).parts:
+                    p_clean = part.strip("\\/:").lower()
+                    if p_clean:
+                        active_tokens.add(p_clean)
+                        for sub in p_clean.replace("-", "_").split("_"):
+                            if len(sub) >= 4:
+                                active_tokens.add(sub)
+            except Exception:
+                pass
+
+        learned_ws = get_learned_workspaces(db_path=db_path, prune_missing=False)
+        ws_paths_iter = learned_ws.values() if isinstance(learned_ws, dict) else learned_ws
+        foreign_candidates = []
+        for ws_str in ws_paths_iter:
+            try:
+                ws_norm = os.path.normcase(os.path.abspath(ws_str))
+            except Exception:
+                continue
+            if active_norm and ws_norm == active_norm:
+                continue
+            ws_p = Path(ws_str)
+            ws_name = ws_p.name
+            parent_name = ws_p.parent.name if ws_p.parent else ""
+            label = f"{ws_name} ({parent_name})" if parent_name and parent_name.lower() not in stop_tokens else ws_name
+            tokens = set()
+            if len(ws_name) >= 5 and ws_name.lower() not in stop_tokens and ws_name.lower() not in active_tokens:
+                tokens.add(ws_name.lower())
+            for raw_part in (ws_name, parent_name):
+                for sub in raw_part.replace("-", "_").split("_"):
+                    s_low = sub.lower()
+                    if len(s_low) >= 5 and s_low not in stop_tokens and s_low not in active_tokens:
+                        tokens.add(s_low)
+            if tokens:
+                foreign_candidates.append((label, sorted(tokens, key=len, reverse=True)))
+
+        seen_mentions = set()
+        mentions = []
+        for ep in raw_epochs[:-1]:
+            for st in ep["steps"]:
+                text_low = st["content"].lower()
+                if not text_low:
+                    continue
+                for label, tok_list in foreign_candidates:
+                    for tok in tok_list:
+                        if tok in text_low:
+                            m_key = (ep["date"], label)
+                            if m_key not in seen_mentions:
+                                seen_mentions.add(m_key)
+                                mentions.append({
+                                    "date": ep["date"],
+                                    "epoch_index": ep["epoch_index"],
+                                    "project": label,
+                                    "matched_token": tok,
+                                    "step_index": st["step_index"],
+                                })
+                            break
+        result["foreign_project_mentions"] = mentions
+
+    return result
+
+
 def handle_pre_invocation_hook():
     """
     Handles Antigravity PreInvocation lifecycle hook with 100% autonomy:
     1. Runtime Model Concurrency Profile (Ultra vs Standard).
-    2. Autonomous Directory Scoping: Auto-detects domain markers (Flutter, BigQuery, Docker, etc.) and injects micro-skills.
-    3. Autonomous Auto-Compaction: Prunes completed tasks and consolidates memory if threshold reached.
-    4. Deterministic Task Board: Injects active tasks with states (pending, in_progress, blocked) and priorities.
-    5. Episodic Decisions, Facts, and latest Milestone Snapshot.
+    2. Temporal Epoch Slicing & Cross-Project Contamination Guard.
+    3. Autonomous Directory Scoping: Auto-detects domain markers (Flutter, BigQuery, Docker, etc.) and injects micro-skills.
+    4. Autonomous Auto-Compaction: Prunes completed tasks and consolidates memory if threshold reached.
+    5. Deterministic Task Board: Injects active tasks with states (pending, in_progress, blocked) and priorities.
+    6. Episodic Decisions, Facts, and latest Milestone Snapshot with [YYYY-MM-DD] timestamps.
     """
     try:
         payload_raw = sys.stdin.read()
@@ -5814,11 +6055,22 @@ def handle_pre_invocation_hook():
         root_path = None
     db_path = get_project_db_path(root_path) if (has_valid_workspace and root_path) else None
 
-    # Deduplicate per (conversationId, workspace) because Antigravity (post-2026-10-16)
-    # invokes PreInvocation before every tool step with invocationNum <= 1 and persists
-    # each injected ephemeralMessage into transcript.jsonl.
     cid = payload.get("conversationId")
+    brain_dir_override = Path(payload["brainDir"]) if payload.get("brainDir") else None
+    central_db_override = Path(payload["dbPath"]) if payload.get("dbPath") else DB_PATH
+    epoch_info = analyze_conversation_epochs_and_scope(
+        cid=cid,
+        active_workspace=root_path,
+        db_path=central_db_override,
+        brain_dir=brain_dir_override,
+    )
+
+    # Deduplicate per (conversationId, workspace, temporal_epoch) so Antigravity's
+    # per-tool-step PreInvocation calls within the same session epoch do not bloat
+    # transcript.jsonl, while a new day or >4h temporal epoch automatically re-hydrates
+    # the Turn-1 guardrails and cross-project isolation anchor.
     workspace_key = str(root_path) if (has_valid_workspace and root_path) else "__no_workspace__"
+    dedup_token = f"{workspace_key}@{epoch_info['epoch_key']}"
     if cid:
         try:
             state = {}
@@ -5829,10 +6081,10 @@ def handle_pre_invocation_hook():
                         state = loaded
                 except Exception:
                     state = {}
-            if state.get(cid) == workspace_key:
+            if state.get(cid) == dedup_token:
                 print(json.dumps({"injectSteps": []}))
                 return
-            state[cid] = workspace_key
+            state[cid] = dedup_token
             if len(state) > 100:
                 keys = list(state.keys())[-50:]
                 state = {k: state[k] for k in keys}
@@ -5881,6 +6133,34 @@ def handle_pre_invocation_hook():
         "   - Never deliver untested code, broken shortcuts, or unverified event listeners. Always verify DOM and UI behavior in a real or simulated harness (e.g. jsdom / test harness) before declaring success.\n"
     ]
     lines.append("\n".join(guardrail_lines))
+
+    # 0.5 Temporal Epoch Slicing & Cross-Project Isolation Anchor
+    today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    ws_display = f"{root_path.name} ({root_path})" if (has_valid_workspace and root_path) else "None (Global)"
+    anchor_lines = [
+        "[TEMPORAL & WORKSPACE ISOLATION ANCHOR]",
+        f"Current Date (UTC): {today_utc} | Active Workspace: {ws_display}",
+    ]
+    if epoch_info["epoch_count"] > 1 and epoch_info["active_epoch"]:
+        first_ep = epoch_info["epochs"][0]
+        act_ep = epoch_info["active_epoch"]
+        anchor_lines.append(
+            f"Conversation Timeline: {epoch_info['epoch_count']} temporal epochs ({first_ep['date']} -> {act_ep['date']}) | "
+            f"Active Epoch #{act_ep['epoch_index']} started {act_ep['date']} (steps {act_ep['step_start']}..{act_ep['step_end']}, {act_ep['turn_count']} user turns)"
+        )
+    if epoch_info["foreign_project_mentions"]:
+        summary_items = [
+            f"'{m['project']}' on {m['date']} (step {m['step_index']})"
+            for m in epoch_info["foreign_project_mentions"][:5]
+        ]
+        ws_short = root_path.name if (has_valid_workspace and root_path) else "current session"
+        anchor_lines.append(
+            f"[CROSS-PROJECT CONTAMINATION GUARD]: Earlier epochs in this conversation ID (and <CONTEXT_SUMMARY>) mention foreign workspace(s): "
+            f"{', '.join(summary_items)}. Those prompts belong to historical sessions on earlier dates. "
+            f"Do NOT attribute them to today's date ({today_utc}) or mix their architecture/facts with active workspace '{ws_short}'."
+        )
+    anchor_lines.append("")
+    lines.append("\n".join(anchor_lines))
 
     if tier == TIER_ULTRA:
         lines.append("[SKILLSDB RUNTIME PROFILE: GEMINI ULTRA (16-thread high-concurrency mode)]")
@@ -5940,6 +6220,8 @@ def handle_pre_invocation_hook():
         except Exception:
             pass
 
+    active_ep_date = epoch_info["active_epoch"]["date"] if epoch_info.get("active_epoch") else today_utc
+
     if has_valid_workspace and db_path and db_path.exists():
         try:
             with managed_connection(db_path, is_project_db=True) as conn:
@@ -5959,7 +6241,7 @@ def handle_pre_invocation_hook():
 
                 # 3. Active Task Board
                 cursor.execute("""
-                SELECT id, title, status, priority FROM project_tasks
+                SELECT id, title, status, priority, updated_at FROM project_tasks
                 WHERE status IN ('pending', 'in_progress', 'blocked')
                 ORDER BY 
                     CASE status WHEN 'in_progress' THEN 1 WHEN 'pending' THEN 2 ELSE 3 END,
@@ -5972,7 +6254,9 @@ def handle_pre_invocation_hook():
                         mem_lines.append("")
                     mem_lines.append("Active Task Board (Deterministic Progress):")
                     for t in open_tasks:
-                        mem_lines.append(f"  * [#{t['id']}] [{t['status'].upper():11}] ({t['priority'].upper():8}): {t['title']}")
+                        t_date = str(t["updated_at"] or "")[:10]
+                        t_tag = f" [{t_date}]" if t_date else ""
+                        mem_lines.append(f"  * [#{t['id']}] [{t['status'].upper():11}] ({t['priority'].upper():8}){t_tag}: {t['title']}")
 
                 # 3.5 Active Agent Handoffs
                 cursor.execute("SELECT id, source_role, target_role, notes FROM task_handoffs WHERE status = 'pending' ORDER BY created_at DESC LIMIT 3;")
@@ -5986,24 +6270,28 @@ def handle_pre_invocation_hook():
                         mem_lines.append(f"  * [{ho['id']}] [{ho['source_role']}] -> [{ho['target_role']}]{note_s}")
 
                 # 4. Key Facts (Active only, tombstoned excluded)
-                cursor.execute("SELECT key, value FROM project_facts WHERE deprecated_at IS NULL ORDER BY updated_at DESC LIMIT 10;")
+                cursor.execute("SELECT key, value, updated_at FROM project_facts WHERE deprecated_at IS NULL ORDER BY updated_at DESC LIMIT 10;")
                 facts = cursor.fetchall()
                 if facts:
                     if mem_lines:
                         mem_lines.append("")
                     mem_lines.append("Project Facts & Configs:")
                     for f in facts:
-                        mem_lines.append(f"  * {f['key']}: {f['value']}")
+                        f_date = str(f["updated_at"] or "")[:10]
+                        f_tag = f" [{f_date}]" if f_date else ""
+                        mem_lines.append(f"  * {f['key']}{f_tag}: {f['value']}")
 
                 # 5. Active Decisions
-                cursor.execute("SELECT title, content FROM project_decisions WHERE is_active = 1 ORDER BY updated_at DESC LIMIT 5;")
+                cursor.execute("SELECT title, content, updated_at FROM project_decisions WHERE is_active = 1 ORDER BY updated_at DESC LIMIT 5;")
                 decs = cursor.fetchall()
                 if decs:
                     if mem_lines:
                         mem_lines.append("")
                     mem_lines.append("Active Architectural Decisions:")
                     for d in decs:
-                        mem_lines.append(f"  * [{d['title']}]: {d['content']}")
+                        d_date = str(d["updated_at"] or "")[:10]
+                        d_tag = f" [{d_date}]" if d_date else ""
+                        mem_lines.append(f"  * [{d['title']}]{d_tag}: {d['content']}")
 
                 # 6. Milestone Snapshot
                 cursor.execute("SELECT summary, next_steps, files_touched, commit_hash, created_at FROM session_snapshots ORDER BY id DESC LIMIT 1;")
@@ -6011,7 +6299,10 @@ def handle_pre_invocation_hook():
                 if snap:
                     if mem_lines:
                         mem_lines.append("")
-                    mem_lines.append("Latest Project Milestone Snapshot:")
+                    snap_date = str(snap["created_at"] or "")[:10]
+                    ep_marker = " [ACTIVE EPOCH]" if snap_date and snap_date >= active_ep_date else ""
+                    snap_hdr = f"Latest Project Milestone Snapshot ({snap_date}{ep_marker}):" if snap_date else "Latest Project Milestone Snapshot:"
+                    mem_lines.append(snap_hdr)
                     mem_lines.append(f"  Summary: {snap['summary']}")
                     if "commit_hash" in snap.keys() and snap['commit_hash']:
                         mem_lines.append(f"  Commit: {snap['commit_hash'][:7]}")
@@ -6041,17 +6332,26 @@ def handle_pre_invocation_hook():
     print(json.dumps({"injectSteps": []}))
 
 
-def calculate_transcript_savings():
-    """Scans Antigravity transcript files to compute cumulative prompt tokens avoided."""
-    brain_dir = Path.home() / ".gemini" / "antigravity" / "brain"
-    if not brain_dir.exists():
+def calculate_transcript_savings(target_date: str = None, brain_dir: Path = None):
+    """
+    Scans Antigravity transcript files to compute both date-scoped (default: today UTC)
+    and cumulative all-time prompt tokens avoided.
+    """
+    b_dir = Path(brain_dir) if brain_dir else (Path.home() / ".gemini" / "antigravity" / "brain")
+    if not b_dir.exists():
         return None
+
+    day_str = (target_date or datetime.now(timezone.utc).strftime("%Y-%m-%d"))[:10]
 
     total_turns = 0
     total_steps = 0
     session_count = 0
 
-    for folder in brain_dir.iterdir():
+    day_turns = 0
+    day_steps = 0
+    day_sessions = 0
+
+    for folder in b_dir.iterdir():
         if not folder.is_dir() or folder.name == "tempmediaStorage":
             continue
         t_file = folder / ".system_generated" / "logs" / "transcript.jsonl"
@@ -6059,34 +6359,51 @@ def calculate_transcript_savings():
             continue
 
         has_post_deploy = False
+        has_day_activity = False
         s_turns = 0
         s_steps = 0
+        s_day_turns = 0
+        s_day_steps = 0
 
         try:
             with open(t_file, "r", encoding="utf-8", errors="ignore") as f:
                 for line in f:
                     d = json.loads(line)
                     s_steps += 1
-                    ts = d.get("created_at", "")
+                    ts = str(d.get("created_at") or "")
                     if ts >= "2026-09-18T14:00:00Z":
                         has_post_deploy = True
+                    is_day = ts.startswith(day_str)
+                    if is_day:
+                        has_day_activity = True
+                        s_day_steps += 1
                     src = d.get("source")
                     stype = d.get("type")
                     if src == "MODEL" or stype == "PLANNER_RESPONSE":
                         s_turns += 1
+                        if is_day:
+                            s_day_turns += 1
             if has_post_deploy:
                 session_count += 1
                 total_steps += s_steps
                 total_turns += s_turns
+            if has_day_activity:
+                day_sessions += 1
+                day_steps += s_day_steps
+                day_turns += s_day_turns
         except Exception:
             pass
 
-    if total_turns == 0:
+    if total_turns == 0 and day_turns == 0:
         return None
 
     tokens_saved = total_turns * 14430
     dollars_saved_pro = (tokens_saved / 1_000_000) * 2.00
     dollars_saved_ultra = (tokens_saved / 1_000_000) * 7.50
+
+    day_tokens_saved = day_turns * 14430
+    day_dollars_pro = (day_tokens_saved / 1_000_000) * 2.00
+    day_dollars_ultra = (day_tokens_saved / 1_000_000) * 7.50
 
     return {
         "sessions": session_count,
@@ -6095,12 +6412,19 @@ def calculate_transcript_savings():
         "tokens_saved": tokens_saved,
         "dollars_saved": dollars_saved_pro,
         "dollars_saved_pro": dollars_saved_pro,
-        "dollars_saved_ultra": dollars_saved_ultra
+        "dollars_saved_ultra": dollars_saved_ultra,
+        "target_date": day_str,
+        "day_sessions": day_sessions,
+        "day_model_turns": day_turns,
+        "day_steps": day_steps,
+        "day_tokens_saved": day_tokens_saved,
+        "day_dollars_pro": day_dollars_pro,
+        "day_dollars_ultra": day_dollars_ultra,
     }
 
 
-def stats(conn: sqlite3.Connection, show_savings: bool = False):
-    """Outputs database inventory stats and measured token/cost savings."""
+def stats(conn: sqlite3.Connection, show_savings: bool = False, target_date: str = None):
+    """Outputs database inventory stats and both date-scoped and cumulative token/cost savings."""
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) as count, SUM(token_estimate) as tokens FROM rules;")
     r_stat = cursor.fetchone()
@@ -6112,9 +6436,17 @@ def stats(conn: sqlite3.Connection, show_savings: bool = False):
     print(f"Rules:         {r_stat['count']} rules (Active content: ~{r_stat['tokens']} tokens)")
     print(f"Skills:        {s_stat['count']} skills (Total content: ~{s_stat['tokens']} tokens)")
 
-    savings = calculate_transcript_savings()
+    savings = calculate_transcript_savings(target_date=target_date)
     if savings:
-        print("\n--- Measured Token Savings (Since SkillsDB Deployment) ---")
+        day_lbl = savings["target_date"]
+        print(f"\n--- Measured Activity for {day_lbl} (Strictly Date-Scoped) ---")
+        print(f"Active Sessions ({day_lbl}): {savings['day_sessions']} sessions")
+        print(f"Model Turns ({day_lbl}):     {savings['day_model_turns']:,} turns ({savings['day_steps']:,} steps)")
+        print(f"Prompt Bloat Avoided:         ~{savings['day_tokens_saved']:,} tokens (-97.4% per turn)")
+        print(f"Cost Saved (Gemini Pro):      ~${savings['day_dollars_pro']:.2f} USD")
+        print(f"Cost Saved (Gemini Ultra):    ~${savings['day_dollars_ultra']:.2f} USD")
+
+        print("\n--- Cumulative Token Savings (Since SkillsDB Deployment) ---")
         print(f"Tracked Sessions:     {savings['sessions']} active sessions")
         print(f"Total Model Turns:    {savings['model_turns']:,} turns ({savings['steps']:,} steps)")
         print(f"Prompt Bloat Avoided: ~{savings['tokens_saved']:,} tokens (-97.4% per turn)")
@@ -7320,6 +7652,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     stats_parser = subparsers.add_parser("stats", help="Show database statistics and token savings")
     stats_parser.add_argument("--savings", action="store_true", help="Display measured token and cost savings")
+    stats_parser.add_argument("--today", action="store_true", help="Highlight today's date-scoped turn and token savings")
+    stats_parser.add_argument("--date", default=None, help="Filter daily activity stats by UTC date (YYYY-MM-DD)")
 
     export_parser = subparsers.add_parser("export-skill", help="Export a skill into a project workspace")
     export_parser.add_argument("name", help="Skill name")
@@ -7896,7 +8230,7 @@ def main(argv: list[str] = None):
         elif args.command == "list":
             list_all(conn)
         elif args.command == "stats":
-            stats(conn, show_savings=getattr(args, "savings", False))
+            stats(conn, show_savings=getattr(args, "savings", False), target_date=getattr(args, "date", None))
         elif args.command == "export-skill":
             export_skill(conn, args.name, args.target)
         elif args.command == "profile":
