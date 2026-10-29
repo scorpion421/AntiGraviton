@@ -5,6 +5,13 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.13] - 2026-10-29
+
+### Added
+- **Standardized Shields.io Header Badges & Global Rule (`README.md`, `build.py`, `plugin/rules/AGENTS.md`, `database/customizations.db`, `v3.7.13`)**:
+  - Added the clickable Shields.io badge header block (`Version`, `SkillsDB`, `Gitea Service`, `Tests`, `Antigravity`, `Database`, `Python`, and `License`) to the top of `README.md` and wired `sync_project_versions()` in `build.py` to keep the `version` and `SkillsDB` badges automatically synchronized on every build.
+  - Registered the global rule `readme-shields-badges-header` in `customizations.db` and `plugin/rules/AGENTS.md` so every project `README.md` consistently includes top-level Shields.io badges.
+
 ## [1.4.12] - 2026-10-29
 
 ### Changed

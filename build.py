@@ -126,6 +126,8 @@ def sync_project_versions(repo_root: Path, suite_ver: str, eng_ver: str) -> None
         repo_root / "README.md",
         [
             (r"# AntiGraviton complete suite \(`v[0-9.]+`\)", f"# AntiGraviton complete suite (`v{suite_ver}`)"),
+            (r"badge/version-[0-9.]+-blue\.svg", f"badge/version-{suite_ver}-blue.svg"),
+            (r"badge/SkillsDB-v[0-9.]+-007ec6\.svg", f"badge/SkillsDB-v{eng_ver}-007ec6.svg"),
             (r"\*\*SkillsDB \(`v[0-9.]+`\)\*\*", f"**SkillsDB (`v{eng_ver}`)**"),
             (r"\*\*SkillsDB context and memory engine \(`v[0-9.]+`\)\*\*", f"**SkillsDB context and memory engine (`v{eng_ver}`)**"),
             (r"\| AntiGraviton suite \(`v[0-9.]+`\) \|", f"| AntiGraviton suite (`v{suite_ver}`) |"),

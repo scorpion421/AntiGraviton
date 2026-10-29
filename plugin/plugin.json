@@ -1,7 +1,7 @@
 {
   "name": "customizations-db",
   "displayName": "AntiGraviton SkillsDB",
-  "version": "3.7.12",
+  "version": "3.7.13",
   "description": "Centralized SQLite FTS5 customizations database, episodic project memory (.agents/memory.db), temporal epoch isolation, and local Gitea/GitHub release automation.",
   "suggestedPrompts": [
     "Show today's SkillsDB token savings and active workspace status",
