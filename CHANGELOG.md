@@ -5,6 +5,12 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.12] - 2026-10-29
+
+### Changed
+- **Added Commons Clause v1.0 Commercial Resale Prohibition to `GNU AGPL v3.0` (`LICENSE`, `README.md`, `plugin/plugin.json`, `plugin/README.md`, `v3.7.12`)**:
+  - Extended the `GNU AGPL v3.0` license with the **Commons Clause License Condition v1.0** (`AGPL-3.0-only WITH Commons-Clause-1.0`) to explicitly prohibit third parties and commercial skill marketplaces from repackaging or selling AntiGraviton, SkillsDB, or its `SKILL.md` workflows and rules for a fee.
+
 ## [1.4.11] - 2026-10-29
 
 ### Fixed

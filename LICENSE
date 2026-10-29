@@ -660,3 +660,28 @@ if any, to sign a "copyright disclaimer" for the program, if necessary.
 For more information on this, and how to apply and follow the GNU AGPL, see
 <https://www.gnu.org/licenses/>.
 
+============================================================================
+
+"Commons Clause" License Condition v1.0
+
+The Software (including all source code, database schemas, rules, workflows,
+SKILL.md definitions, plugins, and documentation) is provided to you by the
+Licensor under the License, as defined below, subject to the following
+condition.
+
+Without limiting other conditions in the License, the grant of rights under
+the License will not include, and the License does not grant to you, the
+right to Sell the Software or any portion thereof.
+
+For purposes of the foregoing, "Sell" means practicing any or all of the
+rights granted to you under the License to provide to third parties, for a
+fee or other consideration (including without limitation marketplace listing
+fees, paid skill bundles, affiliate commissions, hosting fees, or commercial
+subscriptions), a product, skill package, or service whose value derives,
+entirely or substantially, from the functionality or content of the Software.
+Any license notice or attribution required by the License must also include
+this Commons Clause License Condition.
+
+Software: AntiGraviton Complete Suite & SkillsDB Engine
+License:  GNU Affero General Public License v3.0 (AGPL-3.0-only)
+Licensor: scorpion421 (MickyFoley / MoerthJ)

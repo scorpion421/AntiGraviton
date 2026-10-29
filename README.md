@@ -1,7 +1,7 @@
-# AntiGraviton complete suite (`v1.4.11`)
+# AntiGraviton complete suite (`v1.4.12`)
 
 **Turnkey agentic development environment for Google Antigravity IDE**  
-*Combining **SkillsDB (`v3.7.11`)** + **Antigravity Gitea Windows service (`v1.1.2`)** in a single one-command distribution.*
+*Combining **SkillsDB (`v3.7.12`)** + **Antigravity Gitea Windows service (`v1.1.2`)** in a single one-command distribution.*
 
 ---
 
@@ -11,7 +11,7 @@
 
 It bundles two tightly integrated systems into a single repository and installer:
 
-1. **SkillsDB context and memory engine (`v3.7.11`)**:
+1. **SkillsDB context and memory engine (`v3.7.12`)**:
    - **On-demand micro-skill routing**: Replaces static plugin prompt bloat (~35,000 tokens/turn) with a compact (~450 token) routing directive, Antigravity `v2.28.0+` Turn-1 prompt pre-routing, and surgical SQLite FTS5 micro-skill retrieval (`--summary`, `--section`).
    - **Persistent episodic project memory (`.agents/memory.db`)**: Automatically records architectural decisions, milestone snapshots, and workspace telemetry across sessions so every new conversation starts with full project context.
    - **Organic on-demand workspace learning**: Ships with zero hardcoded paths or credentials. Automatically learns project paths as you work (`mem-init`, `mem-save-snapshot`, `gitea-init`) and discovers Antigravity IDE workspaces from `~/.gemini/config/projects/*.json` and `~/.gemini/antigravity/scratch`.
@@ -24,7 +24,7 @@ It bundles two tightly integrated systems into a single repository and installer
 
 ## 2. Measured impact in daily development
 
-| Metric | Standard Antigravity setup | AntiGraviton suite (`v1.4.11`) | Real-world improvement |
+| Metric | Standard Antigravity setup | AntiGraviton suite (`v1.4.12`) | Real-world improvement |
 | :--- | :--- | :--- | :--- |
 | **System and plugin context load** | ~35,000 tokens / turn | **~1,500 tokens / turn** | **~95% lower base overhead** |
 | **Token consumption (60-turn session, benchmarked on Gemini 4 Argon High)** | ~3.39M input tokens | **~0.83M input tokens** | **~75.5% total token savings (4x session capacity)** |
@@ -103,8 +103,8 @@ powershell -ExecutionPolicy Bypass -File .\install-antigraviton.ps1
 
 ```text
 AntiGraviton/
-|-- LICENSE                        # GNU Affero General Public License v3.0 (AGPL-3.0-only)
-|-- VERSION                        # SemVer 2.0.0 suite release version (1.4.11)
+|-- LICENSE                        # GNU AGPL v3.0 + Commons Clause v1.0 (no commercial resale)
+|-- VERSION                        # SemVer 2.0.0 suite release version (1.4.12)
 |-- CHANGELOG.md                   # SemVer release history
 |-- README.md                      # Suite documentation
 |-- install-antigraviton.ps1       # Unified 1-command installer (SkillsDB + Gitea + Auto-Token)
@@ -115,7 +115,7 @@ AntiGraviton/
 |   `-- skills/
 |       `-- install-antigraviton/
 |           `-- SKILL.md           # Antigravity IDE 1-prompt onboarding skill
-|-- skillsdb/                      # Modular Python package source (v3.7.11)
+|-- skillsdb/                      # Modular Python package source (v3.7.12)
 |   |-- config.py
 |   |-- schema.py
 |   |-- guardrails.py
@@ -189,6 +189,7 @@ Published release tags are immutable and never overwritten in place; every updat
 
 Copyright (C) 2026 `scorpion421` (`MickyFoley` / `MoerthJ`).
 
-**AntiGraviton** is licensed under the **[GNU Affero General Public License v3.0 (AGPL-3.0-only)](LICENSE)**.
-- You are free to use, study, share, and modify this software with full attribution to the original author.
-- **Strict Copyleft**: Any derivative work, modification, bundled redistribution, or network/cloud service deployment based on AntiGraviton or SkillsDB must be released in full source code form under the exact same **GNU AGPL v3.0** license. Proprietary closed-source commercialization is strictly prohibited.
+**AntiGraviton** and **SkillsDB** are licensed under the **[GNU Affero General Public License v3.0 (AGPL-3.0-only) with Commons Clause License Condition v1.0](LICENSE)** (`AGPL-3.0-only WITH Commons-Clause-1.0`).
+- **Free & Open Source with Mandatory Attribution**: You are free to use, study, share, and modify this software for personal, educational, and internal non-commercial use with full attribution to the original author (`scorpion421`).
+- **Strict Copyleft**: Any derivative work, modification, or redistribution must be released in full source code form under the exact same license and Commons Clause condition.
+- **Commercial Sale & Marketplace Resale Strictly Prohibited (Commons Clause v1.0)**: Repackaging, listing, or selling AntiGraviton, SkillsDB, or any of its `SKILL.md` workflows, rules, or scripts for a fee on commercial marketplaces (such as Agensi.io or similar platforms) or as a paid product/service is strictly prohibited.
