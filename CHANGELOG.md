@@ -5,6 +5,14 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.9] - 2026-10-29
+
+### Changed
+- **Single-Source-of-Truth Version Synchronization in `build.py` (`build.py`, `skillsdb/config.py`, `v3.7.9`)**:
+  - Added `sync_project_versions()` to `build.py` so updating `__version__` and `__suite_version__` in `skillsdb/config.py` and running `python build.py` automatically synchronizes `VERSION`, `plugin/plugin.json`, `plugin/README.md`, `README.md`, `install-antigraviton.ps1`, `install_antigraviton.py`, `.agents/skills/install-antigraviton/SKILL.md`, `database/db_manager.py`, and `runtime_config.schema_version` in `database/customizations.db`.
+- **Site-Neutral Tracked `plugin/README.md` with Dynamic Deployment Enrichment (`plugin/README.md`, `deploy.py`)**:
+  - Replaced the hardcoded site-specific Gitea username in `plugin/README.md` with a neutral `http://localhost:3000` service reference in Git while teaching `deploy.py` to dynamically inject the active machine's `gitea_user` (`MickyFoley` or `MoerthJ`) from `runtime_config` into `~/.gemini/config/plugins/customizations-db/README.md`.
+
 ## [1.4.8] - 2026-10-29
 
 ### Added

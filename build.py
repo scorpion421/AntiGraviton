@@ -84,6 +84,105 @@ if sys.platform == "win32":
         pass
 '''
 
+def _replace_regex_in_file(path: Path, replacements: list) -> None:
+    if not path.exists():
+        return
+    original = path.read_text(encoding="utf-8")
+    updated = original
+    for pattern, repl in replacements:
+        updated = re.sub(pattern, lambda _m, r=repl: r, updated)
+    if updated != original:
+        path.write_text(updated, encoding="utf-8")
+
+
+def sync_project_versions(repo_root: Path, suite_ver: str, eng_ver: str) -> None:
+    """Synchronizes suite_ver and eng_ver from skillsdb/config.py across all project manifests, installers, and docs."""
+    import json as _json
+    import sqlite3 as _sqlite3
+    from datetime import datetime, timezone
+
+    version_file = repo_root / "VERSION"
+    if not version_file.exists() or version_file.read_text(encoding="utf-8").strip() != suite_ver:
+        version_file.write_text(f"{suite_ver}\n", encoding="utf-8")
+
+    plugin_json_path = repo_root / "plugin" / "plugin.json"
+    if plugin_json_path.exists():
+        p_data = _json.loads(plugin_json_path.read_text(encoding="utf-8"))
+        if p_data.get("version") != eng_ver:
+            p_data["version"] = eng_ver
+            plugin_json_path.write_text(_json.dumps(p_data, indent=2) + "\n", encoding="utf-8")
+
+    _replace_regex_in_file(
+        repo_root / "plugin" / "README.md",
+        [
+            (
+                r"AntiGraviton `v[0-9.]+` \(`SkillsDB v[0-9.]+`\)",
+                f"AntiGraviton `v{suite_ver}` (`SkillsDB v{eng_ver}`)",
+            ),
+        ],
+    )
+
+    _replace_regex_in_file(
+        repo_root / "README.md",
+        [
+            (r"# AntiGraviton complete suite \(`v[0-9.]+`\)", f"# AntiGraviton complete suite (`v{suite_ver}`)"),
+            (r"\*\*SkillsDB \(`v[0-9.]+`\)\*\*", f"**SkillsDB (`v{eng_ver}`)**"),
+            (r"\*\*SkillsDB context and memory engine \(`v[0-9.]+`\)\*\*", f"**SkillsDB context and memory engine (`v{eng_ver}`)**"),
+            (r"\| AntiGraviton suite \(`v[0-9.]+`\) \|", f"| AntiGraviton suite (`v{suite_ver}`) |"),
+            (r"# SemVer 2\.0\.0 suite release version \([0-9.]+\)", f"# SemVer 2.0.0 suite release version ({suite_ver})"),
+            (r"# Modular Python package source \(v[0-9.]+\)", f"# Modular Python package source (v{eng_ver})"),
+        ],
+    )
+
+    _replace_regex_in_file(
+        repo_root / "install-antigraviton.ps1",
+        [
+            (r"AntiGraviton Complete Suite \(v[0-9.]+\)", f"AntiGraviton Complete Suite (v{suite_ver})"),
+            (r"SkillsDB Context & Memory Engine \(v[0-9.]+\)", f"SkillsDB Context & Memory Engine (v{eng_ver})"),
+            (r'else \{ "[0-9.]+" \}', f'else {{ "{suite_ver}" }}'),
+            (r"Deploying SkillsDB Engine \(v[0-9.]+\)", f"Deploying SkillsDB Engine (v{eng_ver})"),
+            (r"SkillsDB Engine \(v[0-9.]+\):", f"SkillsDB Engine (v{eng_ver}):"),
+        ],
+    )
+
+    _replace_regex_in_file(
+        repo_root / "install_antigraviton.py",
+        [
+            (r"AntiGraviton Complete Suite \(v[0-9.]+\)", f"AntiGraviton Complete Suite (v{suite_ver})"),
+            (r"SkillsDB Context & Memory Engine \(v[0-9.]+\)", f"SkillsDB Context & Memory Engine (v{eng_ver})"),
+            (r'else "[0-9.]+"', f'else "{suite_ver}"'),
+            (r"Deploying SkillsDB Engine \(v[0-9.]+\)", f"Deploying SkillsDB Engine (v{eng_ver})"),
+        ],
+    )
+
+    _replace_regex_in_file(
+        repo_root / ".agents" / "skills" / "install-antigraviton" / "SKILL.md",
+        [
+            (r"\(SkillsDB v[0-9.]+ \+", f"(SkillsDB v{eng_ver} +"),
+            (r"\*\*SkillsDB Context & Memory Engine \(`v[0-9.]+`\)\*\*", f"**SkillsDB Context & Memory Engine (`v{eng_ver}`)**"),
+        ],
+    )
+
+    db_file = repo_root / "database" / "customizations.db"
+    if db_file.exists():
+        try:
+            conn = _sqlite3.connect(str(db_file), timeout=10.0)
+            try:
+                cur = conn.cursor()
+                row = cur.execute("SELECT value FROM runtime_config WHERE key = 'schema_version';").fetchone()
+                if row and row[0] != eng_ver:
+                    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                    cur.execute(
+                        "UPDATE runtime_config SET value = ?, updated_at = ? WHERE key = 'schema_version';",
+                        (eng_ver, now_str),
+                    )
+                    conn.commit()
+            finally:
+                conn.close()
+        except Exception:
+            pass
+
+
 def bundle():
     repo_root = Path(__file__).parent.resolve()
     pkg_dir = repo_root / "skillsdb"
@@ -102,30 +201,13 @@ def bundle():
     cfg_text = (pkg_dir / "config.py").read_text(encoding="utf-8")
     m_ver = re.search(r'__version__\s*=\s*"([^"]+)"', cfg_text)
     m_sver = re.search(r'__suite_version__\s*=\s*"([^"]+)"', cfg_text)
-    eng_ver = m_ver.group(1) if m_ver else "3.7.8"
-    suite_ver = m_sver.group(1) if m_sver else "1.4.8"
+    eng_ver = m_ver.group(1) if m_ver else "3.7.9"
+    suite_ver = m_sver.group(1) if m_sver else "1.4.9"
 
     header_str = re.sub(r"Version:\s*[0-9.]+", f"Version: {eng_ver}", HEADER.strip())
     bundled_chunks = [header_str]
 
-    plugin_json_path = repo_root / "plugin" / "plugin.json"
-    if plugin_json_path.exists():
-        import json as _json
-        p_data = _json.loads(plugin_json_path.read_text(encoding="utf-8"))
-        if p_data.get("version") != eng_ver:
-            p_data["version"] = eng_ver
-            plugin_json_path.write_text(_json.dumps(p_data, indent=2) + "\n", encoding="utf-8")
-
-    plugin_readme_path = repo_root / "plugin" / "README.md"
-    if plugin_readme_path.exists():
-        pr_txt = plugin_readme_path.read_text(encoding="utf-8")
-        pr_new = re.sub(
-            r"AntiGraviton `v[0-9.]+` \(`SkillsDB v[0-9.]+`\)",
-            f"AntiGraviton `v{suite_ver}` (`SkillsDB v{eng_ver}`)",
-            pr_txt,
-        )
-        if pr_new != pr_txt:
-            plugin_readme_path.write_text(pr_new, encoding="utf-8")
+    sync_project_versions(repo_root, suite_ver, eng_ver)
 
     for rel_path in MODULE_ORDER:
         module_path = pkg_dir / rel_path

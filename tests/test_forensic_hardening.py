@@ -365,6 +365,19 @@ class TestForensicHardeningV143(unittest.TestCase):
         self.assertTrue(any("Duplicate Keep a Changelog version header" in m for m in dup_msgs))
 
 
+    def test_build_sync_project_versions_and_site_neutral_plugin_readme(self):
+        from skillsdb.config import __version__, __suite_version__
+        repo_root = Path(__file__).resolve().parent.parent
+        version_txt = (repo_root / "VERSION").read_text(encoding="utf-8").strip()
+        self.assertEqual(version_txt, __suite_version__)
+        pjson = json.loads((repo_root / "plugin" / "plugin.json").read_text(encoding="utf-8"))
+        self.assertEqual(pjson.get("version"), __version__)
+        preadme = (repo_root / "plugin" / "README.md").read_text(encoding="utf-8")
+        self.assertIn(f"AntiGraviton `v{__suite_version__}` (`SkillsDB v{__version__}`)", preadme)
+        self.assertNotIn("http://localhost:3000/MoerthJ/AntiGraviton", preadme)
+        self.assertNotIn("http://localhost:3000/MickyFoley/AntiGraviton", preadme)
+
+
 if __name__ == "__main__":
     unittest.main()
 

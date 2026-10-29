@@ -1,9 +1,9 @@
 # AntiGraviton SkillsDB (`customizations-db`)
 
-- **Developer**: MoerthJ (`scorpion421`)
-- **Suite Version**: AntiGraviton `v1.4.8` (`SkillsDB v3.7.8`)
+- **Developer**: `scorpion421` (`MickyFoley` / `MoerthJ`)
+- **Suite Version**: AntiGraviton `v1.4.9` (`SkillsDB v3.7.9`)
 - **GitHub Repository**: [https://github.com/scorpion421/AntiGraviton](https://github.com/scorpion421/AntiGraviton)
-- **Local Gitea Repository**: [http://localhost:3000/MoerthJ/AntiGraviton](http://localhost:3000/MoerthJ/AntiGraviton)
+- **Local Gitea Service**: [http://localhost:3000](http://localhost:3000) (`skillsdb gitea-status`)
 
 ## Core capabilities
 

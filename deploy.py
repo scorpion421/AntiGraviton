@@ -6,6 +6,7 @@ to the active user's ~/.gemini directory with zero hardcoded paths.
 """
 
 import os
+import re
 import sys
 import json
 import shutil
@@ -184,6 +185,28 @@ def deploy(source_dir: Path = None, target_dir: Path = None):
         if stray_dir.exists():
             shutil.rmtree(stray_dir, ignore_errors=True)
     shutil.copytree(source_dir / "plugin", target_plugin, dirs_exist_ok=True)
+    deployed_readme = target_plugin / "README.md"
+    if deployed_readme.exists() and target_db_file.exists():
+        try:
+            with contextlib.closing(sqlite3.connect(str(target_db_file), timeout=10.0)) as _rc_conn:
+                _rows = dict(
+                    _rc_conn.execute(
+                        "SELECT key, value FROM runtime_config WHERE key IN ('gitea_url', 'gitea_user', 'gitea_owner');"
+                    ).fetchall()
+                )
+            _g_url = (_rows.get("gitea_url") or "http://localhost:3000").rstrip("/")
+            _g_owner = (_rows.get("gitea_user") or _rows.get("gitea_owner") or "").strip()
+            if _g_owner:
+                _rm_txt = deployed_readme.read_text(encoding="utf-8")
+                _repo_url = f"{_g_url}/{_g_owner}/AntiGraviton"
+                _rm_txt = re.sub(
+                    r"- \*\*Local Gitea (Service|Repository)\*\*: .*",
+                    f"- **Local Gitea Repository**: [{_repo_url}]({_repo_url})",
+                    _rm_txt,
+                )
+                deployed_readme.write_text(_rm_txt, encoding="utf-8")
+        except Exception:
+            pass
     print(f"      Plugin deployed to: {target_plugin}")
 
     # 4. Isolate legacy plugins and update config.json
