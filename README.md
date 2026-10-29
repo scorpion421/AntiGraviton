@@ -1,7 +1,7 @@
-# AntiGraviton complete suite (`v1.4.9`)
+# AntiGraviton complete suite (`v1.4.10`)
 
 **Turnkey agentic development environment for Google Antigravity IDE**  
-*Combining **SkillsDB (`v3.7.9`)** + **Antigravity Gitea Windows service (`v1.1.2`)** in a single one-command distribution.*
+*Combining **SkillsDB (`v3.7.10`)** + **Antigravity Gitea Windows service (`v1.1.2`)** in a single one-command distribution.*
 
 ---
 
@@ -11,7 +11,7 @@
 
 It bundles two tightly integrated systems into a single repository and installer:
 
-1. **SkillsDB context and memory engine (`v3.7.9`)**:
+1. **SkillsDB context and memory engine (`v3.7.10`)**:
    - **On-demand micro-skill routing**: Replaces static plugin prompt bloat (~35,000 tokens/turn) with a compact (~450 token) routing directive, Antigravity `v2.28.0+` Turn-1 prompt pre-routing, and surgical SQLite FTS5 micro-skill retrieval (`--summary`, `--section`).
    - **Persistent episodic project memory (`.agents/memory.db`)**: Automatically records architectural decisions, milestone snapshots, and workspace telemetry across sessions so every new conversation starts with full project context.
    - **Organic on-demand workspace learning**: Ships with zero hardcoded paths or credentials. Automatically learns project paths as you work (`mem-init`, `mem-save-snapshot`, `gitea-init`) and discovers Antigravity IDE workspaces from `~/.gemini/config/projects/*.json` and `~/.gemini/antigravity/scratch`.
@@ -24,7 +24,7 @@ It bundles two tightly integrated systems into a single repository and installer
 
 ## 2. Measured impact in daily development
 
-| Metric | Standard Antigravity setup | AntiGraviton suite (`v1.4.9`) | Real-world improvement |
+| Metric | Standard Antigravity setup | AntiGraviton suite (`v1.4.10`) | Real-world improvement |
 | :--- | :--- | :--- | :--- |
 | **System and plugin context load** | ~35,000 tokens / turn | **~1,500 tokens / turn** | **~95% lower base overhead** |
 | **Token consumption (60-turn session, benchmarked on Gemini 4 Argon High)** | ~3.39M input tokens | **~0.83M input tokens** | **~75.5% total token savings (4x session capacity)** |
@@ -103,7 +103,8 @@ powershell -ExecutionPolicy Bypass -File .\install-antigraviton.ps1
 
 ```text
 AntiGraviton/
-|-- VERSION                        # SemVer 2.0.0 suite release version (1.4.9)
+|-- LICENSE                        # GNU Affero General Public License v3.0 (AGPL-3.0-only)
+|-- VERSION                        # SemVer 2.0.0 suite release version (1.4.10)
 |-- CHANGELOG.md                   # SemVer release history
 |-- README.md                      # Suite documentation
 |-- install-antigraviton.ps1       # Unified 1-command installer (SkillsDB + Gitea + Auto-Token)
@@ -114,7 +115,7 @@ AntiGraviton/
 |   `-- skills/
 |       `-- install-antigraviton/
 |           `-- SKILL.md           # Antigravity IDE 1-prompt onboarding skill
-|-- skillsdb/                      # Modular Python package source (v3.7.9)
+|-- skillsdb/                      # Modular Python package source (v3.7.10)
 |   |-- config.py
 |   |-- schema.py
 |   |-- guardrails.py
@@ -182,3 +183,12 @@ skillsdb guardrail check --path .
 
 Published release tags are immutable and never overwritten in place; every update increments the version in [`VERSION`](VERSION), documents all changes in [`CHANGELOG.md`](CHANGELOG.md) using standard Keep a Changelog categories (`Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`), and publishes matching Releases on both Gitea and GitHub (`skillsdb gitea-sync --releases --github`).
 
+---
+
+## 8. License
+
+Copyright (C) 2026 `scorpion421` (`MickyFoley` / `MoerthJ`).
+
+**AntiGraviton** is licensed under the **[GNU Affero General Public License v3.0 (AGPL-3.0-only)](LICENSE)**.
+- You are free to use, study, share, and modify this software with full attribution to the original author.
+- **Strict Copyleft**: Any derivative work, modification, bundled redistribution, or network/cloud service deployment based on AntiGraviton or SkillsDB must be released in full source code form under the exact same **GNU AGPL v3.0** license. Proprietary closed-source commercialization is strictly prohibited.

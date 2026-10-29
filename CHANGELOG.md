@@ -5,6 +5,12 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.10] - 2026-10-29
+
+### Changed
+- **Relicensed Under GNU Affero General Public License v3.0 (`LICENSE`, `README.md`, `plugin/plugin.json`, `plugin/README.md`, `v3.7.10`)**:
+  - Replaced the permissive MIT license with the strict copyleft **GNU AGPL v3.0 (`AGPL-3.0-only`)** license so AntiGraviton and SkillsDB remain permanently free and open source with mandatory author attribution (`scorpion421`), preventing proprietary closed-source commercialization or relicensing by third parties.
+
 ## [1.4.9] - 2026-10-29
 
 ### Changed
