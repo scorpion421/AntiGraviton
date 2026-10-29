@@ -5,6 +5,12 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.11] - 2026-10-29
+
+### Fixed
+- **GitHub Licensee `AGPL-3.0` Badge Detection (`LICENSE`, `v3.7.11`)**:
+  - Removed the custom preamble above the canonical `GNU AFFERO GENERAL PUBLIC LICENSE` header in `LICENSE` and placed the `Copyright (C) 2026 scorpion421 (MickyFoley / MoerthJ)` attribution inside the standard GNU appendix block so GitHub's Licensee parser automatically displays the `AGPL-3.0` license badge.
+
 ## [1.4.10] - 2026-10-29
 
 ### Changed
