@@ -348,6 +348,18 @@ class TestForensicHardeningV143(unittest.TestCase):
                 sys.stdin, sys.stdout = old_stdin, old_stdout
 
 
+    def test_keep_a_changelog_guardrail_rejects_duplicate_version_headers(self):
+        from skillsdb.core.guardrails import check_text
+        dup_cl = (
+            "# Changelog\n\n"
+            "## [1.4.6] - 2026-10-28\n\n### Changed\n- First block.\n\n"
+            "## [1.4.6] - 2026-10-28\n\n### Changed\n- Duplicate block.\n"
+        )
+        violations = check_text(dup_cl, filename="CHANGELOG.md")
+        dup_msgs = [v["message"] for v in violations if v["rule"] == "keep-a-changelog"]
+        self.assertTrue(any("Duplicate Keep a Changelog version header" in m for m in dup_msgs))
+
+
 if __name__ == "__main__":
     unittest.main()
 

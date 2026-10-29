@@ -255,6 +255,14 @@ def sync_changelog_releases(
 
     if sync_github and shutil.which("gh"):
         try:
+            gh_slug = _resolve_github_repo_slug(project_root)
+            if gh_slug:
+                subprocess.run(
+                    ["git", "push", "github", "main", "--tags"],
+                    cwd=str(project_root),
+                    capture_output=True,
+                    timeout=30,
+                )
             for entry in reversed(entries):
                 tag = entry["tag"]
                 body = entry["body"]

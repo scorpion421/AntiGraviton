@@ -54,8 +54,8 @@ if sys.platform == "win32":
 # SECTION: skillsdb.config
 # =====================================================================
 # Ensure UTF-8 output encoding across Windows PowerShell and CMD
-__version__ = "3.7.6"
-__suite_version__ = "1.4.6"
+__version__ = "3.7.7"
+__suite_version__ = "1.4.7"
 
 # Model capability tiers
 TIER_LEAN = "lean"          # Gemini Flash, Flash-Lite, micro-skills, minimal token footprint
@@ -1049,6 +1049,7 @@ def check_text(text: str, filename: str = "<memory>") -> List[Dict[str, Any]]:
     """Checks a string against all deterministic guardrail invariants."""
     violations = []
     lines = text.splitlines()
+    seen_changelog_versions = set()
 
     for idx, line in enumerate(lines, 1):
         # 1. Em-dash and En-dash invariant
@@ -1120,7 +1121,8 @@ def check_text(text: str, filename: str = "<memory>") -> List[Dict[str, Any]]:
                         "snippet": stripped[:100],
                     })
             elif stripped.startswith("## "):
-                if not re.match(r"^## \[(Unreleased|\d+\.\d+\.\d+(?:-[0-9A-Za-z.\-]+)?(?:\+[0-9A-Za-z.\-]+)?)\](?: - \d{4}-\d{2}-\d{2})?$", stripped):
+                m_ver = re.match(r"^## \[(Unreleased|\d+\.\d+\.\d+(?:-[0-9A-Za-z.\-]+)?(?:\+[0-9A-Za-z.\-]+)?)\](?: - \d{4}-\d{2}-\d{2})?$", stripped)
+                if not m_ver:
                     violations.append({
                         "file": filename,
                         "line": idx,
@@ -1132,6 +1134,21 @@ def check_text(text: str, filename: str = "<memory>") -> List[Dict[str, Any]]:
                         ),
                         "snippet": stripped[:100],
                     })
+                else:
+                    ver_key = m_ver.group(1)
+                    if ver_key in seen_changelog_versions:
+                        violations.append({
+                            "file": filename,
+                            "line": idx,
+                            "rule": "keep-a-changelog",
+                            "severity": "CRITICAL",
+                            "message": (
+                                f"Duplicate Keep a Changelog version header '[{ver_key}]'. "
+                                "Each release version must appear strictly once in CHANGELOG.md."
+                            ),
+                            "snippet": stripped[:100],
+                        })
+                    seen_changelog_versions.add(ver_key)
 
     return violations
 
@@ -3681,6 +3698,14 @@ def sync_changelog_releases(
 
     if sync_github and shutil.which("gh"):
         try:
+            gh_slug = _resolve_github_repo_slug(project_root)
+            if gh_slug:
+                subprocess.run(
+                    ["git", "push", "github", "main", "--tags"],
+                    cwd=str(project_root),
+                    capture_output=True,
+                    timeout=30,
+                )
             for entry in reversed(entries):
                 tag = entry["tag"]
                 body = entry["body"]

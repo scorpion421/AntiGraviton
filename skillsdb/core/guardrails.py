@@ -67,6 +67,7 @@ def check_text(text: str, filename: str = "<memory>") -> List[Dict[str, Any]]:
     """Checks a string against all deterministic guardrail invariants."""
     violations = []
     lines = text.splitlines()
+    seen_changelog_versions = set()
 
     for idx, line in enumerate(lines, 1):
         # 1. Em-dash and En-dash invariant
@@ -138,7 +139,8 @@ def check_text(text: str, filename: str = "<memory>") -> List[Dict[str, Any]]:
                         "snippet": stripped[:100],
                     })
             elif stripped.startswith("## "):
-                if not re.match(r"^## \[(Unreleased|\d+\.\d+\.\d+(?:-[0-9A-Za-z.\-]+)?(?:\+[0-9A-Za-z.\-]+)?)\](?: - \d{4}-\d{2}-\d{2})?$", stripped):
+                m_ver = re.match(r"^## \[(Unreleased|\d+\.\d+\.\d+(?:-[0-9A-Za-z.\-]+)?(?:\+[0-9A-Za-z.\-]+)?)\](?: - \d{4}-\d{2}-\d{2})?$", stripped)
+                if not m_ver:
                     violations.append({
                         "file": filename,
                         "line": idx,
@@ -150,6 +152,21 @@ def check_text(text: str, filename: str = "<memory>") -> List[Dict[str, Any]]:
                         ),
                         "snippet": stripped[:100],
                     })
+                else:
+                    ver_key = m_ver.group(1)
+                    if ver_key in seen_changelog_versions:
+                        violations.append({
+                            "file": filename,
+                            "line": idx,
+                            "rule": "keep-a-changelog",
+                            "severity": "CRITICAL",
+                            "message": (
+                                f"Duplicate Keep a Changelog version header '[{ver_key}]'. "
+                                "Each release version must appear strictly once in CHANGELOG.md."
+                            ),
+                            "snippet": stripped[:100],
+                        })
+                    seen_changelog_versions.add(ver_key)
 
     return violations
 

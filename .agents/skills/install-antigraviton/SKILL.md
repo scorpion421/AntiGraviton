@@ -2,7 +2,7 @@
 name: install-antigraviton
 description: >-
   Automated installer and self-healing onboarding workflow for the AntiGraviton Complete Suite
-  (SkillsDB v3.7.6 + Antigravity Gitea Service v1.1.2). Trigger this skill whenever the user asks
+  (SkillsDB v3.7.7 + Antigravity Gitea Service v1.1.2). Trigger this skill whenever the user asks
   to install, set up, configure, repair, or upgrade AntiGraviton, SkillsDB, or the local Gitea service.
 ---
 
@@ -52,7 +52,7 @@ skillsdb doctor
 Immediately after the installation finishes, you **MUST** present a concise, well-structured overview to the user (in their conversational language) covering:
 
 1. **Active Core Capabilities**:
-   - **SkillsDB Context & Memory Engine (`v3.7.6`)**: ~95% lower base token consumption (~1,500 instead of ~35,000 tokens/turn) via on-demand micro-skill routing (`--summary`, `--section`), FTS5 search with synonym expansion, and adaptive model concurrency profiles (`ultra`, `standard`, `lean`, `local`).
+   - **SkillsDB Context & Memory Engine (`v3.7.7`)**: ~95% lower base token consumption (~1,500 instead of ~35,000 tokens/turn) via on-demand micro-skill routing (`--summary`, `--section`), FTS5 search with synonym expansion, and adaptive model concurrency profiles (`ultra`, `standard`, `lean`, `local`).
    - **Episodic Project Memory (`.agents/memory.db`)**: Persists architectural decisions (`mem-save-decision`), project facts (`mem-save-fact`), tasks (`mem-task-*`), and milestone snapshots (`mem-save-snapshot`) across sessions and `/compact` boundaries.
    - **Local Gitea Backup Service (`http://127.0.0.1:3000`)**: Every milestone snapshot automatically creates a Git commit and pushes it in `< 0.5s` to the local Gitea server, including 3-tier self-healing (Windows SCM + non-elevated service start permissions + catch-up sync after offline periods).
    - **Deterministic Guardrails**: Automated protection against secret leaks and formatting violations (`skillsdb guardrail check --fix`).
