@@ -182,6 +182,11 @@ class TestForensicHardeningV143(unittest.TestCase):
         hooks_path = Path(__file__).resolve().parent.parent / "plugin" / "hooks.json"
         data = json.loads(hooks_path.read_text(encoding="utf-8"))
         block = data["skillsdb-autonomous-memory"]
+        pjson = json.loads((Path(__file__).resolve().parent.parent / "plugin" / "plugin.json").read_text(encoding="utf-8"))
+        self.assertEqual(pjson.get("name"), "customizations-db")
+        self.assertTrue(pjson.get("version"))
+        self.assertTrue(pjson.get("displayName"))
+        self.assertEqual(len(pjson.get("suggestedPrompts", [])), 3)
         for item in block.get("PreInvocation", []):
             cmd = item["command"]
             self.assertNotIn('"', cmd)

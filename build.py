@@ -99,7 +99,33 @@ def bundle():
         print(f"Error: {pkg_dir} does not exist.")
         sys.exit(1)
 
-    bundled_chunks = [HEADER.strip()]
+    cfg_text = (pkg_dir / "config.py").read_text(encoding="utf-8")
+    m_ver = re.search(r'__version__\s*=\s*"([^"]+)"', cfg_text)
+    m_sver = re.search(r'__suite_version__\s*=\s*"([^"]+)"', cfg_text)
+    eng_ver = m_ver.group(1) if m_ver else "3.7.8"
+    suite_ver = m_sver.group(1) if m_sver else "1.4.8"
+
+    header_str = re.sub(r"Version:\s*[0-9.]+", f"Version: {eng_ver}", HEADER.strip())
+    bundled_chunks = [header_str]
+
+    plugin_json_path = repo_root / "plugin" / "plugin.json"
+    if plugin_json_path.exists():
+        import json as _json
+        p_data = _json.loads(plugin_json_path.read_text(encoding="utf-8"))
+        if p_data.get("version") != eng_ver:
+            p_data["version"] = eng_ver
+            plugin_json_path.write_text(_json.dumps(p_data, indent=2) + "\n", encoding="utf-8")
+
+    plugin_readme_path = repo_root / "plugin" / "README.md"
+    if plugin_readme_path.exists():
+        pr_txt = plugin_readme_path.read_text(encoding="utf-8")
+        pr_new = re.sub(
+            r"AntiGraviton `v[0-9.]+` \(`SkillsDB v[0-9.]+`\)",
+            f"AntiGraviton `v{suite_ver}` (`SkillsDB v{eng_ver}`)",
+            pr_txt,
+        )
+        if pr_new != pr_txt:
+            plugin_readme_path.write_text(pr_new, encoding="utf-8")
 
     for rel_path in MODULE_ORDER:
         module_path = pkg_dir / rel_path

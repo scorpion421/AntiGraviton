@@ -5,6 +5,17 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.8] - 2026-10-29
+
+### Added
+- **Antigravity Plugin Page Metadata & Documentation (`plugin/plugin.json`, `plugin/README.md`, `build.py`, `v3.7.8`)**:
+  - Enriched `plugin/plugin.json` with `displayName`, `version` (`3.7.8`), and `suggestedPrompts` (3 starter prompts) matching the latest Antigravity Plugin manifest specification, and added `plugin/README.md` with developer and repository links.
+  - Updated `build.py` to automatically synchronize `plugin/plugin.json`, `plugin/README.md`, and the bundled `database/db_manager.py` header version from `skillsdb/config.py`.
+
+### Fixed
+- **Mid-Epoch UTF-8 Manifest Self-Healing After Antigravity IDE Updates (`skillsdb/memory/project_memory.py`)**:
+  - Moved the `<0.2ms` `ensure_windows_utf8_manifests()` check in `handle_pre_invocation_hook()` ahead of `_HOOK_STATE_FILE` deduplication so clicking *Restart to Update* inside an already active conversation epoch immediately restores wiped `Antigravity.exe.manifest` and `language_server.exe.manifest` files on the very next turn.
+
 ## [1.4.7] - 2026-10-29
 
 ### Fixed

@@ -1,4 +1,11 @@
 {
   "name": "customizations-db",
-  "description": "Centralized database integration for system rules and workflow skills"
+  "displayName": "AntiGraviton SkillsDB",
+  "version": "3.7.8",
+  "description": "Centralized SQLite FTS5 customizations database, episodic project memory (.agents/memory.db), temporal epoch isolation, and local Gitea/GitHub release automation.",
+  "suggestedPrompts": [
+    "Show today's SkillsDB token savings and active workspace status",
+    "Run a full SkillsDB system diagnostics and guardrail check",
+    "Synchronize the current workspace and releases to Gitea and GitHub"
+  ]
 }

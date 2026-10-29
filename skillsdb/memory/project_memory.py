@@ -1158,6 +1158,18 @@ def handle_pre_invocation_hook():
         brain_dir=brain_dir_override,
     )
 
+    # Always run fast (<0.2ms) Windows UTF-8 manifest self-healing check before hook
+    # deduplication so mid-conversation Antigravity IDE updates ('Restart to Update')
+    # immediately restore wiped .manifest files on the very next turn.
+    utf8_healed = ensure_windows_utf8_manifests()
+    _sync_builtin_fn = globals().get("sync_builtin_skills")
+    if not _sync_builtin_fn:
+        try:
+            import importlib
+            _sync_builtin_fn = getattr(importlib.import_module("skillsdb.updater.merger"), "sync_builtin_skills", None)
+        except Exception:
+            _sync_builtin_fn = None
+
     # Deduplicate per (conversationId, workspace, temporal_epoch) so Antigravity's
     # per-tool-step PreInvocation calls within the same session epoch do not bloat
     # transcript.jsonl, while a new day or >4h temporal epoch automatically re-hydrates
@@ -1175,7 +1187,19 @@ def handle_pre_invocation_hook():
                 except Exception:
                     state = {}
             if state.get(cid) == dedup_token:
-                print(json.dumps({"injectSteps": []}))
+                if utf8_healed:
+                    if _sync_builtin_fn:
+                        try:
+                            _sync_builtin_fn(silent=True)
+                        except Exception:
+                            pass
+                    print(json.dumps({
+                        "injectSteps": [{
+                            "ephemeralMessage": "[SKILLSDB SELF-HEALING: Restored Windows UTF-8 application manifests after mid-session Antigravity IDE update]"
+                        }]
+                    }))
+                else:
+                    print(json.dumps({"injectSteps": []}))
                 return
             state[cid] = dedup_token
             if len(state) > 100:
@@ -1185,15 +1209,6 @@ def handle_pre_invocation_hook():
         except Exception:
             pass
 
-    # Autonomous post-update self-healing: restore Windows UTF-8 manifests & sync builtin skills if Antigravity updated
-    utf8_healed = ensure_windows_utf8_manifests()
-    _sync_builtin_fn = globals().get("sync_builtin_skills")
-    if not _sync_builtin_fn:
-        try:
-            import importlib
-            _sync_builtin_fn = getattr(importlib.import_module("skillsdb.updater.merger"), "sync_builtin_skills", None)
-        except Exception:
-            _sync_builtin_fn = None
     if _sync_builtin_fn:
         try:
             _sync_builtin_fn(silent=True)
