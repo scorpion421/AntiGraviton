@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Unified Cross-Platform One-Command Installer for the AntiGraviton Complete Suite (v1.4.14).
+Unified Cross-Platform One-Command Installer for the AntiGraviton Complete Suite (v1.4.15).
 
 Supports Linux (systemd --user / rootless daemon), macOS (launchd LaunchAgent), and Windows.
 Deploys:
 1. Non-destructive upgrade preservation of existing runtime_config, Gitea tokens, learned workspaces, and user-learned rules
-2. SkillsDB Context & Memory Engine (v3.7.14) + customizations-db Plugin + shell PATH integration
+2. SkillsDB Context & Memory Engine (v3.7.15) + customizations-db Plugin + shell PATH integration
 3. Antigravity Gitea Local Service (v1.1.2) on loopback (127.0.0.1:3000) with crash auto-recovery and optional 03:00 backup timer
 4. Zero-touch local Gitea Admin user (with optional explicit password) & API Token provisioning into SkillsDB
 5. Strict /api/healthz verification gate, organic workspace discovery, and interactive capability briefing
@@ -38,7 +38,7 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-GITEA_VERSION = "1.22.6"
+GITEA_VERSION = "28.2.0"
 
 
 def get_gitea_download_url(version: str = GITEA_VERSION, sys_platform: str = None, machine: str = None) -> str:
@@ -52,7 +52,9 @@ def get_gitea_download_url(version: str = GITEA_VERSION, sys_platform: str = Non
     if plat == "darwin":
         return f"https://dl.gitea.com/gitea/{version}/gitea-{version}-darwin-10.12-{arch}"
     if plat.startswith("win"):
-        return f"https://dl.gitea.com/gitea/{version}/gitea-{version}-windows-4.0-{arch}.exe"
+        if str(version).startswith("1."):
+            return f"https://dl.gitea.com/gitea/{version}/gitea-{version}-windows-4.0-{arch}.exe"
+        return f"https://github.com/go-gitea/gitea/releases/download/v{version}/gitea-{version}-windows-{arch}.exe"
     raise RuntimeError(f"Unsupported platform for automatic Gitea binary download: {plat} ({arch_raw})")
 
 
@@ -342,7 +344,7 @@ def install_antigraviton(
 ) -> None:
     suite_root = Path(__file__).parent.resolve()
     version_file = suite_root / "VERSION"
-    suite_version = version_file.read_text(encoding="utf-8-sig").strip() if version_file.exists() else "1.4.14"
+    suite_version = version_file.read_text(encoding="utf-8-sig").strip() if version_file.exists() else "1.4.15"
     user_home = Path.home()
     gemini_dir = user_home / ".gemini"
     target_db_path = gemini_dir / "database" / "customizations.db"
@@ -368,7 +370,7 @@ def install_antigraviton(
         preserved_state = {"runtime_config": {}, "learned_rules": []}
 
     # STEP 2: Deploy SkillsDB Core & Antigravity Plugin
-    print("[2/5] Deploying SkillsDB Engine (v3.7.14) and customizations-db Plugin...")
+    print("[2/5] Deploying SkillsDB Engine (v3.7.15) and customizations-db Plugin...")
     deploy_py = suite_root / "deploy.py"
     subprocess.run([sys.executable, str(deploy_py), "--source", str(suite_root), "--target", str(gemini_dir)], check=True)
     ensure_posix_shell_path(gemini_dir / "antigravity" / "bin")

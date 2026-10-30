@@ -5,6 +5,12 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.15] - 2026-10-30
+
+### Changed
+- **Upgraded Default Gitea Service Binary to `v28.2.0` (`install-antigraviton.ps1`, `install_antigraviton.py`, `v3.7.15`)**:
+  - Updated the default Gitea binary version in `install-antigraviton.ps1` and `install_antigraviton.py` from `1.22.6` to `28.2.0` (`gitea-28.2.0-windows-amd64.exe` with SHA256 verification) and upgraded the local Gitea Windows service to `v28.2.0`.
+
 ## [1.4.14] - 2026-10-29
 
 ### Added
