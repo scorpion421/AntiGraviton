@@ -5,6 +5,14 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.5] - 2026-10-31
+
+### Added
+- **Transcript-Based Workspace Inference & Mid-Session Project Memory Re-Hydration (`skillsdb/memory/project_memory.py`, `skillsdb/cli.py`, `plugin/rules/AGENTS.md`, `v3.8.5`)**:
+  - **Automatic Workspace Inference (`inferred_workspace`)**: When no formal IDE workspace is open (`workspacePaths: []`), `handle_pre_invocation_hook()` automatically infers the active project root (e.g. `D:\Android`) from recent file paths in `transcript.jsonl`, prioritizing directories with `.agents/memory.db` or `.git`.
+  - **Mid-Session `.agents/memory.db` Re-Hydration**: Every 50 steps (`step_bucket = max_step_idx // 50`) or whenever repeated file reads (`>= 3x` on the same file) / read streaks occur, the hook now automatically re-injects `=== PROJECT MEMORY CONTEXT (Auto-Hydrated from .agents/memory.db) ===` (Active Task Board, Project Facts, Architectural Decisions, and Latest Snapshot) so IDE `<CONTEXT_SUMMARY>` compactions never wipe out project memory during multi-hour runs.
+  - **Active Fact & Task Indexing Enforcement (`mem-save-fact` / `mem-task-add`)**: Mandated structural fact/offset indexing in `AGENTS.md`, Turn-1 guardrails, and the Drift Guard (`[PROJECT MEMORY ALERT]` when `< 5` facts exist or files are repeatedly re-read), and added CLI aliases `mem-add-task`, `mem-update-task`, `mem-list-tasks`, and `mem-clear-tasks`.
+
 ## [1.5.4] - 2026-10-31
 
 ### Changed

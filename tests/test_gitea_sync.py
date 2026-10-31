@@ -660,5 +660,66 @@ class TestGiteaSync(unittest.TestCase):
         self.assertTrue(_can_safely_force_replace_remote_snapshot(repo_dir, "main"))
 
 
+    def test_v1_5_5_workspace_inference_and_mid_session_memory_rehydration(self):
+        """Verifies v1.5.5 transcript workspace inference when workspacePaths=[], mid-session memory re-hydration, and mem-add-task alias."""
+        import io
+        import json
+        from unittest.mock import patch
+        from skillsdb.cli import build_parser
+        from skillsdb.memory.project_memory import (
+            handle_pre_invocation_hook,
+            mem_save_fact,
+            mem_task_add,
+        )
+
+        # 1. Verify CLI alias mem-add-task
+        parser = build_parser()
+        parsed = parser.parse_args(["mem-add-task", "Map Smali classes", "--project", str(self.test_dir)])
+        self.assertIn(parsed.command, ("mem-task-add", "mem-add-task"))
+
+        # 2. Populate self.test_dir/.agents/memory.db with a fact and task
+        mem_save_fact(self.conn, "surgical_deep_shrink.py:entrypoints", "Lines 1-420 core patcher, 421-890 smali verifier")
+        mem_task_add(self.conn, "Verify b1.smali analytics strip", priority="high", status="in_progress")
+
+        # 3. Create fake transcript in fake brain dir referencing self.test_dir files with repeated reads at step 60
+        fake_brain = self.test_dir / "fake_brain"
+        cid = "conv-v155-test"
+        log_dir = fake_brain / cid / ".system_generated" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        t_file = log_dir / "transcript.jsonl"
+        target_py = (self.test_dir / "surgical_deep_shrink.py").as_posix()
+        lines = [
+            json.dumps({"step_index": 1, "type": "USER_INPUT", "source": "USER_EXPLICIT", "created_at": "2026-10-31T10:00:00Z", "content": f"Analyze {target_py}"}),
+            json.dumps({"step_index": 55, "type": "PLANNER_RESPONSE", "tool_calls": [{"name": "read_file", "args": {"Path": target_py}}]}),
+            json.dumps({"step_index": 56, "type": "PLANNER_RESPONSE", "tool_calls": [{"name": "read_file", "args": {"Path": target_py}}]}),
+            json.dumps({"step_index": 57, "type": "PLANNER_RESPONSE", "tool_calls": [{"name": "read_file", "args": {"Path": target_py}}]}),
+        ]
+        t_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        # Turn 1 with workspacePaths=[] must infer self.test_dir and auto-load .agents/memory.db
+        payload_t1 = json.dumps({"conversationId": cid, "workspacePaths": [], "brainDir": str(fake_brain), "invocationNum": 1})
+        out_t1 = io.StringIO()
+        with patch("skillsdb.memory.project_memory._HOOK_STATE_FILE", self.test_dir / "hook_state.json"), patch("sys.stdin", io.StringIO(payload_t1)), patch("sys.stdout", out_t1):
+            handle_pre_invocation_hook()
+        res_t1 = json.loads(out_t1.getvalue())
+        msg_t1 = res_t1["injectSteps"][0]["ephemeralMessage"]
+        self.assertIn("PROJECT MEMORY CONTEXT", msg_t1)
+        self.assertIn("surgical_deep_shrink.py:entrypoints", msg_t1)
+        self.assertIn("Verify b1.smali analytics strip", msg_t1)
+
+        # Advance transcript to step 105 (next 50-step bucket) within the same epoch and verify mid-session re-hydration + alert
+        lines.append(json.dumps({"step_index": 105, "type": "PLANNER_RESPONSE", "tool_calls": [{"name": "read_file", "args": {"Path": target_py}}]}))
+        t_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        out_t2 = io.StringIO()
+        with patch("skillsdb.memory.project_memory._HOOK_STATE_FILE", self.test_dir / "hook_state.json"), patch("sys.stdin", io.StringIO(payload_t1)), patch("sys.stdout", out_t2):
+            handle_pre_invocation_hook()
+        res_t2 = json.loads(out_t2.getvalue())
+        msg_t2 = res_t2["injectSteps"][0]["ephemeralMessage"]
+        self.assertIn("SKILLSDB TURN-ECONOMY & DRIFT GUARD (Step 105)", msg_t2)
+        self.assertIn("PROJECT MEMORY ALERT", msg_t2)
+        self.assertIn("PROJECT MEMORY CONTEXT (Auto-Hydrated from .agents/memory.db)", msg_t2)
+        self.assertIn("surgical_deep_shrink.py:entrypoints", msg_t2)
+
+
 if __name__ == "__main__":
     unittest.main()

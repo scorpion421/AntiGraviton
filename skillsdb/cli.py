@@ -290,14 +290,14 @@ def build_parser() -> argparse.ArgumentParser:
     mem_rec_parser = subparsers.add_parser("mem-reconcile", help="Report fact lifecycle and tombstone health")
     mem_rec_parser.add_argument("--project", default=None, help="Project root directory (optional)")
 
-    mem_task_add_parser = subparsers.add_parser("mem-task-add", help="Add a task to the project task board")
+    mem_task_add_parser = subparsers.add_parser("mem-task-add", aliases=["mem-add-task"], help="Add a task to the project task board")
     mem_task_add_parser.add_argument("title", help="Task title")
     mem_task_add_parser.add_argument("--desc", default="", help="Task description")
     mem_task_add_parser.add_argument("--priority", choices=["low", "med", "high", "critical"], default="med", help="Priority (default: med)")
     mem_task_add_parser.add_argument("--status", choices=["pending", "in_progress", "completed", "blocked"], default="pending", help="Status (default: pending)")
     mem_task_add_parser.add_argument("--project", default=None, help="Project root directory (optional)")
 
-    mem_task_update_parser = subparsers.add_parser("mem-task-update", help="Update task status, priority, or details")
+    mem_task_update_parser = subparsers.add_parser("mem-task-update", aliases=["mem-update-task"], help="Update task status, priority, or details")
     mem_task_update_parser.add_argument("id", type=int, help="Task ID")
     mem_task_update_parser.add_argument("--status", choices=["pending", "in_progress", "completed", "blocked"], default=None, help="New status")
     mem_task_update_parser.add_argument("--priority", choices=["low", "med", "high", "critical"], default=None, help="New priority")
@@ -305,12 +305,12 @@ def build_parser() -> argparse.ArgumentParser:
     mem_task_update_parser.add_argument("--desc", default=None, help="Updated description")
     mem_task_update_parser.add_argument("--project", default=None, help="Project root directory (optional)")
 
-    mem_task_list_parser = subparsers.add_parser("mem-task-list", help="List tasks from the project task board")
+    mem_task_list_parser = subparsers.add_parser("mem-task-list", aliases=["mem-list-tasks"], help="List tasks from the project task board")
     mem_task_list_parser.add_argument("--status", default=None, help="Filter by status (pending, in_progress, completed, blocked, all)")
     mem_task_list_parser.add_argument("--json", action="store_true", help="Output as JSON")
     mem_task_list_parser.add_argument("--project", default=None, help="Project root directory (optional)")
 
-    mem_task_clear_parser = subparsers.add_parser("mem-task-clear", help="Clear completed tasks from task board")
+    mem_task_clear_parser = subparsers.add_parser("mem-task-clear", aliases=["mem-clear-tasks"], help="Clear completed tasks from task board")
     mem_task_clear_parser.add_argument("--all", action="store_true", help="Clear all tasks, not just completed")
     mem_task_clear_parser.add_argument("--project", default=None, help="Project root directory (optional)")
 
@@ -710,13 +710,13 @@ def main(argv: list[str] = None):
                 mem_fact_history(pconn, key=args.key)
             elif args.command == "mem-reconcile":
                 mem_reconcile(pconn)
-            elif args.command == "mem-task-add":
+            elif args.command in ("mem-task-add", "mem-add-task"):
                 mem_task_add(pconn, args.title, description=args.desc, priority=args.priority, status=args.status)
-            elif args.command == "mem-task-update":
+            elif args.command in ("mem-task-update", "mem-update-task"):
                 mem_task_update(pconn, args.id, status=args.status, priority=args.priority, title=args.title, description=args.desc)
-            elif args.command == "mem-task-list":
+            elif args.command in ("mem-task-list", "mem-list-tasks"):
                 mem_task_list(pconn, status=args.status, as_json=args.json)
-            elif args.command == "mem-task-clear":
+            elif args.command in ("mem-task-clear", "mem-clear-tasks"):
                 mem_task_clear(pconn, only_completed=not getattr(args, "all", False))
             elif args.command == "mem-compact":
                 mem_compact(pconn, summary=args.summary, next_steps=args.next_steps, archive_completed=not getattr(args, "keep_completed", False), project_root=proj_root)
