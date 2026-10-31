@@ -5,6 +5,17 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.16] - 2026-10-31
+
+### Added
+- **Universal Deliverable Release Artifact Attachment (`skillsdb/memory/gitea_releases.py`, `skillsdb/memory/gitea_sync.py`, `plugin/rules/AGENTS.md`, `v3.7.16`)**:
+  - Added `_discover_project_release_artifacts()` and `_attach_release_binary_assets()` to automatically discover and attach project deliverable artifacts (`.apk`, `.aab`, `.ipa`, `.exe`, `.msi`, `.msix`, `.dmg`, `.pkg`, `.deb`, `.rpm`, `.appimage`, `.xpi`, `.crx`, `.vsix`, `.whl`, `.jar`, `.nupkg`, and release archives in `releases/` or `dist/`) as downloadable Gitea Release Assets during `skillsdb gitea-sync --releases` and `skillsdb gitea-release`.
+  - Anchored the global rule requiring deliverable binaries and artifacts to be attached to every corresponding SemVer release and enforcing canonical `AntiGraviton` source builds (`build.py` + `deploy.py`) over in-place `db_manager.py` edits.
+
+### Fixed
+- **Release Asset Helper Parameter Alignment (`skillsdb/memory/gitea_releases.py`, `v3.7.16`)**:
+  - Fixed the positional parameter order of `_attach_release_binary_assets(base_url, owner, repo_name, rel_id, tag, existing_assets, token, project_root)` across all call sites in `sync_changelog_releases()` and `publish_gitea_release()`, and excluded third-party vendor binaries (such as `gitea-*.exe`, `apktool*.jar`, and `-unsigned.apk`) from release asset discovery.
+
 ## [1.4.15] - 2026-10-30
 
 ### Changed

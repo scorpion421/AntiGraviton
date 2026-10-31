@@ -48,6 +48,8 @@ from .gitea_releases import (
     parse_keep_a_changelog,
     _extract_changelog_section,
     _resolve_github_repo_slug,
+    _discover_project_release_artifacts,
+    _attach_release_binary_assets,
     sync_changelog_releases,
 )
 
@@ -1088,6 +1090,7 @@ def publish_gitea_release(
             with urllib.request.urlopen(patch_req, timeout=8.0) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 html_url = data.get("html_url") or f"{base_url}/{user}/{target_name}/releases/tag/{final_tag}"
+                _attach_release_binary_assets(base_url, user, target_name, data.get("id"), final_tag, data.get("assets", []), token, project_root)
                 print(f"  [OK] Updated Gitea Release {final_tag}: {html_url}")
         except Exception:
             pass
@@ -1103,6 +1106,7 @@ def publish_gitea_release(
             with urllib.request.urlopen(post_req, timeout=8.0) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 html_url = data.get("html_url") or f"{base_url}/{user}/{target_name}/releases/tag/{final_tag}"
+                _attach_release_binary_assets(base_url, user, target_name, data.get("id"), final_tag, data.get("assets", []), token, project_root)
                 print(f"  [OK] Published Gitea Release {final_tag}: {html_url}")
         except Exception as e:
             print(f"  [WARN] Could not publish Gitea release {final_tag}: {e}")

@@ -502,5 +502,54 @@ class TestGiteaSync(unittest.TestCase):
         self.assertEqual(refs_after, "")
 
 
+    def test_release_deliverable_artifact_discovery_and_attachment(self):
+        """Verifies universal deliverable artifact discovery (.apk, .exe, releases/) and exclusion of unsigned/vendor binaries."""
+        from skillsdb.memory.gitea_releases import _discover_project_release_artifacts, _attach_release_binary_assets
+        from unittest.mock import patch, MagicMock
+
+        proj = self.test_dir / "Nova-Launcher"
+        proj.mkdir(parents=True, exist_ok=True)
+        rel_dir = proj / "releases"
+        rel_dir.mkdir(parents=True, exist_ok=True)
+
+        # Should be excluded
+        (proj / "nova-unsigned.apk").write_bytes(b"unsigned")
+        (proj / "nova-aligned.apk").write_bytes(b"aligned")
+        (proj / "gitea-28.2.0-windows-amd64.exe").write_bytes(b"vendor")
+
+        # Should be discovered
+        clean_apk = proj / "nova-launcher-8.9.7-clean.apk"
+        clean_apk.write_bytes(b"PK\x03\x04signed-apk-payload")
+        rel_exe = rel_dir / "Nova-Launcher-v8.9.7-setup.exe"
+        rel_exe.write_bytes(b"MZ-installer")
+
+        found = _discover_project_release_artifacts(proj, "Nova-Launcher", "v8.9.7")
+        found_names = [p.name for p in found]
+        self.assertIn("nova-launcher-8.9.7-clean.apk", found_names)
+        self.assertIn("Nova-Launcher-v8.9.7-setup.exe", found_names)
+        self.assertNotIn("nova-unsigned.apk", found_names)
+        self.assertNotIn("nova-aligned.apk", found_names)
+        self.assertNotIn("gitea-28.2.0-windows-amd64.exe", found_names)
+
+        mock_resp = MagicMock()
+        mock_resp.status = 201
+        mock_resp.__enter__.return_value = mock_resp
+        mock_resp.__exit__.return_value = False
+
+        with patch("urllib.request.urlopen", return_value=mock_resp) as mock_urlopen:
+            uploaded = _attach_release_binary_assets(
+                "http://localhost:3000",
+                "MickyFoley",
+                "Nova-Launcher",
+                42,
+                "v8.9.7",
+                [],
+                "tok123",
+                proj,
+            )
+            self.assertEqual(uploaded, ["Nova-Launcher-v8.9.7-clean-signed.apk"])
+            self.assertTrue(mock_urlopen.called)
+
+
 if __name__ == "__main__":
     unittest.main()
