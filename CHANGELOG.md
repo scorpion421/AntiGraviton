@@ -5,6 +5,14 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-10-31
+
+### Added
+- **3-Stage Turn-Economy, Diagnostic Protocol & Mid-Session Drift Guard (`skillsdb/memory/project_memory.py`, `plugin/rules/AGENTS.md`, `database/customizations.db`, `v3.8.0`)**:
+  - **Stage 1 (Explicit Threshold Rules)**: Replaced ambiguous line-slicing wording with concrete thresholds across `AGENTS.md` and `customizations.db` (`token-efficiency`): read files `<= 800 lines` in a single call, batch multi-range reads for files `> 800 lines` in parallel within 1 turn, delegate open-ended debugging (`>= 4 search steps` or `> 5 files`) to `research` subagents (`invoke_subagent`), eliminate entire bug classes before rebuilding (`build && test && verify`), enforce zero `manage_task status` polling (`WaitMsBeforeAsync: 5000-10000` + `Reactive Wakeup`), and use local SQLite indexing in `scratch/` for projects `> 300 files` requiring `>= 3` analysis rounds.
+  - **Stage 2 (Turn-1 Invariant Injection)**: Added Section `4. TURN-ECONOMY, PARALLEL BATCHING & DIAGNOSTIC PROTOCOL` directly into the `[SKILLSDB CRITICAL GUARDRAIL & INVARIANTS (TURN 1)]` block of `handle_pre_invocation_hook()`.
+  - **Stage 3 (Mid-Session Drift Guard)**: Extended `analyze_conversation_epochs_and_scope()` and `handle_pre_invocation_hook()` to track conversation step buckets (every 150 steps) as well as consecutive `read_file` salami-slicing (`>= 6` in last 15 lines) and `manage_task` polling streaks (`>= 2`), automatically injecting a 2-line ephemeral drift-guard reminder during long marathon sessions.
+
 ## [1.4.16] - 2026-10-31
 
 ### Added

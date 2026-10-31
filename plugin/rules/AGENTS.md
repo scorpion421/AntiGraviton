@@ -27,8 +27,11 @@ The agent must always adhere to the active global rules registered in the databa
 4. **Admin elevation (local admin default + optional DPAPI)**:
    - Execute administrative tasks directly if the active session is already elevated; otherwise use optional DPAPI credentials (`~/.gemini/config/credentials/*.credential.xml` for local admin or `.adm` accounts) without UAC prompts, or fall back to standard Windows UAC elevation (`Start-Process -Verb RunAs`).
 
-5. **Token efficiency and context hygiene**:
-   - Strict context hygiene (slice file reads with StartLine/EndLine, compact command outputs like `git status -s`, subagent isolation, no verbose fluff or restatements).
+5. **Turn-economy, diagnostic protocol, and context hygiene**:
+   - **Anti-salami-slicing (`read_file` budget)**: Read files `<= 800 lines` completely in a single call when inspecting or editing them. For files `> 800 lines`, locate target line numbers via grep/script first and execute all `read_file` calls in parallel within a single turn. Never slice a file sequentially across multiple 80-120 line turns.
+   - **Subagent firewall (`invoke_subagent`)**: Execute targeted edits in 1-3 known files directly in the main context. For open-ended root-cause debugging (`>= 4 search steps`) or scanning `> 5 files` / large logs, delegate exploration to a `research` subagent (which must return exact file paths, line numbers, and root cause) to keep the main context free of search noise.
+   - **Cluster-fix and chained pipelines**: When fixing a bug, search the entire project for all occurrences of that bug class before rebuilding, and chain build, test, and verification into a single command (`build && test && verify`).
+   - **Zero-polling and local indexing**: Set `WaitMsBeforeAsync` to `5000-10000` for fast commands; when a command backgrounds, never poll `manage_task status` (rely on automatic `Reactive Wakeup`). For codebases `> 300 files` requiring `>= 3` analysis rounds, create a local SQLite index in `scratch/` instead of repeated file-tree scans.
 
 6. **Autonomous project memory, Gitea sync, and knowledge protocol (zero user effort)**:
    - In project workspaces, `.agents/memory.db` serves as the unshakeable single source of truth across all turns.

@@ -341,12 +341,40 @@ class TestForensicHardeningV143(unittest.TestCase):
                 self.assertIn("[CROSS-PROJECT CONTAMINATION GUARD]", msg3)
                 self.assertIn("picture-in-picture", msg3)
 
+                # Verify Turn-1 invariant includes Section 4 (TURN-ECONOMY)
+                self.assertIn("4. TURN-ECONOMY, PARALLEL BATCHING & DIAGNOSTIC PROTOCOL", msg3)
+
+                # Append steps advancing step_index past 150 (drift bucket 1) in same epoch 2
+                lines_drift = [
+                    json.dumps({
+                        "step_index": 165,
+                        "type": "USER_INPUT",
+                        "source": "USER_EXPLICIT",
+                        "created_at": "2026-10-28T13:30:00Z",
+                        "content": "Continue deep debugging in same epoch.",
+                    }),
+                ]
+                with open(tfile, "a", encoding="utf-8") as f:
+                    f.write("\n".join(lines_drift) + "\n")
+
+                # Hook Call 4 in same Epoch 2 at step 165: triggers mid-session drift guard!
+                sys.stdin = io.StringIO(json.dumps(payload))
+                out4 = io.StringIO()
+                sys.stdout = out4
+                handle_pre_invocation_hook()
+                res4 = json.loads(out4.getvalue())
+                self.assertEqual(len(res4.get("injectSteps", [])), 1)
+                msg4 = res4["injectSteps"][0]["ephemeralMessage"]
+                self.assertIn("[SKILLSDB TURN-ECONOMY & DRIFT GUARD (Step 165)]", msg4)
+                self.assertIn("NO SALAMI-SLICING", msg4)
+
+
                 # Verify date-scoped vs cumulative savings calculation
                 sav = calculate_transcript_savings(target_date="2026-10-28", brain_dir=brain_dir, db_path=db_file)
                 self.assertIsNotNone(sav)
                 self.assertEqual(sav["model_turns"], 2)
                 self.assertEqual(sav["day_model_turns"], 1)
-                self.assertEqual(sav["day_steps"], 2)
+                self.assertEqual(sav["day_steps"], 3)
                 self.assertGreater(sav["tokens_saved_per_turn"], 1000)
                 self.assertGreater(sav["reduction_pct"], 90.0)
             finally:
