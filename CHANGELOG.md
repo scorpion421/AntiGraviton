@@ -5,6 +5,12 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.4] - 2026-10-31
+
+### Changed
+- **Refined Tooling Anomaly Reporting Directive (`plugin/rules/AGENTS.md`, `skillsdb/memory/project_memory.py`, `database/customizations.db`, `v3.8.4`)**:
+  - Scoped `proactive-error-reporting` specifically to internal `AntiGraviton` / `SkillsDB` tooling, hook, or sync bugs that force a background workaround: instead of interrupting mid-task, the agent completes the task first and appends a brief note at the end of the response suggesting a permanent fix in `AntiGraviton`.
+
 ## [1.5.3] - 2026-10-31
 
 ### Fixed
