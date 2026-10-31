@@ -5,6 +5,17 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-10-31
+
+### Changed
+- **Unified English System Directives & Sentence-Case Rule Normalization (`database/customizations.db`, `plugin/rules/AGENTS.md`, `v3.8.1`)**:
+  - Converted all German-language rule bodies (`no-deppenbindestrich` and `communication-style`) in `customizations.db` and mixed German/English passages in `plugin/rules/AGENTS.md` to 100% pure English instructions (preserving only short quoted German orthography examples) for consistent LLM instruction-following.
+  - Normalized all rule titles, Markdown headings, and bold bullet labels across `customizations.db` to natural sentence case so active rules strictly model the `sentence-case-headings` invariant.
+
+### Fixed
+- **Deduplicated Active Global Rules (`database/customizations.db`, `v3.8.1`)**:
+  - Removed the duplicated compound-noun paragraph between `no-deppenbindestrich` and `communication-style` and pruned the redundant `flutter-hot_reload` rule entry (superseded by `flutter-flutter-hot-reload`).
+
 ## [1.5.0] - 2026-10-31
 
 ### Added

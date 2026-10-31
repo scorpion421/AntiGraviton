@@ -166,6 +166,7 @@ def merge_upstream_database(local_db_path: Path, upstream_db_path: Path) -> dict
             WHERE category != 'learned';
             """)
             merged_rules = cur.rowcount
+            cur.execute("DELETE FROM rules WHERE key = 'flutter-hot_reload';")
 
             cur.execute("SELECT name FROM upstream.sqlite_master WHERE type='table' AND name='synonym_synapses';")
             if cur.fetchone():
