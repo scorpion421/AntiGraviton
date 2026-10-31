@@ -3,7 +3,7 @@
 [![Version](https://img.shields.io/badge/version-1.5.5-blue.svg)](CHANGELOG.md)
 [![SkillsDB](https://img.shields.io/badge/SkillsDB-v3.8.5-007ec6.svg)](skillsdb/)
 [![Gitea Service](https://img.shields.io/badge/Gitea_Service-v1.1.2-green.svg)](gitea-service/)
-[![Tests](https://img.shields.io/badge/tests-13%2F13%20passing-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-85%2F85%20passing-brightgreen.svg)](tests/)
 [![Antigravity](https://img.shields.io/badge/compatible-Google%20Antigravity%202.0-orange.svg)](https://deepmind.google/)
 [![Database](https://img.shields.io/badge/database-SQLite3%20FTS5%20%7C%20WAL-lightgrey.svg)](https://www.sqlite.org/)
 [![Python](https://img.shields.io/badge/python-3.10%2B-brightgreen.svg)](https://www.python.org/)
@@ -35,8 +35,8 @@ It bundles two tightly integrated systems into a single repository and installer
 
 1. **SkillsDB context and memory engine (`v3.8.5`)**:
    - **On-demand micro-skill routing**: Replaces static plugin prompt bloat (~35,000 tokens/turn) with a compact (~450 token) routing directive, Antigravity `v2.28.0+` Turn-1 prompt pre-routing, and surgical SQLite FTS5 micro-skill retrieval (`--summary`, `--section`).
-   - **Persistent episodic project memory (`.agents/memory.db`)**: Automatically records architectural decisions, milestone snapshots, and workspace telemetry across sessions so every new conversation starts with full project context.
-   - **Organic on-demand workspace learning**: Ships with zero hardcoded paths or credentials. Automatically learns project paths as you work (`mem-init`, `mem-save-snapshot`, `gitea-init`) and discovers Antigravity IDE workspaces from `~/.gemini/config/projects/*.json` and `~/.gemini/antigravity/scratch`.
+   - **Persistent episodic project memory (`.agents/memory.db`)**: Automatically records structural file/offset facts (`mem-save-fact`), multi-step work items (`mem-task-add`), architectural decisions, and milestone snapshots (`mem-save-snapshot`), and re-hydrates them every 50 steps so mid-session IDE `<CONTEXT_SUMMARY>` compactions never cause the model to re-read files repeatedly.
+   - **Organic on-demand workspace learning and transcript inference**: Ships with zero hardcoded paths or credentials. Automatically learns project paths as you work (`mem-init`, `mem-save-fact`, `mem-save-snapshot`, `gitea-init`), discovers Antigravity IDE workspaces from `~/.gemini/config/projects/*.json` and `~/.gemini/antigravity/scratch`, and infers the active project root directly from `transcript.jsonl` file paths when no formal IDE folder is open (`workspacePaths: []`).
 2. **Antigravity Gitea local Windows service (`v1.1.2`)**:
    - **Standalone developer default (zero Active Directory dependency)**: Works out of the box on any Windows developer machine using your local Windows username (`$env:USERNAME`), automatically generating cryptographic config secrets, provisioning your local Gitea admin account, and binding a scoped API token into SkillsDB. Optional Active Directory (LDAP) and `User` vs. `User.adm` role separation can be enabled on demand at any time.
    - **Isolated loopback Git server (`127.0.0.1:3000`)**: Sub-second (`< 0.5s`) automated Git backup for every milestone snapshot and file checkpoint without external cloud latency, pre-configured with LevelDB-free immediate queues (`TYPE = immediate`) and SQLite database issue indexing (`ISSUE_INDEXER_TYPE = db`) for conflict-free `gitea dump` backups on Windows.
@@ -50,7 +50,8 @@ It bundles two tightly integrated systems into a single repository and installer
 | :--- | :--- | :--- | :--- |
 | **System and plugin context load** | ~35,000 tokens / turn | **~1,500 tokens / turn** | **~95% lower base overhead** |
 | **Token consumption (60-turn session, benchmarked on Gemini 4 Argon High)** | ~3.39M input tokens | **~0.83M input tokens** | **~75.5% total token savings (4x session capacity)** |
-| **Context retention after `/compact` or restart** | 0% (manual re-briefing required) | **100% automatic (`memory.db` + Git log)** | **Zero architectural amnesia** |
+| **Marathon deep-analysis sessions (9h / 1,249 turns / 3,175 steps)** | ~99% weekly quota (raw IDE) / 33% (`v1.4.2`) | **~12-14% weekly quota (`v1.5.5`)** | **~60% additional token savings via 800-line read budget, subagent firewall & 50-step `memory.db` re-hydration** |
+| **Context retention after `/compact` or mid-session `<CONTEXT_SUMMARY>`** | 0% (repeated file re-reading) | **100% automatic (`memory.db` + 50-step re-hydration)** | **Zero architectural or mid-session amnesia** |
 | **Backup and rollback granularity** | Manual commits only | **Every milestone automatically pushed (`< 0.5s`)** | **Zero code loss and instant Git history forensics** |
 | **Fileserver and network drop resilience** | Silent push failure | **3-tier SCM + agent auto-restart and catch-up sync** | **100% self-healing synchronization** |
 
@@ -89,6 +90,18 @@ Beyond providing persistent project memory and automated Gitea backups, **AntiGr
 ### E. Windows UTF-8 manifest reset, builtin skill drift, and `v2.27.0+` tool schema updates
 * **The IDE behavior**: Every Antigravity IDE update replaces `Antigravity.exe` and `language_server.exe` (wiping out external `<activeCodePage>UTF-8</activeCodePage>` `.manifest` files so Windows child processes fall back to legacy codepages `cp1252`/`cp850`), updates bundled skills under `~/.gemini/antigravity/builtin/skills` (`builtin/.checksum`), and in `v2.27.0`/`v2.28.0` transitioned file modification tools to `write_file` (`Path`, `Content`) and `edit_file` (`Path`, `Replacement`) while adding user prompt pass-through to `PreInvocation` hooks.
 * **How AntiGraviton `v1.4.2+` fixes it**: On Turn 1 (`handle_pre_invocation_hook()`), SkillsDB automatically verifies and restores missing Windows UTF-8 `.manifest` files (`ensure_windows_utf8_manifests()`), synchronizes updated Antigravity builtin skills and their `docs/*.md` and `references/*.md` sub-documents into `customizations.db` (`sync_builtin_skills()`), pre-routes domain micro-skills directly from the incoming `v2.28.0` user prompt, and enforces deterministic `PreToolUse` guardrails across both modern (`write_file`, `edit_file`) and legacy (`write_to_file`, `replace_file_content`, `multi_replace_file_content`) tool schemas.
+
+### F. Salami-slicing file reads and main-context search pollution in marathon runs (`v1.5.0+`)
+* **The IDE behavior**: During complex multi-hour debugging or binary/Smali reverse-engineering sessions (1,000+ model turns), models naturally tend to inspect files in tiny sequential 80-120 line slices (`read_file`) and run dozens of exploratory `grep` and shell commands directly in the main conversation context. Because every tool step re-bills the entire accumulated prompt history, slicing a single 600-line file into 7 sequential calls multiplies context token billing by 7x and rapidly fills the context window.
+* **How AntiGraviton `v1.5.0+` fixes it**: Enforces a strict **turn-economy and context hygiene protocol** via Turn-1 guardrails and active drift monitoring: files `<= 800 lines` must be read completely in a single call, files `> 800 lines` must be targeted via grep first and read in parallel within a single turn, and open-ended root-cause exploration (`>= 4` search steps or `> 5` files) must be delegated to an isolated `research` subagent (`invoke_subagent`) that returns only exact file paths, line offsets, and the root cause to the main context.
+
+### G. Mid-session `<CONTEXT_SUMMARY>` compaction amnesia and `workspacePaths: []` blindness (`v1.5.5+`)
+* **The IDE behavior**:
+  1. When a developer works on a standalone directory (for example `D:\Android`) without formally opening it via *File -> Open Folder* in the IDE, Antigravity passes `"workspacePaths": []` in the hook payload. Without workspace inference, `.agents/memory.db` in that directory is never discovered or hydrated.
+  2. In multi-hour sessions, Antigravity periodically truncates the conversation history via `<CONTEXT_SUMMARY>` compactions. If `.agents/memory.db` was only injected on Turn 1, any compaction after step 100 wipes the injected project memory from the active context window, forcing the model to re-read the same scripts and source files up to 25-29 times across a 9-hour session.
+* **How AntiGraviton `v1.5.5+` fixes it**:
+  - **Transcript-based workspace inference (`inferred_workspace`)**: When `workspacePaths` is empty, `handle_pre_invocation_hook()` inspects recent file paths in `transcript.jsonl` and automatically binds to the active project root (prioritizing directories containing `.agents/memory.db` or `.git`).
+  - **50-step re-hydration and repeat-read circuit breaker**: Automatically re-injects `=== PROJECT MEMORY CONTEXT (Auto-Hydrated from .agents/memory.db) ===` every 50 steps and immediately triggers a `[PROJECT MEMORY ALERT]` whenever the same file is read `>= 3` times within 30 steps or fewer than 5 structural facts are indexed by step 25, enforcing immediate `skillsdb mem-save-fact` and `skillsdb mem-task-add` persistence.
 
 ---
 
@@ -179,14 +192,17 @@ skillsdb gitea-config --url "http://127.0.0.1:3000" --user "<username>" --token 
 # Initialize and upload any standalone folder or project to local Gitea
 skillsdb gitea-init "<target_directory>"
 
-# Initialize episodic memory (.agents/memory.db) for a project
+# Initialize episodic memory (.agents/memory.db) and persist structural facts & tasks
 skillsdb mem-init --project .
+skillsdb mem-save-fact "hotspot:main_entry" "src/main.py:L1-L140" --project .
+skillsdb mem-task-add "Refactor authentication handler" --project .
 
 # Save a milestone snapshot (automatically commits, pushes to Gitea, and flushes pending repos)
 skillsdb mem-save-snapshot "Implemented feature X"
 
-# Synchronize current workspace or all discovered Antigravity workspaces to Gitea
+# Synchronize current workspace or publish releases to Gitea and GitHub
 skillsdb gitea-sync
+skillsdb gitea-sync -m "Document architecture updates" --releases --github
 skillsdb gitea-sync --all
 
 # Run automated test suite and text/formatting guardrails
