@@ -327,7 +327,7 @@ def mem_save_snapshot(conn: sqlite3.Connection, summary: str, conversation_id: s
         if should_commit:
             learn_workspace(root)
             try:
-                trailers = {}
+                trailers = {"Snapshot-Commit": "true"}
                 if cid and cid != "default":
                     trailers["Conversation-ID"] = cid
                 if next_steps:

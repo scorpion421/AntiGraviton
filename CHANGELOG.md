@@ -5,6 +5,12 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.3] - 2026-10-31
+
+### Fixed
+- **Post-Push Snapshot Amend Detection (`skillsdb/memory/gitea_sync.py`, `skillsdb/memory/project_memory.py`, `v3.8.3`)**:
+  - Removed the `_has_unpushed_commits()` gate when `save_code_commit(..., explicit_message=True)` checks whether to amend a recent (`<= 120s`) `mem-save-snapshot` commit, and added `Snapshot-Commit: true` / `Conversation-ID:` trailer detection so a synchronous snapshot push immediately followed by `gitea-sync -m "..."` cleanly amends the commit subject and updates `origin/main` via `--force-with-lease`.
+
 ## [1.5.2] - 2026-10-31
 
 ### Added

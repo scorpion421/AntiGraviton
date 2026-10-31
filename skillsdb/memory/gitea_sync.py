@@ -634,7 +634,7 @@ def _can_safely_force_replace_remote_snapshot(project_root: Path, branch: str) -
             timeout=15,
         )
         rem_log = subprocess.run(
-            ["git", "log", "-1", "--format=%s%n%ct", f"origin/{branch}"],
+            ["git", "log", "-1", "--format=%s%n%ct%n%B", f"origin/{branch}"],
             cwd=str(project_root),
             capture_output=True,
             text=True,
@@ -644,7 +644,12 @@ def _can_safely_force_replace_remote_snapshot(project_root: Path, branch: str) -
             return False
         lines = rem_log.stdout.splitlines()
         rem_subj = lines[0].strip() if lines else ""
-        if not rem_subj.startswith(("[SkillsDB]", "Milestone:", "Synchronize workspace")):
+        rem_body = "\n".join(lines[2:]) if len(lines) > 2 else ""
+        if not (
+            rem_subj.startswith(("[SkillsDB]", "Milestone:", "Synchronize workspace", "Completed "))
+            or "Snapshot-Commit: true" in rem_body
+            or "Conversation-ID:" in rem_body
+        ):
             return False
         anc_chk = subprocess.run(
             ["git", "merge-base", "--is-ancestor", f"origin/{branch}~1", "HEAD"],
@@ -876,7 +881,7 @@ def save_code_commit(
             if rev_res.returncode == 0:
                 result["commit_hash"] = rev_res.stdout.strip()
 
-            if explicit_message and result["commit_hash"] and _has_unpushed_commits(project_root):
+            if explicit_message and result["commit_hash"]:
                 subj_res = subprocess.run(
                     ["git", "log", "-1", "--format=%s%n%ct%n%B"],
                     cwd=str(project_root),
@@ -889,10 +894,15 @@ def save_code_commit(
                     head_ts = int(log_lines[1].strip()) if len(log_lines) >= 2 and log_lines[1].strip().isdigit() else 0
                     head_body = "\n".join(log_lines[2:]).strip() if len(log_lines) > 2 else ""
                     age_sec = abs(time.time() - head_ts)
-                    if head_subj.startswith(("[SkillsDB]", "Milestone:", "Synchronize workspace")) and age_sec <= 120:
+                    is_auto_snap = (
+                        head_subj.startswith(("[SkillsDB]", "Milestone:", "Synchronize workspace", "Completed "))
+                        or "Snapshot-Commit: true" in head_body
+                        or "Conversation-ID:" in head_body
+                    )
+                    if is_auto_snap and head_subj != message.strip() and age_sec <= 120:
                         existing_trailers = [
                             tl for tl in head_body.splitlines()
-                            if re.match(r"^(Conversation-ID|Snapshot-ID|Next-Steps):\s+", tl)
+                            if re.match(r"^(Conversation-ID|Snapshot-ID|Snapshot-Commit|Next-Steps):\s+", tl)
                         ]
                         amend_msg = message.strip()
                         if existing_trailers:
