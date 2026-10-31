@@ -470,7 +470,13 @@ def sync_changelog_releases(
             gh_slug = _resolve_github_repo_slug(project_root)
             if gh_slug:
                 subprocess.run(
-                    ["git", "push", "github", "main", "--tags"],
+                    ["git", "push", "github", "main"],
+                    cwd=str(project_root),
+                    capture_output=True,
+                    timeout=30,
+                )
+                subprocess.run(
+                    ["git", "push", "github", "--tags"],
                     cwd=str(project_root),
                     capture_output=True,
                     timeout=30,

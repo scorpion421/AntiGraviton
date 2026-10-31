@@ -551,5 +551,114 @@ class TestGiteaSync(unittest.TestCase):
             self.assertTrue(mock_urlopen.called)
 
 
+    def test_v1_5_2_idempotent_tags_historical_release_sync_and_amend_push(self):
+        """Verifies v1.5.2 fixes: idempotent annotated tag objects, historical release sync, and snapshot amend race guard."""
+        import json
+        import subprocess
+        from unittest.mock import patch, MagicMock
+        from skillsdb.memory.gitea_sync import (
+            publish_gitea_release,
+            _can_safely_force_replace_remote_snapshot,
+        )
+
+        repo_dir = self.test_dir / "v152_repo"
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-b", "main"], cwd=str(repo_dir), check=True, capture_output=True)
+        (repo_dir / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+        (repo_dir / "CHANGELOG.md").write_text(
+            "# Changelog\n\n## [1.0.0] - 2026-10-30\n\n### Added\n- Initial release.\n",
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "add", "."], cwd=str(repo_dir), check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Antigravity", "-c", "user.email=antigravity@local.dev", "commit", "-m", "Release v1.0.0"],
+            cwd=str(repo_dir),
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-c", "user.name=Antigravity", "-c", "user.email=antigravity@local.dev", "tag", "-a", "v1.0.0", "-m", "v1.0.0"],
+            cwd=str(repo_dir),
+            check=True,
+            capture_output=True,
+        )
+        tag_obj_sha_before = subprocess.run(
+            ["git", "rev-parse", "v1.0.0"],
+            cwd=str(repo_dir),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+        # Advance to v1.1.0
+        (repo_dir / "VERSION").write_text("1.1.0\n", encoding="utf-8")
+        (repo_dir / "CHANGELOG.md").write_text(
+            "# Changelog\n\n## [1.1.0] - 2026-10-31\n\n### Added\n- Next release.\n\n## [1.0.0] - 2026-10-30\n\n### Added\n- Initial release.\n",
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "add", "."], cwd=str(repo_dir), check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Antigravity", "-c", "user.email=antigravity@local.dev", "commit", "-m", "Release v1.1.0"],
+            cwd=str(repo_dir),
+            check=True,
+            capture_output=True,
+        )
+
+        mock_resp = MagicMock()
+        mock_resp.status = 201
+        mock_resp.read.return_value = json.dumps({
+            "id": 99,
+            "tag_name": "v1.0.0",
+            "html_url": "http://localhost:3000/MickyFoley/v152_repo/releases/tag/v1.0.0",
+            "assets": [],
+        }).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+        mock_resp.__exit__.return_value = False
+
+        with patch("urllib.request.urlopen", return_value=mock_resp), patch(
+            "skillsdb.memory.gitea_sync.get_gitea_config",
+            return_value={"url": "http://localhost:3000", "user": "MickyFoley", "token": "tok123"},
+        ):
+            rel_url = publish_gitea_release(repo_dir, tag_name="v1.0.0", sync_first=True, sync_github=False)
+            self.assertEqual(rel_url, "http://localhost:3000/MickyFoley/v152_repo/releases/tag/v1.0.0")
+
+        tag_obj_sha_after = subprocess.run(
+            ["git", "rev-parse", "v1.0.0"],
+            cwd=str(repo_dir),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        self.assertEqual(
+            tag_obj_sha_before,
+            tag_obj_sha_after,
+            "Annotated tag object SHA must remain identical (no git tag -f -a re-creation)",
+        )
+
+        # Verify _can_safely_force_replace_remote_snapshot detects an amended auto-snapshot commit
+        subprocess.run(
+            ["git", "-c", "user.name=Antigravity", "-c", "user.email=antigravity@local.dev", "commit", "--allow-empty", "-m", "[SkillsDB] Auto-snapshot before amend"],
+            cwd=str(repo_dir),
+            check=True,
+            capture_output=True,
+        )
+        snap_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(repo_dir), check=True, capture_output=True, text=True
+        ).stdout.strip()
+        subprocess.run(
+            ["git", "update-ref", "refs/remotes/origin/main", snap_sha],
+            cwd=str(repo_dir),
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-c", "user.name=Antigravity", "-c", "user.email=antigravity@local.dev", "commit", "--amend", "--allow-empty", "-m", "Release v1.1.0 final"],
+            cwd=str(repo_dir),
+            check=True,
+            capture_output=True,
+        )
+        self.assertTrue(_can_safely_force_replace_remote_snapshot(repo_dir, "main"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -619,7 +619,71 @@ def _push_tags_to_origin_if_present(project_root: Path) -> None:
         pass
 
 
-def _push_to_origin(project_root: Path, async_push: bool = False, _allow_retry: bool = True) -> bool:
+def _can_safely_force_replace_remote_snapshot(project_root: Path, branch: str) -> bool:
+    """
+    Returns True if origin/<branch> diverged solely because an asynchronous background
+    mem-save-snapshot auto-commit was pushed right before save_code_commit() amended it
+    (i.e. origin/<branch> has an auto-snapshot subject and its parent is an ancestor of HEAD).
+    """
+    try:
+        subprocess.run(
+            _get_git_auth_cmd_prefix() + ["fetch", "origin", branch],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        rem_log = subprocess.run(
+            ["git", "log", "-1", "--format=%s%n%ct", f"origin/{branch}"],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if rem_log.returncode != 0:
+            return False
+        lines = rem_log.stdout.splitlines()
+        rem_subj = lines[0].strip() if lines else ""
+        if not rem_subj.startswith(("[SkillsDB]", "Milestone:", "Synchronize workspace")):
+            return False
+        anc_chk = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", f"origin/{branch}~1", "HEAD"],
+            cwd=str(project_root),
+            capture_output=True,
+            timeout=5,
+        )
+        return anc_chk.returncode == 0
+    except Exception:
+        return False
+
+
+def _sync_secondary_gitea_remote(project_root: Path, branch: str) -> None:
+    """If the repository also defines a 'gitea' remote pointing to the local Gitea server, keeps it aligned with origin."""
+    try:
+        rem_res = subprocess.run(
+            ["git", "remote", "get-url", "gitea"],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        if rem_res.returncode == 0 and ("localhost:3000" in rem_res.stdout or "127.0.0.1:3000" in rem_res.stdout):
+            subprocess.run(
+                _get_git_auth_cmd_prefix() + ["push", "-f", "gitea", branch],
+                cwd=str(project_root),
+                capture_output=True,
+                timeout=30,
+            )
+    except Exception:
+        pass
+
+
+def _push_to_origin(
+    project_root: Path,
+    async_push: bool = False,
+    _allow_retry: bool = True,
+    force_with_lease: bool = False,
+) -> bool:
     """Pushes local active branch and tags to Gitea origin using transient in-memory auth headers; auto-heals Gitea service on failure."""
     rem_res = subprocess.run(
         ["git", "remote"],
@@ -635,7 +699,8 @@ def _push_to_origin(project_root: Path, async_push: bool = False, _allow_retry: 
         _scrub_workspace_git_config_credentials(project_root)
 
     branch = _get_current_branch(project_root)
-    push_cmd = _get_git_auth_cmd_prefix() + ["push", "-u", "origin", branch]
+    push_args = ["push", "--force-with-lease", "-u", "origin", branch] if force_with_lease else ["push", "-u", "origin", branch]
+    push_cmd = _get_git_auth_cmd_prefix() + push_args
 
     try:
         if async_push:
@@ -659,13 +724,31 @@ def _push_to_origin(project_root: Path, async_push: bool = False, _allow_retry: 
         )
         if push_res.returncode == 0:
             _push_tags_to_origin_if_present(project_root)
+            _sync_secondary_gitea_remote(project_root, branch)
             return True
+
+        err_out = (push_res.stderr or "") + (push_res.stdout or "")
+        if ("non-fast-forward" in err_out or "fetch first" in err_out or "[rejected]" in err_out) and (
+            force_with_lease or _can_safely_force_replace_remote_snapshot(project_root, branch)
+        ):
+            fwl_cmd = _get_git_auth_cmd_prefix() + ["push", "--force-with-lease", "-u", "origin", branch]
+            fwl_res = subprocess.run(
+                fwl_cmd,
+                cwd=str(project_root),
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if fwl_res.returncode == 0:
+                _push_tags_to_origin_if_present(project_root)
+                _sync_secondary_gitea_remote(project_root, branch)
+                return True
 
         if _allow_retry and not _is_temp_workspace(project_root):
             health = ensure_gitea_online(auto_recover=True, flush_pending=False)
             if health.get("online"):
                 setup_workspace_git(project_root)
-                retry_cmd = _get_git_auth_cmd_prefix() + ["push", "-u", "origin", branch]
+                retry_cmd = _get_git_auth_cmd_prefix() + push_args
                 retry_res = subprocess.run(
                     retry_cmd,
                     cwd=str(project_root),
@@ -675,6 +758,7 @@ def _push_to_origin(project_root: Path, async_push: bool = False, _allow_retry: 
                 )
                 if retry_res.returncode == 0:
                     _push_tags_to_origin_if_present(project_root)
+                    _sync_secondary_gitea_remote(project_root, branch)
                     return True
         return False
     except Exception:
@@ -839,7 +923,7 @@ def save_code_commit(
 
             result["success"] = True
             if push and not is_temp and (result["amended"] or _has_unpushed_commits(project_root)):
-                result["pushed"] = _push_to_origin(project_root, async_push=async_push)
+                result["pushed"] = _push_to_origin(project_root, async_push=async_push, force_with_lease=bool(result["amended"]))
             return result
 
         parsed_files = []
@@ -966,6 +1050,30 @@ def publish_gitea_release(
     )
     existing_tag_sha = existing_tag_res.stdout.strip() if existing_tag_res.returncode == 0 else ""
 
+    head_ver_tag, _, _ = _extract_changelog_section(project_root, None)
+    status_chk = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=str(project_root),
+        capture_output=True,
+        text=True,
+    )
+    is_clean_tree = (status_chk.returncode == 0 and not status_chk.stdout.strip())
+
+    # If the caller explicitly requested an older historical tag (final_tag != current VERSION/CHANGELOG top tag)
+    # on a clean working tree solely to sync its release notes/assets to Gitea/GitHub, pin target_commit to existing_tag_sha.
+    if (
+        not target_commit
+        and existing_tag_sha
+        and head_sha
+        and existing_tag_sha != head_sha
+        and tag_name
+        and head_ver_tag
+        and final_tag != head_ver_tag
+        and is_clean_tree
+    ):
+        target_commit = existing_tag_sha
+        sync_first = False
+
     if not target_commit and existing_tag_sha and head_sha and existing_tag_sha != head_sha:
         print(
             f"  [SEMVER IMMUTABILITY ERROR] Release tag '{final_tag}' already exists at commit {existing_tag_sha[:7]} "
@@ -977,6 +1085,7 @@ def publish_gitea_release(
         )
         return None
 
+    post_head_sha = head_sha
     if sync_first and not target_commit:
         sync_workspace(
             project_root,
@@ -1017,23 +1126,26 @@ def publish_gitea_release(
     if "keepachangelog.com" not in final_notes:
         final_notes += footer
 
-    tag_cmd = [
-        "git",
-        "-c", "user.name=Antigravity",
-        "-c", "user.email=antigravity@local.dev",
-        "tag", "-f", "-a", final_tag, "-m", final_title,
-    ]
-    if target_commit:
-        tag_cmd.append(target_commit)
+    # Idempotent tag creation: only create the annotated tag if it does not already exist at the target commit,
+    # preserving the exact annotated tag object SHA across Gitea and GitHub remotes.
+    if not existing_tag_sha:
+        tag_cmd = [
+            "git",
+            "-c", "user.name=Antigravity",
+            "-c", "user.email=antigravity@local.dev",
+            "tag", "-a", final_tag, "-m", final_title,
+        ]
+        if target_commit:
+            tag_cmd.append(target_commit)
+        subprocess.run(
+            tag_cmd,
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+        )
 
     subprocess.run(
-        tag_cmd,
-        cwd=str(project_root),
-        capture_output=True,
-        text=True,
-    )
-    subprocess.run(
-        _get_git_auth_cmd_prefix() + ["push", "-f", "origin", final_tag],
+        _get_git_auth_cmd_prefix() + ["push", "origin", final_tag],
         cwd=str(project_root),
         capture_output=True,
         text=True,
@@ -1120,12 +1232,15 @@ def publish_gitea_release(
             try:
                 gh_slug = _resolve_github_repo_slug(project_root)
                 repo_args = ["--repo", gh_slug] if gh_slug else []
-                subprocess.run(["git", "push", "github", "main", final_tag], cwd=str(project_root), capture_output=True, timeout=30)
+                subprocess.run(["git", "push", "github", "main"], cwd=str(project_root), capture_output=True, timeout=30)
+                subprocess.run(["git", "push", "github", final_tag], cwd=str(project_root), capture_output=True, timeout=30)
                 chk = subprocess.run(["gh", "release", "view", final_tag] + repo_args, cwd=str(project_root), capture_output=True, text=True, timeout=15)
                 if chk.returncode == 0:
-                    subprocess.run(["gh", "release", "edit", final_tag, "--title", final_title, "--notes-file", tmp_path] + repo_args, cwd=str(project_root), capture_output=True, timeout=20)
+                    gh_res = subprocess.run(["gh", "release", "edit", final_tag, "--title", final_title, "--notes-file", tmp_path] + repo_args, cwd=str(project_root), capture_output=True, text=True, timeout=20)
                 else:
-                    subprocess.run(["gh", "release", "create", final_tag, "--title", final_title, "--notes-file", tmp_path] + repo_args, cwd=str(project_root), capture_output=True, timeout=20)
+                    gh_res = subprocess.run(["gh", "release", "create", final_tag, "--title", final_title, "--notes-file", tmp_path] + repo_args, cwd=str(project_root), capture_output=True, text=True, timeout=20)
+                if gh_res.returncode != 0:
+                    print(f"  [WARN] Could not publish GitHub release {final_tag}: {(gh_res.stderr or '').strip()}")
             finally:
                 Path(tmp_path).unlink(missing_ok=True)
         except Exception:

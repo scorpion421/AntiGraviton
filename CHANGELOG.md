@@ -5,6 +5,18 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.2] - 2026-10-31
+
+### Added
+- **Proactive Error & Anomaly Reporting Directive (`plugin/rules/AGENTS.md`, `skillsdb/memory/project_memory.py`, `database/customizations.db`, `v3.8.2`)**:
+  - Anchored the mandatory `proactive-error-reporting` rule across `AGENTS.md`, Turn-1 guardrails, and `customizations.db`, requiring the agent to immediately report any unexpected error, warning, push rejection, or race condition and its root cause to the user rather than silently working around it.
+
+### Fixed
+- **Gitea & GitHub Push Reliability (`skillsdb/memory/gitea_sync.py`, `skillsdb/memory/gitea_releases.py`, `v3.8.2`)**:
+  - **Snapshot Amend Race Resolution**: Added `_can_safely_force_replace_remote_snapshot()` and `--force-with-lease` handling in `_push_to_origin()` so amending a recent auto-snapshot commit (`<= 120s`) that was concurrently pushed by a background `async_push` process cleanly updates `origin/main` (and any secondary `gitea` remote) instead of failing with `non-fast-forward`.
+  - **Idempotent Annotated Tag Objects**: Stopped `publish_gitea_release()` from running `git tag -f -a` when the release tag already exists at the target commit, preserving identical tag-object SHAs across Gitea and GitHub.
+  - **Historical Release Sync**: Allowed `publish_gitea_release()` to sync release notes and deliverable assets for an older historical tag (`final_tag != current VERSION`) on a clean working tree by automatically pinning `target_commit` to `existing_tag_sha` without moving the tag.
+
 ## [1.5.1] - 2026-10-31
 
 ### Changed
