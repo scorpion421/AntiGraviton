@@ -5,6 +5,16 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.7] - 2026-11-01
+
+### Added
+- **Epoch-Aware `read_file` Overwrite Deduplication (`skillsdb/core/guardrails.py`, `v3.8.7`)**:
+  - Added `_was_file_region_read_in_current_epoch()` to `handle_pre_tool_guardrail_hook()`: the first narrow `read_file` call on a file (or a new region of a `> 800` line file) in the current uncompacted epoch still expands to the full file (`<= 800 lines`) or a 650-line window (`> 800 lines`), while subsequent follow-up reads of the same file/region within the same uncompacted epoch stay compact instead of pumping duplicate 650-line blocks into the active context window.
+- **Autonomous `research` Subagent Finding Persistence & Pre-Compaction Working-Set Checkpoint (`skillsdb/memory/project_memory.py`, `v3.8.7`)**:
+  - Extended `analyze_conversation_epochs_and_scope()` and `handle_pre_invocation_hook()` to automatically capture incoming `research` subagent completion reports (`subagent_finding_step_<N>`) and pre-compaction working sets (`auto_checkpoint_working_set` when `steps_since_compaction >= 150`) directly into `.agents/memory.db` with zero extra model turns.
+- **Milestone `/compact` Advisor on Release Sync (`skillsdb/memory/gitea_sync.py`, `v3.8.7`)**:
+  - Added `[COMPACT MILESTONE TIP]` output when `skillsdb gitea-sync` publishes Keep a Changelog releases so the agent can recommend `/compact` at clean release boundaries.
+
 ## [1.5.6] - 2026-11-01
 
 ### Added

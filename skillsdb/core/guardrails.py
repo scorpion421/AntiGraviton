@@ -469,6 +469,70 @@ def _is_exploratory_search_cmd(cmd: str) -> bool:
     return False
 
 
+def _was_file_region_read_in_current_epoch(
+    payload: Dict[str, Any],
+    fpath: Path,
+    s_line: int,
+    e_line: int,
+    total_lines: int,
+) -> bool:
+    """
+    Returns True if fpath (or the 650-line region around s_line..e_line for files > 800 lines)
+    was already read in the current uncompacted conversation window (since the last <CONTEXT_SUMMARY>).
+    Prevents duplicate 650-800 line overwrite expansions on follow-up reads after edit_file.
+    """
+    try:
+        t_path_str = payload.get("transcriptPath") or ""
+        cid = str(payload.get("conversationId") or "").strip()
+        t_path = Path(t_path_str) if t_path_str else (
+            Path.home() / ".gemini" / "antigravity" / "brain" / cid / ".system_generated" / "logs" / "transcript.jsonl"
+            if cid else None
+        )
+        if not t_path or not t_path.exists():
+            return False
+
+        tail_lines: List[str] = []
+        with open(t_path, "r", encoding="utf-8", errors="ignore") as tf:
+            for line in tf:
+                tail_lines.append(line)
+                if len(tail_lines) > 120:
+                    tail_lines.pop(0)
+
+        fname_low = fpath.name.lower()
+        req_mid = (s_line + e_line) // 2
+
+        for rline in reversed(tail_lines):
+            if "<CONTEXT_SUMMARY>" in rline:
+                break
+            if ('"read_file"' in rline or '"view_file"' in rline) and fname_low in rline.lower():
+                try:
+                    robj = json.loads(rline)
+                    for tc in (robj.get("tool_calls") or []):
+                        fn = (tc.get("name") or (tc.get("function") or {}).get("name") or "").lower()
+                        if fn not in ("read_file", "view_file"):
+                            continue
+                        targs = tc.get("args") or tc.get("arguments") or (tc.get("function") or {}).get("arguments") or {}
+                        if isinstance(targs, str):
+                            targs = json.loads(targs)
+                        if not isinstance(targs, dict):
+                            continue
+                        prev_p = str(targs.get("Path") or targs.get("AbsolutePath") or targs.get("TargetFile") or "")
+                        if Path(prev_p.replace("\\\\", "\\")).name.lower() != fname_low:
+                            continue
+                        if total_lines <= 800:
+                            return True
+                        prev_s = int(targs.get("StartLine") or 1)
+                        prev_e = int(targs.get("EndLine") or total_lines)
+                        prev_mid = (prev_s + prev_e) // 2
+                        if abs(req_mid - prev_mid) <= 250 or (prev_s <= s_line and prev_e >= e_line):
+                            return True
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return False
+
+
 def handle_pre_tool_guardrail_hook():
     """
     Handles Antigravity PreToolUse lifecycle hook.
@@ -520,23 +584,24 @@ def handle_pre_tool_guardrail_hook():
                         fpath = Path(target_file)
                         if fpath.exists() and fpath.is_file() and fpath.suffix.lower() not in SKIP_EXTENSIONS and fpath.stat().st_size <= 2_500_000:
                             total_lines = len(fpath.read_text(encoding="utf-8", errors="ignore").splitlines())
-                            if 0 < total_lines <= 800 and req_span < total_lines:
-                                print(json.dumps({
-                                    "decision": "allow",
-                                    "overwrite": {"StartLine": 1, "EndLine": total_lines},
-                                }))
-                                return
-                            elif total_lines > 800:
-                                mid = (s_line + e_line) // 2
-                                new_start = max(1, min(s_line, mid - 324))
-                                new_end = min(total_lines, max(e_line, new_start + 649))
-                                new_start = max(1, min(new_start, new_end - 649))
-                                if (new_end - new_start) > (e_line - s_line):
+                            if not _was_file_region_read_in_current_epoch(payload, fpath, s_line, e_line, total_lines):
+                                if 0 < total_lines <= 800 and req_span < total_lines:
                                     print(json.dumps({
                                         "decision": "allow",
-                                        "overwrite": {"StartLine": new_start, "EndLine": new_end},
+                                        "overwrite": {"StartLine": 1, "EndLine": total_lines},
                                     }))
                                     return
+                                elif total_lines > 800:
+                                    mid = (s_line + e_line) // 2
+                                    new_start = max(1, min(s_line, mid - 324))
+                                    new_end = min(total_lines, max(e_line, new_start + 649))
+                                    new_start = max(1, min(new_start, new_end - 649))
+                                    if (new_end - new_start) > (e_line - s_line):
+                                        print(json.dumps({
+                                            "decision": "allow",
+                                            "overwrite": {"StartLine": new_start, "EndLine": new_end},
+                                        }))
+                                        return
                 except Exception:
                     pass
             print(json.dumps({"decision": "allow"}))

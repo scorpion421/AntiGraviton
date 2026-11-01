@@ -1358,6 +1358,7 @@ def sync_workspace(
                 rel_tags = sync_changelog_releases(project_root, sync_github=sync_github, repo_name=target_name)
                 if rel_tags:
                     print(f"  [OK] Synced Keep a Changelog releases: {', '.join(rel_tags)}")
+                    print("  [COMPACT MILESTONE TIP] Release state & facts are safely persisted in Gitea and .agents/memory.db. If starting a new feature next, running '/compact' now will shed old context weight with zero knowledge loss.")
             auto_tag, _, _ = _extract_changelog_section(project_root)
             if auto_tag:
                 ahead_chk = subprocess.run(

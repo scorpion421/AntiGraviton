@@ -962,6 +962,9 @@ def analyze_conversation_epochs_and_scope(
         "recent_poll_streak": 0,
         "repeated_file_warning": "",
         "inferred_workspace": None,
+        "steps_since_compaction": 0,
+        "epoch_touched_files": [],
+        "subagent_findings": [],
     }
     if not cid:
         return result
@@ -973,13 +976,22 @@ def analyze_conversation_epochs_and_scope(
 
     user_steps = []
     recent_lines = []
+    subagent_raw_lines = []
+    steps_since_compaction = 0
     max_step_idx = 0
     try:
         with open(t_file, "r", encoding="utf-8", errors="ignore") as f:
             for line in f:
+                steps_since_compaction += 1
+                if "<CONTEXT_SUMMARY>" in line:
+                    steps_since_compaction = 0
                 recent_lines.append(line)
                 if len(recent_lines) > 30:
                     recent_lines.pop(0)
+                if '"SYSTEM_MESSAGE"' in line and "sender=" in line and "/task-" not in line:
+                    subagent_raw_lines.append(line)
+                    if len(subagent_raw_lines) > 5:
+                        subagent_raw_lines.pop(0)
                 if '"USER_INPUT"' not in line and '"USER_EXPLICIT"' not in line:
                     continue
                 try:
@@ -1074,10 +1086,45 @@ def analyze_conversation_epochs_and_scope(
         if top_cnt >= 3:
             result["repeated_file_warning"] = f"{top_fname} ({top_cnt}x in recent steps)"
 
+    touched_files = []
+    edit_path_re = re.compile(r'"(?:Path|TargetFile|AbsolutePath)"\s*:\s*"([^"]+)"')
+    for rline in recent_lines:
+        for mp in edit_path_re.findall(rline):
+            fn = Path(mp.replace(bs + bs, bs)).name
+            if fn and fn not in touched_files and not fn.endswith(".log"):
+                touched_files.append(fn)
+                if len(touched_files) >= 8:
+                    break
+
+    parsed_subagents = []
+    sub_re = re.compile(r"sender=([0-9a-fA-F\-]{8,})\s+priority=\S+\s+content=(.*?)(?:</SYSTEM_MESSAGE>|$)", re.DOTALL)
+    for sline in subagent_raw_lines:
+        try:
+            sd = json.loads(sline)
+            s_idx = int(sd.get("step_index") or 0)
+            scontent = str(sd.get("content") or "")
+            m_sub = sub_re.search(scontent)
+            if m_sub:
+                sender_id = m_sub.group(1)[:8]
+                body = m_sub.group(2).strip()
+                body_clean = re.sub(r"```.*?```", " ", body, flags=re.DOTALL)
+                body_clean = re.sub(r"\s+", " ", body_clean).strip()
+                if body_clean:
+                    parsed_subagents.append({
+                        "step_index": s_idx,
+                        "sender": sender_id,
+                        "summary": body_clean[:280],
+                    })
+        except Exception:
+            pass
+
     result["max_step_index"] = max_step_idx
     result["step_bucket"] = max_step_idx // 50
     result["recent_read_streak"] = read_streak
     result["recent_poll_streak"] = poll_streak
+    result["steps_since_compaction"] = steps_since_compaction
+    result["epoch_touched_files"] = touched_files
+    result["subagent_findings"] = parsed_subagents
 
     if not user_steps:
         return result
@@ -1267,6 +1314,40 @@ def handle_pre_invocation_hook():
             with managed_connection(db_path, is_project_db=True) as conn:
                 init_project_db(conn)
                 cursor = conn.cursor()
+                now_iso_hook = datetime.now(timezone.utc).isoformat()
+                # 1. Auto-persist research subagent findings into .agents/memory.db so compactions never lose them
+                for sf in (epoch_info.get("subagent_findings") or []):
+                    sf_key = f"subagent_finding_step_{sf['step_index']}"
+                    cursor.execute("SELECT 1 FROM project_facts WHERE key = ?;", (sf_key,))
+                    if not cursor.fetchone():
+                        sf_val = f"[Subagent {sf['sender']}] {sf['summary']}"
+                        cursor.execute(
+                            "INSERT OR REPLACE INTO project_facts (key, value, updated_at, deprecated_at, superseded_by) VALUES (?, ?, ?, NULL, NULL);",
+                            (sf_key, sf_val, now_iso_hook),
+                        )
+                        cursor.execute("DELETE FROM project_memory_fts WHERE source_table = 'fact' AND title_or_key = ?;", (sf_key,))
+                        cursor.execute(
+                            "INSERT INTO project_memory_fts (source_table, title_or_key, content) VALUES ('fact', ?, ?);",
+                            (sf_key, sf_val),
+                        )
+                        conn.commit()
+                # 2. Auto-checkpoint active working set before auto-compaction when steps_since_compaction >= 150
+                if epoch_info.get("steps_since_compaction", 0) >= 150 and epoch_info.get("epoch_touched_files"):
+                    ws_key_fact = "auto_checkpoint_working_set"
+                    ws_val_fact = (
+                        f"Step {epoch_info.get('max_step_index', 0)} ({epoch_info.get('steps_since_compaction', 0)} uncompacted steps) active files: "
+                        + ", ".join(epoch_info["epoch_touched_files"])
+                    )
+                    cursor.execute(
+                        "INSERT OR REPLACE INTO project_facts (key, value, updated_at, deprecated_at, superseded_by) VALUES (?, ?, ?, NULL, NULL);",
+                        (ws_key_fact, ws_val_fact, now_iso_hook),
+                    )
+                    cursor.execute("DELETE FROM project_memory_fts WHERE source_table = 'fact' AND title_or_key = ?;", (ws_key_fact,))
+                    cursor.execute(
+                        "INSERT INTO project_memory_fts (source_table, title_or_key, content) VALUES ('fact', ?, ?);",
+                        (ws_key_fact, ws_val_fact),
+                    )
+                    conn.commit()
                 cursor.execute("SELECT COUNT(*) FROM project_tasks WHERE status = 'completed';")
                 completed_count = cursor.fetchone()[0]
                 if completed_count >= 3:

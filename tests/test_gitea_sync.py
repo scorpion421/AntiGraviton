@@ -797,6 +797,92 @@ class TestGiteaSync(unittest.TestCase):
         self.assertEqual(res_sf["decision"], "deny")
         self.assertIn("Subagent Firewall", res_sf["reason"])
 
+    def test_v1_5_7_epoch_aware_overwrite_and_subagent_auto_persistence(self):
+        """Verifies v1.5.7 epoch-aware read_file overwrite deduplication and automatic subagent finding persistence into .agents/memory.db."""
+        import io
+        import json
+        from unittest.mock import patch
+        from skillsdb.core.guardrails import handle_pre_tool_guardrail_hook
+        from skillsdb.memory.project_memory import handle_pre_invocation_hook
+
+        # 1. Epoch-aware read_file overwrite: 1st read in epoch expands, 2nd read in same epoch stays compact, read after <CONTEXT_SUMMARY> expands again
+        mod_file = self.test_dir / "patcher_script.py"
+        mod_file.write_text("\n".join(f"x_{i} = {i}" for i in range(1, 501)) + "\n", encoding="utf-8")
+        t_file = self.test_dir / "epoch_read_transcript.jsonl"
+        t_file.write_text("", encoding="utf-8")
+
+        req_payload = json.dumps({
+            "transcriptPath": str(t_file),
+            "toolCall": {"name": "read_file", "args": {"Path": str(mod_file), "StartLine": 400, "EndLine": 430}},
+        })
+        out1 = io.StringIO()
+        with patch("sys.stdin", io.StringIO(req_payload)), patch("sys.stdout", out1):
+            handle_pre_tool_guardrail_hook()
+        res1 = json.loads(out1.getvalue())
+        self.assertEqual(res1.get("overwrite"), {"StartLine": 1, "EndLine": 500})
+
+        # Record the 1st read in transcript.jsonl (same uncompacted epoch)
+        t_file.write_text(
+            json.dumps({
+                "step_index": 12,
+                "type": "PLANNER_RESPONSE",
+                "tool_calls": [{"name": "read_file", "args": {"Path": str(mod_file), "StartLine": 1, "EndLine": 500}}],
+            }) + "\n",
+            encoding="utf-8",
+        )
+        out2 = io.StringIO()
+        with patch("sys.stdin", io.StringIO(req_payload)), patch("sys.stdout", out2):
+            handle_pre_tool_guardrail_hook()
+        res2 = json.loads(out2.getvalue())
+        self.assertEqual(res2.get("decision"), "allow")
+        self.assertNotIn("overwrite", res2, "Follow-up read in same uncompacted epoch must not re-expand to 500 lines")
+
+        # Append a <CONTEXT_SUMMARY> compaction boundary -> next read must expand again
+        with open(t_file, "a", encoding="utf-8") as tf:
+            tf.write(json.dumps({"step_index": 20, "type": "USER_INPUT", "content": "<CONTEXT_SUMMARY>Compacted</CONTEXT_SUMMARY>"}) + "\n")
+        out3 = io.StringIO()
+        with patch("sys.stdin", io.StringIO(req_payload)), patch("sys.stdout", out3):
+            handle_pre_tool_guardrail_hook()
+        res3 = json.loads(out3.getvalue())
+        self.assertEqual(res3.get("overwrite"), {"StartLine": 1, "EndLine": 500})
+
+        # 2. Automatic subagent finding persistence into .agents/memory.db
+        fake_brain = self.test_dir / "brain_v157"
+        cid = "conv-v157-subagent"
+        log_dir = fake_brain / cid / ".system_generated" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        sub_t = log_dir / "transcript.jsonl"
+        sub_t.write_text(
+            json.dumps({
+                "step_index": 1,
+                "type": "USER_INPUT",
+                "source": "USER_EXPLICIT",
+                "created_at": "2026-11-01T12:00:00Z",
+                "content": f"Fix crash in {mod_file.as_posix()}",
+            }) + "\n" +
+            json.dumps({
+                "step_index": 42,
+                "type": "SYSTEM_MESSAGE",
+                "source": "SYSTEM",
+                "created_at": "2026-11-01T12:05:00Z",
+                "content": "<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-01T12:05:00Z sender=32634716-175d-4825-bcb2-870ae13bcdaf priority=MESSAGE_PRIORITY_HIGH content=Root cause in a10/o.smali line 591: invoke-direct on nulled register v3 must be replaced with nop.\n</SYSTEM_MESSAGE>",
+            }) + "\n",
+            encoding="utf-8",
+        )
+        hook_in = json.dumps({
+            "conversationId": cid,
+            "workspacePaths": [str(self.test_dir)],
+            "brainDir": str(fake_brain),
+            "invocationNum": 1,
+        })
+        hook_out = io.StringIO()
+        with patch("skillsdb.memory.project_memory._HOOK_STATE_FILE", self.test_dir / "hook_state_157.json"), patch("sys.stdin", io.StringIO(hook_in)), patch("sys.stdout", hook_out):
+            handle_pre_invocation_hook()
+        hook_res = json.loads(hook_out.getvalue())
+        eph = hook_res["injectSteps"][0]["ephemeralMessage"]
+        self.assertIn("subagent_finding_step_42", eph)
+        self.assertIn("Root cause in a10/o.smali line 591", eph)
+
 
 if __name__ == "__main__":
     unittest.main()
