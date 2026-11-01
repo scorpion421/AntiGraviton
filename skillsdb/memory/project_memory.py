@@ -21,7 +21,7 @@ from .gitea_config import (
     get_learned_workspaces,
     get_learned_workspaces_with_timestamps,
 )
-from .gitea_sync import _is_temp_workspace, _is_excluded_workspace_path, save_code_commit, get_workspace_git_telemetry, learn_workspace, flush_all_pending_pushes, setup_workspace_git
+from .gitea_sync import _is_temp_workspace, _is_excluded_workspace_path, is_gitea_configured, save_code_commit, get_workspace_git_telemetry, learn_workspace, flush_all_pending_pushes, setup_workspace_git
 from ..search.fts import detect_cwd_hints
 from ..search.synonyms import expand_query_with_synonyms, build_safe_fts_query
 
@@ -333,7 +333,8 @@ def mem_save_snapshot(conn: sqlite3.Connection, summary: str, conversation_id: s
                     trailers["Conversation-ID"] = cid
                 if next_steps:
                     trailers["Next-Steps"] = next_steps
-                c_res = save_code_commit(root, message=summary, push=True, async_push=False, trailers=trailers)
+                gitea_active = is_gitea_configured(root, db_path=DB_PATH)
+                c_res = save_code_commit(root, message=summary, push=gitea_active, async_push=False, trailers=trailers)
                 if c_res.get("success"):
                     commit_hash = c_res.get("commit_hash")
                     if not auto_files and c_res.get("changed_files"):
@@ -341,6 +342,8 @@ def mem_save_snapshot(conn: sqlite3.Connection, summary: str, conversation_id: s
                     if not silent and c_res.get("committed"):
                         if c_res.get("pushed"):
                             print(f"Git commit created: {commit_hash[:7]} (pushed to Gitea)")
+                        elif not gitea_active:
+                            print(f"Git commit created: {commit_hash[:7]} (saved locally)")
                         elif not _is_temp_workspace(root):
                             print(f"Git commit created: {commit_hash[:7]} [WARNING: Gitea push FAILED - server or fileserver unreachable! Commit queued locally for automatic catch-up sync]")
                         else:
@@ -378,6 +381,7 @@ def mem_save_snapshot(conn: sqlite3.Connection, summary: str, conversation_id: s
         row_id = wq.execute_write(_write)
         if not silent:
             print(f"Session snapshot saved (ID {row_id}) for conversation: {cid}")
+            print("  [COMPACT MILESTONE TIP] Milestone state & facts are safely persisted in .agents/memory.db. If starting a new feature next, running '/compact' now will shed old context weight with zero knowledge loss.")
         return
 
     cursor = conn.cursor()
@@ -1545,8 +1549,8 @@ def handle_pre_invocation_hook():
         "2. AUTONOMOUS PROJECT MEMORY, GITEA SYNC & CONTINUITY:",
         "   - On any non-trivial technical task or workspace: Silently initialize/inspect project memory ('skillsdb mem-get-context' or 'skillsdb mem-init') and query domain skills ('skillsdb suggest \"<task>\"') without waiting for user prompting.",
         "   - Mandatory Fact, Offset & Task Indexing (.agents/memory.db): Immediately persist discovered file structures, class/method mappings, and line offsets via 'skillsdb mem-save-fact <key> <value> --project <dir>' and track multi-step tasks via 'skillsdb mem-task-add <title> --project <dir>', alongside architectural decisions ('skillsdb mem-save-decision') and milestone snapshots ('skillsdb mem-save-snapshot'), so context compaction never causes repeated file reads.",
-        "   - Local Gitea Upload, Sync & Keep a Changelog Releases: To upload, initialize, or push any directory or project to local Gitea (http://localhost:3000), immediately run 'skillsdb gitea-init \"<target_dir>\"' or 'skillsdb gitea-sync -m \"<msg>\" --project \"<target_dir>\" [--releases] [--github]' (or 'skillsdb gitea-release' / 'skillsdb gitea-status'). Never hunt for tokens manually; Gitea credentials are managed automatically by SkillsDB. Always author commits as 'Antigravity <antigravity@local.dev>' and format Gitea/GitHub URLs as clickable Markdown links.",
-        "   - Strict SemVer 2.0.0 & Keep a Changelog 1.1.0 (MANDATORY FOR GITEA & GITHUB): Always version according to https://semver.org/ (MAJOR.MINOR.PATCH) and format CHANGELOG.md and ALL Gitea & GitHub Releases strictly according to https://keepachangelog.com/en/1.1.0/ ('## [X.Y.Z] - YYYY-MM-DD' with only '### Added', '### Changed', '### Deprecated', '### Removed', '### Fixed', '### Security'). Never push source commits to a versioned repository without updating VERSION + CHANGELOG.md and publishing formal Releases on Gitea and GitHub.",
+        "   - Local Git & Optional Gitea Sync: SkillsDB works 100% standalone with local Git and .agents/memory.db even when Gitea is not installed. When local Gitea is configured (or requested by the user), use 'skillsdb gitea-init \"<target_dir>\"' or 'skillsdb gitea-sync -m \"<msg>\" --project \"<target_dir>\" [--releases] [--github]' (or 'skillsdb gitea-release' / 'skillsdb gitea-status') without manual token hunting. Always author commits as 'Antigravity <antigravity@local.dev>' and format Gitea/GitHub URLs as clickable Markdown links.",
+        "   - Strict SemVer 2.0.0 & Keep a Changelog 1.1.0: Always version according to https://semver.org/ (MAJOR.MINOR.PATCH) and format CHANGELOG.md and releases strictly according to https://keepachangelog.com/en/1.1.0/ ('## [X.Y.Z] - YYYY-MM-DD' with only '### Added', '### Changed', '### Deprecated', '### Removed', '### Fixed', '### Security'). Never overwrite an existing release tag; increment VERSION + CHANGELOG.md and publish matching Git tags/releases (to local Git, and to Gitea/GitHub when configured).",
         "   - Gitea Repository Collision Guard: If 'skillsdb gitea-init' or 'skillsdb gitea-sync' outputs '[GITEA REPOSITORY COLLISION]', or if Git Telemetry shows '[GITEA COLLISION ALERT]' (an unlinked local workspace whose name already exists on Gitea), STOP immediately and ask the user in informal German how to proceed before pushing: reuse the existing repository (--use-existing), create it under a new name (--name <NewName>), or overwrite it (--overwrite).",
         "3. VERIFICATION INTEGRITY & PROACTIVE ERROR REPORTING:",
         "   - Never deliver untested code, broken shortcuts, or unverified event listeners. Always verify DOM and UI behavior in a real or simulated harness (e.g. jsdom / test harness) before declaring success.",

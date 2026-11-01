@@ -392,6 +392,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_gitea_cfg.add_argument("--workspaces-root", default=None, help="Update primary workspaces root directory (auto-aligns remote_share_path)")
     p_gitea_cfg.add_argument("--remote-share", default=None, help="Update remote customizations.db share path")
     p_gitea_cfg.add_argument("--auto-detect", action="store_true", help="Automatically scan drives and registered projects to heal paths")
+    p_gitea_cfg.add_argument("--enable", action="store_true", help="Enable Gitea integration mode")
+    p_gitea_cfg.add_argument("--disable", action="store_true", help="Disable Gitea integration (run in standalone SkillsDB-only mode)")
 
     p_gitea_rel = subparsers.add_parser("gitea-release", help="Publish or update a Gitea release with Git tag and CHANGELOG.md notes")
     p_gitea_rel.add_argument("tag", nargs="?", default=None, help="Version tag (e.g. v1.0.8; defaults to VERSION / CHANGELOG.md)")
@@ -643,7 +645,8 @@ def main(argv: list[str] = None):
             sys.exit(2)
         return
     elif args.command == "gitea-config":
-        if any(getattr(args, k, None) is not None for k in ("url", "user", "token", "workspaces_root", "remote_share", "service")):
+        enabled_arg = True if getattr(args, "enable", False) else (False if getattr(args, "disable", False) else None)
+        if enabled_arg is not None or any(getattr(args, k, None) is not None for k in ("url", "user", "token", "workspaces_root", "remote_share", "service")):
             set_gitea_config(
                 url=getattr(args, "url", None),
                 user=getattr(args, "user", None),
@@ -651,6 +654,7 @@ def main(argv: list[str] = None):
                 workspaces_root=getattr(args, "workspaces_root", None),
                 remote_share=getattr(args, "remote_share", None),
                 service=getattr(args, "service", None),
+                enabled=enabled_arg,
             )
         gitea_config_summary(auto_detect=getattr(args, "auto_detect", False))
         return

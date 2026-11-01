@@ -401,16 +401,20 @@ def sync_changelog_releases(
                 )
                 created_tag = True
             if created_tag:
-                subprocess.run(
-                    _get_git_auth_cmd_prefix(db_path=db_path) + ["push", "origin", "--tags"],
-                    cwd=str(project_root),
-                    capture_output=True,
-                    timeout=30,
-                )
+                if token and owner:
+                    subprocess.run(
+                        _get_git_auth_cmd_prefix(db_path=db_path) + ["push", "origin", "--tags"],
+                        cwd=str(project_root),
+                        capture_output=True,
+                        timeout=30,
+                    )
+                else:
+                    synced_tags.append(latest_tag)
         except Exception:
             pass
 
-    if token and owner and base_url:
+    gitea_enabled = str(config.get("enabled", "auto")).strip().lower() not in ("false", "0", "no", "off", "disabled")
+    if gitea_enabled and token and owner and base_url:
         try:
             rel_url = f"{base_url}/api/v1/repos/{owner}/{repo_name}/releases?limit=100"
             req = urllib.request.Request(
@@ -507,12 +511,14 @@ def sync_changelog_releases(
                                 timeout=20,
                             )
                     else:
-                        subprocess.run(
+                        gh_c = subprocess.run(
                             ["gh", "release", "create", tag, "--title", rel_title, "--notes-file", tmp_path] + repo_args,
                             cwd=str(project_root),
                             capture_output=True,
                             timeout=20,
                         )
+                        if gh_c.returncode == 0 and tag not in synced_tags:
+                            synced_tags.append(tag)
                 finally:
                     Path(tmp_path).unlink(missing_ok=True)
         except Exception:

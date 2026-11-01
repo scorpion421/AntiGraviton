@@ -26,7 +26,7 @@ from ..core.db import get_connection, init_db, managed_connection
 from ..core.detector import detect_model_tier
 from ..core.concurrency import fetch_single_skill
 from ..memory.project_memory import find_project_root, _is_protected_non_workspace
-from ..memory.gitea_sync import get_gitea_config, get_gitea_service_status, check_gitea_health, get_learned_workspaces
+from ..memory.gitea_sync import get_gitea_config, get_gitea_service_status, check_gitea_health, get_learned_workspaces, is_gitea_configured
 from ..platform.windows_utf8 import check_windows_utf8, ensure_windows_utf8_manifests
 
 
@@ -660,17 +660,20 @@ def doctor(conn: sqlite3.Connection):
         else:
             print(f"[WARN] Windows UTF-8: {utf8_msg} (Run 'skillsdb fix-utf8' to resolve)")
 
-    # 8. Gitea Local Code Backup Service
+    # 8. Gitea Local Code Backup Service (Optional Add-On)
     try:
-        g_cfg = get_gitea_config()
-        g_svc = get_gitea_service_status()
-        g_online, g_info = check_gitea_health(timeout=1.5)
-        if g_online:
-            g_ver = g_info.get("version", "unknown")
-            g_user = g_cfg.get("user") or "unconfigured"
-            print(f"[OK] Gitea Integration: Service {g_svc}, API ONLINE (v{g_ver} at {g_cfg['url']}, Owner: {g_user})")
+        if not is_gitea_configured():
+            print("[INFO] Gitea Integration: Optional (Standalone SkillsDB-Only Mode - Gitea not configured)")
         else:
-            print(f"[INFO] Gitea Integration: Service {g_svc}, API OFFLINE ({g_cfg['url']})")
+            g_cfg = get_gitea_config()
+            g_svc = get_gitea_service_status()
+            g_online, g_info = check_gitea_health(timeout=1.5)
+            if g_online:
+                g_ver = g_info.get("version", "unknown")
+                g_user = g_cfg.get("user") or "unconfigured"
+                print(f"[OK] Gitea Integration: Service {g_svc}, API ONLINE (v{g_ver} at {g_cfg['url']}, Owner: {g_user})")
+            else:
+                print(f"[INFO] Gitea Integration: Service {g_svc}, API OFFLINE ({g_cfg['url']})")
     except Exception as ge:
         print(f"[INFO] Gitea Integration check skipped: {ge}")
 

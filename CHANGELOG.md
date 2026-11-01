@@ -5,6 +5,18 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.8] - 2026-11-01
+
+### Added
+- **First-Class Standalone SkillsDB-Only Mode (`is_gitea_configured()`, `skillsdb gitea-config --disable/--enable`, `v3.8.8`)**:
+  - Added `is_gitea_configured()` in `skillsdb/memory/gitea_sync.py` and `--enable` / `--disable` flags to `skillsdb gitea-config` (`skillsdb/memory/gitea_config.py`, `skillsdb/cli.py`), allowing SkillsDB to cleanly distinguish between an active Gitea installation and standalone SkillsDB-only operation (`-SkipGiteaService`, `--skip-gitea-service`, or standalone `python deploy.py`).
+  - Added `[COMPACT MILESTONE TIP]` directly to `skillsdb mem-save-snapshot` (`skillsdb/memory/project_memory.py`) so standalone SkillsDB-only users receive the same milestone `/compact` guidance as Gitea users.
+
+### Fixed
+- **Zero False Gitea Warnings & Zero HTTP Timeouts in SkillsDB-Only Mode (`skillsdb/memory/gitea_sync.py`, `skillsdb/memory/project_memory.py`, `skillsdb/updater/merger.py`, `v3.8.8`)**:
+  - Guarded `get_workspace_git_telemetry()` with `is_gitea_configured(project_root)` so standalone SkillsDB-only users never experience a 1.5s HTTP timeout on `http://127.0.0.1:3000` or a false `[CRITICAL GITEA ALERT]` on every `PreInvocation` hook call.
+  - Updated `mem_save_snapshot()`, `sync_workspace()`, `sync_changelog_releases()`, `gitea_status_summary()`, `doctor()`, `install-antigraviton.ps1`, and `install_antigraviton.py` so SkillsDB-only installations commit cleanly to local Git (`(saved locally)`), create local SemVer tags from `CHANGELOG.md`, and report accurate standalone status without false push failures.
+
 ## [1.5.7] - 2026-11-01
 
 ### Added

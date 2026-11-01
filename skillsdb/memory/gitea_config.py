@@ -436,6 +436,11 @@ def get_gitea_config(db_path: Path = DB_PATH) -> Dict[str, str]:
         or db_cfg.get("gitea_service")
         or GITEA_SERVICE_NAME
     )
+    enabled = (
+        os.environ.get("SKILLSDB_GITEA_ENABLED")
+        or db_cfg.get("gitea_enabled")
+        or "auto"
+    )
 
     return {
         "url": url,
@@ -444,6 +449,7 @@ def get_gitea_config(db_path: Path = DB_PATH) -> Dict[str, str]:
         "workspaces_root": workspaces_root,
         "remote_share": remote_share,
         "service_name": svc_name,
+        "enabled": enabled,
     }
 
 
@@ -454,6 +460,7 @@ def set_gitea_config(
     workspaces_root: Optional[str] = None,
     remote_share: Optional[str] = None,
     service: Optional[str] = None,
+    enabled: Optional[bool] = None,
     db_path: Path = DB_PATH,
 ) -> Dict[str, str]:
     """Persists Gitea and workspace settings in runtime_config and registers the Git credential helper."""
@@ -471,6 +478,8 @@ def set_gitea_config(
         updates.append(("remote_share_path", str(remote_share).strip(), now_iso))
     if service is not None:
         updates.append(("gitea_service", str(service).strip(), now_iso))
+    if enabled is not None:
+        updates.append(("gitea_enabled", "true" if enabled else "false", now_iso))
 
     if updates and db_path:
         with managed_connection(db_path) as conn:
@@ -594,9 +603,17 @@ def gitea_config_summary(auto_detect: bool = False, db_path: Path = DB_PATH):
     tok = cfg.get("token", "")
     masked_tok = f"{tok[:6]}...{tok[-4:]}" if len(tok) > 10 else ("(set)" if tok else "(not set)")
 
+    enabled_raw = str(cfg.get("enabled", "auto")).strip().lower()
+    if enabled_raw in ("false", "0", "no", "off", "disabled"):
+        mode_str = "Disabled (Standalone SkillsDB-Only Mode)"
+    elif tok or cfg.get("user") or enabled_raw in ("true", "1", "yes", "on", "enabled"):
+        mode_str = "Active (Gitea Integration Enabled)"
+    else:
+        mode_str = "Standalone SkillsDB-Only (Gitea Optional / Unconfigured)"
     print("=" * 60)
     print("SkillsDB - Self-Learning Gitea & Workspace Configuration")
     print("=" * 60)
+    print(f"Operation Mode:     {mode_str}")
     print(f"Gitea URL:          {cfg.get('url')}")
     print(f"Repository Owner:   {cfg.get('user') or '(auto-learned on init)'}")
     print(f"API Token:          {masked_tok}")

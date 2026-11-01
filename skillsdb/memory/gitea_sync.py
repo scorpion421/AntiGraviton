@@ -155,9 +155,39 @@ def ensure_gitea_online(
     }
 
 
+def is_gitea_configured(project_root: Optional[Path] = None, db_path: Path = DB_PATH) -> bool:
+    """
+    Returns True when Gitea integration is configured and enabled on this machine, or False
+    when SkillsDB is running in standalone SkillsDB-only mode (e.g. installed with
+    -SkipGiteaService / --skip-gitea-service, disabled via gitea-config --disable, or
+    deployed without Gitea credentials/service).
+    """
+    cfg = get_gitea_config(db_path=db_path)
+    enabled_flag = str(cfg.get("enabled", "auto")).strip().lower()
+    if enabled_flag in ("false", "0", "no", "off", "disabled"):
+        return False
+    if enabled_flag in ("true", "1", "yes", "on", "enabled"):
+        return True
+    if cfg.get("token") or cfg.get("user"):
+        return True
+    if project_root and _get_configured_gitea_repo_url(Path(project_root)):
+        return True
+    svc_st = get_gitea_service_status(db_path=db_path)
+    return svc_st in ("RUNNING", "START_PENDING")
+
+
 def gitea_status_summary():
     """Prints comprehensive health and status report for Gitea integration, auto-healing if stopped."""
     config = get_gitea_config()
+    if not is_gitea_configured():
+        print("=" * 60)
+        print("SkillsDB - Gitea Integration Status")
+        print("=" * 60)
+        print("Operation Mode:   Standalone SkillsDB-Only (Gitea optional / not configured)")
+        print("Project Memory:   ACTIVE (.agents/memory.db + local Git commits)")
+        print("Enable Gitea:     Run 'skillsdb gitea-config --enable' or 'install-antigraviton.ps1'")
+        print("=" * 60)
+        return
     health = ensure_gitea_online(auto_recover=True, flush_pending=True)
     svc_status = health["service_status"]
     online = health["online"]
@@ -217,7 +247,8 @@ def get_workspace_git_telemetry(project_root: Path, flush_pending: bool = False,
 
     extra_notices: List[str] = []
     gitea_online = False
-    if not _is_temp_workspace(project_root):
+    gitea_active = is_gitea_configured(project_root)
+    if not _is_temp_workspace(project_root) and gitea_active:
         try:
             health = ensure_gitea_online(auto_recover=auto_recover, flush_pending=flush_pending)
             gitea_online = bool(health.get("online"))
@@ -697,7 +728,7 @@ def _push_to_origin(
         text=True,
     )
     if "origin" not in rem_res.stdout.split():
-        if _is_temp_workspace(project_root):
+        if _is_temp_workspace(project_root) or not is_gitea_configured(project_root):
             return False
         setup_workspace_git(project_root)
     else:
@@ -1310,8 +1341,9 @@ def sync_workspace(
     target_name = _resolve_workspace_repo_name(project_root, repo_name)
     print(f"Synchronizing workspace: {project_root.name} ({project_root})")
 
+    gitea_active = is_gitea_configured(project_root)
     configured_url = _get_configured_gitea_repo_url(project_root)
-    if not configured_url and push and not allow_existing and not _is_temp_workspace(project_root):
+    if gitea_active and not configured_url and push and not allow_existing and not _is_temp_workspace(project_root):
         rem_info = inspect_remote_repository(target_name)
         if rem_info.get("exists") and not rem_info.get("empty"):
             setup_workspace_git(project_root, repo_name=target_name, configure_remote=False)
@@ -1319,12 +1351,13 @@ def sync_workspace(
             _print_collision_prompt(project_root, rem_info)
             return False
 
-    setup_workspace_git(project_root, repo_name=target_name)
+    setup_workspace_git(project_root, repo_name=target_name, configure_remote=gitea_active)
     learn_workspace(project_root)
-    result = save_code_commit(project_root, message=msg, push=push, explicit_message=has_explicit_msg)
+    effective_push = push and gitea_active
+    result = save_code_commit(project_root, message=msg, push=effective_push, explicit_message=has_explicit_msg)
     config = get_gitea_config()
     repo_url = _get_configured_gitea_repo_url(project_root) or (
-        f"{config['url']}/{config['user']}/{target_name}" if config.get("user") else config["url"]
+        f"{config['url']}/{config['user']}/{target_name}" if config.get("user") else "local Git"
     )
     if result.get("success"):
         if result.get("committed"):
@@ -1334,6 +1367,8 @@ def sync_workspace(
                 print(f"  [OK] Files tracked:  {result.get('files_changed', 0)}")
             if result.get("pushed"):
                 print(f"  [OK] Pushed successfully to Gitea ({repo_url})")
+            elif not gitea_active or not push:
+                print("  [OK] Saved locally in Git (Standalone SkillsDB-Only Mode)")
             else:
                 print("  [WARN] Commit created locally, push skipped or failed")
         else:

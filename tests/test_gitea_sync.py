@@ -883,6 +883,75 @@ class TestGiteaSync(unittest.TestCase):
         self.assertIn("subagent_finding_step_42", eph)
         self.assertIn("Root cause in a10/o.smali line 591", eph)
 
+    def test_v1_5_8_standalone_skillsdb_without_gitea(self):
+        """Verifies that standalone SkillsDB-only users (without Gitea) work 100% cleanly with zero false Gitea alerts or push warnings."""
+        import io
+        from unittest.mock import patch
+        from skillsdb.memory.gitea_sync import (
+            is_gitea_configured,
+            get_workspace_git_telemetry,
+            sync_workspace,
+        )
+        from skillsdb.memory.project_memory import mem_save_snapshot
+
+        standalone_cfg = {
+            "url": "http://127.0.0.1:3000",
+            "user": "",
+            "token": "",
+            "workspaces_root": "",
+            "remote_share": "",
+            "service_name": "gitea",
+            "enabled": "false",
+        }
+        setup_workspace_git(self.test_dir, configure_remote=False)
+        (self.test_dir / "core_engine.py").write_text("VALUE = 42\n", encoding="utf-8")
+
+        with patch("skillsdb.memory.gitea_sync.get_gitea_config", return_value=standalone_cfg), patch(
+            "skillsdb.memory.gitea_releases.get_gitea_config", return_value=standalone_cfg
+        ):
+            self.assertFalse(is_gitea_configured(self.test_dir))
+
+            # 1. mem_save_snapshot must commit locally, emit (saved locally) + [COMPACT MILESTONE TIP], and NO Gitea push warning
+            snap_out = io.StringIO()
+            with patch("sys.stdout", snap_out):
+                mem_save_snapshot(
+                    self.conn,
+                    summary="Milestone: Standalone SkillsDB commit",
+                    conversation_id="conv-standalone-158",
+                    db_path=self.db_path,
+                    auto_commit=True,
+                    silent=False,
+                )
+            snap_txt = snap_out.getvalue()
+            self.assertIn("(saved locally)", snap_txt)
+            self.assertIn("[COMPACT MILESTONE TIP]", snap_txt)
+            self.assertNotIn("WARNING: Gitea push FAILED", snap_txt)
+
+            # 2. get_workspace_git_telemetry must return local Git status without [CRITICAL GITEA ALERT]
+            with patch("skillsdb.memory.gitea_sync._is_temp_workspace", return_value=False):
+                telem = get_workspace_git_telemetry(self.test_dir)
+            self.assertIsNotNone(telem)
+            self.assertIn("Git Telemetry: branch 'main'", telem)
+            self.assertIn("local only", telem)
+            self.assertNotIn("CRITICAL GITEA ALERT", telem)
+
+            # 3. sync_workspace in standalone mode must commit locally and create local Keep a Changelog tag without warning
+            (self.test_dir / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+            (self.test_dir / "CHANGELOG.md").write_text(
+                "# Changelog\n\n## [1.0.0] - 2026-11-01\n\n### Added\n- Standalone SkillsDB mode.\n",
+                encoding="utf-8",
+            )
+            sync_out = io.StringIO()
+            with patch("skillsdb.memory.gitea_sync._is_temp_workspace", return_value=False), patch(
+                "skillsdb.memory.gitea_releases._is_temp_workspace", return_value=False
+            ), patch("sys.stdout", sync_out):
+                ok = sync_workspace(self.test_dir, message="Release v1.0.0 standalone")
+            self.assertTrue(ok)
+            sync_txt = sync_out.getvalue()
+            self.assertIn("Saved locally in Git (Standalone SkillsDB-Only Mode)", sync_txt)
+            self.assertIn("[COMPACT MILESTONE TIP]", sync_txt)
+            self.assertNotIn("[WARN] Commit created locally, push skipped or failed", sync_txt)
+
 
 if __name__ == "__main__":
     unittest.main()
