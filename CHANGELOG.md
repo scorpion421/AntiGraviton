@@ -5,6 +5,12 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.10] - 2026-11-01
+
+### Changed
+- **Strict Dyadic Pronoun Guard ('Du' & 'Wir' Only - Never 'Ihr'/'Euer') (`plugin/rules/AGENTS.md`, `skillsdb/memory/project_memory.py`, `database/customizations.db`, `v3.8.10`)**:
+  - Explicitly anchored in `AGENTS.md`, the Turn-1 invariant guardrail, and `customizations.db` (`communication-style`) that all conversational references to our collaboration must use singular `Du`/`Dein` (for the user) or first-person plural `wir`/`unser` (for the user and the agent together), strictly prohibiting second-person plural forms (`Ihr`, `Euer`, `Eurer`, `Euch`).
+
 ## [1.5.9] - 2026-11-01
 
 ### Fixed

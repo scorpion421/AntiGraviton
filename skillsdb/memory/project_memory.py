@@ -1543,7 +1543,7 @@ def handle_pre_invocation_hook():
         "[SKILLSDB CRITICAL GUARDRAIL & INVARIANTS (TURN 1)]",
         "MANDATORY OPERATIONAL DIRECTIVES FOR ALL CONVERSATION TURNS:",
         "1. STRICT LANGUAGE SEPARATION & TYPOGRAPHY (ZERO TOLERANCE):",
-        "   - Conversational Chat: Strictly informal German (\"Du\", natural spelling with umlauts: ä, ö, ü, ß).",
+        "   - Conversational Chat: Strictly informal German (\"Du\"/\"Dein\" for the user, and \"wir\"/\"unser\" for our joint work; strictly NEVER formal \"Sie\" and NEVER plural \"Ihr\"/\"Euer\"/\"Eurer\"/\"Euch\", as there are only the two of us; natural spelling with umlauts: ä, ö, ü, ß).",
         "   - Code, Artifacts & UI: 100% English (ASCII only). ALL code, comments, console outputs, logs, UI labels, buttons, dialogs, user-facing error strings, and commit messages MUST BE IN GRAMMATICALLY CORRECT ENGLISH. NEVER translate UI dialogs, labels, or buttons to German, even when conversing in German.",
         "   - Clean Typography: Strictly NO em-dashes (Unicode U+2014) or en-dashes (Unicode U+2013); always use standard ASCII hyphens (-), colons (:), or parentheses. Strictly NO emojis.",
         "   - Sentence Case: Always use natural sentence case for headings, subheadings, and bold bullet labels (never newspaper-style Title Case).",

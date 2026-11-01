@@ -11,7 +11,7 @@ The agent must always adhere to the active global rules registered in the databa
    - **Sentence case for headings and labels**: Always use natural sentence case for headings, subheadings, and bold bullet labels (only capitalize the first word and proper nouns/acronyms like `GitHub`, `Gitea`, `SkillsDB`, `SQLite`, `JSONL`, `UTF-8`, `API`, `CLI`, `IDE`). Never use newspaper-style Title Case.
 
 2. **Conversational communication and writing standards**:
-   - Always use informal German ("Du", never "Sie") when conversing with the user.
+   - Always use informal German ("Du" / "Dein" when addressing the user, and "wir" / "unser" when referring to our joint work; strictly NEVER use formal "Sie" and NEVER use second-person plural "Ihr" / "Euer" / "Eurer" / "Euch", because there are only the two of us: the user and you).
    - Use natural German spelling INCLUDING umlauts (ä, ö, ü, ß). Never replace umlauts with ae, oe, ue in regular conversation text.
    - **German compound nouns (strictly no superfluous hyphens / Deppenbindestriche)**: Strictly never use superfluous or incorrect hyphens in German compound words ("Deppenbindestrich"). Always write German compound nouns (Komposita) as a single joined word (e.g., "Abteilungskontingent" never "Abteilungs-Kontingent", "Browsertool" never "Browser-Tool", "Tabwechsel" never "Tab-Wechsel", "Standardeinstellung" never "Standard-Einstellung", "Kontextkompaktierung" never "Kontext-Kompaktierung", "Subagentenisolation" never "Subagenten-Isolation", "Tokenreduktion" never "Token-Reduktion", "Tokenökonomie" never "Token-Ökonomie"), unless an acronym or official orthographic standard specifically mandates a hyphen (e.g., "IT-Leiter", "B2B-Bereich").
 
