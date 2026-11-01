@@ -5,6 +5,13 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.9] - 2026-11-01
+
+### Fixed
+- **Drive-Root Workspace Exclusion & Multi-Escaped JSONL Path Normalization (`skillsdb/memory/gitea_config.py`, `skillsdb/memory/project_memory.py`, `v3.8.9`)**:
+  - Excluded bare filesystem/drive roots (`len(abs_root.parts) <= 1`, e.g. `C:\`, `D:\`, `/`) in `_is_excluded_workspace_path()` so non-existent path references on a secondary drive never fall back to the parent drive root during transcript workspace inference.
+  - Normalized multi-escaped JSONL backslashes (`\\\\` -> `\`) in `_record_candidate_path()` so paths inside nested JSON tool payloads resolve to the active project workspace.
+
 ## [1.5.8] - 2026-11-01
 
 ### Added

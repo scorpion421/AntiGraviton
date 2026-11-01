@@ -1032,7 +1032,9 @@ def analyze_conversation_epochs_and_scope(
     bs = chr(92)
     def _record_candidate_path(raw_p: str):
         try:
-            cleaned = raw_p.replace(bs + bs, bs).strip().rstrip(',.;:)]}"' + "'")
+            cleaned = raw_p.strip().rstrip(',.;:)]}"' + "'")
+            while (bs + bs) in cleaned:
+                cleaned = cleaned.replace(bs + bs, bs)
             if len(cleaned) < 4:
                 return
             low_c = cleaned.lower().replace('/', bs)
@@ -1045,7 +1047,7 @@ def analyze_conversation_epochs_and_scope(
             if not probe:
                 return
             c_root = find_project_root(probe if probe.is_dir() else probe.parent)
-            if c_root and c_root.exists() and not _is_protected_non_workspace(c_root):
+            if c_root and len(c_root.parts) >= 2 and c_root.exists() and not _is_protected_non_workspace(c_root):
                 key = str(c_root)
                 weight = 3 if (c_root / '.agents' / 'memory.db').exists() else (2 if (c_root / '.git').exists() else 1)
                 candidate_roots[key] = candidate_roots.get(key, 0) + weight

@@ -951,6 +951,9 @@ class TestGiteaSync(unittest.TestCase):
             self.assertIn("Saved locally in Git (Standalone SkillsDB-Only Mode)", sync_txt)
             self.assertIn("[COMPACT MILESTONE TIP]", sync_txt)
             self.assertNotIn("[WARN] Commit created locally, push skipped or failed", sync_txt)
+            from skillsdb.memory.gitea_config import _is_excluded_workspace_path
+            self.assertTrue(_is_excluded_workspace_path(Path("C:/")))
+            self.assertTrue(_is_excluded_workspace_path(Path("D:/")))
 
 
 if __name__ == "__main__":

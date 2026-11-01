@@ -54,7 +54,7 @@ def _is_excluded_workspace_path(project_root: Path, allow_temp_subdirs: bool = F
         ag_data_abs = gemini_abs / "antigravity"
         scratch_abs = ag_data_abs / "scratch"
         temp_abs = Path(os.path.abspath(str(tempfile.gettempdir())))
-        if abs_root in (home_abs, gemini_abs, ag_data_abs, scratch_abs, temp_abs):
+        if len(abs_root.parts) <= 1 or abs_root in (home_abs, gemini_abs, ag_data_abs, scratch_abs, temp_abs):
             return True
         for sub in ("config", "database", "plugins_archive", "share", "credentials"):
             try:
