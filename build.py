@@ -101,6 +101,7 @@ def sync_project_versions(repo_root: Path, suite_ver: str, eng_ver: str) -> None
     import sqlite3 as _sqlite3
     from datetime import datetime, timezone
 
+    test_count = sum(len(re.findall(r'^\s*def test_', p.read_text(encoding='utf-8', errors='ignore'), re.M)) for p in (repo_root / 'tests').glob('test_*.py')) or 86
     version_file = repo_root / "VERSION"
     if not version_file.exists() or version_file.read_text(encoding="utf-8").strip() != suite_ver:
         version_file.write_text(f"{suite_ver}\n", encoding="utf-8")
@@ -128,6 +129,7 @@ def sync_project_versions(repo_root: Path, suite_ver: str, eng_ver: str) -> None
             (r"# AntiGraviton complete suite \(`v[0-9.]+`\)", f"# AntiGraviton complete suite (`v{suite_ver}`)"),
             (r"badge/version-[0-9.]+-blue\.svg", f"badge/version-{suite_ver}-blue.svg"),
             (r"badge/SkillsDB-v[0-9.]+-007ec6\.svg", f"badge/SkillsDB-v{eng_ver}-007ec6.svg"),
+            (r"badge/tests-[0-9]+%2F[0-9]+%20passing-brightgreen\.svg", f"badge/tests-{test_count}%2F{test_count}%20passing-brightgreen.svg"),
             (r"\*\*SkillsDB \(`v[0-9.]+`\)\*\*", f"**SkillsDB (`v{eng_ver}`)**"),
             (r"\*\*SkillsDB context and memory engine \(`v[0-9.]+`\)\*\*", f"**SkillsDB context and memory engine (`v{eng_ver}`)**"),
             (r"\| AntiGraviton suite \(`v[0-9.]+`\) \|", f"| AntiGraviton suite (`v{suite_ver}`) |"),

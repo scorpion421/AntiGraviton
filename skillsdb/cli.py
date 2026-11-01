@@ -372,6 +372,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_gitea_sync.add_argument("--project", default=None, help="Project root directory (optional)")
     p_gitea_sync.add_argument("--name", default=None, help="Target Gitea repository name (optional)")
     p_gitea_sync.add_argument("--use-existing", action="store_true", help="Proceed if a repository with this name already exists on Gitea")
+    p_gitea_sync.add_argument("--allow-unversioned", action="store_true", help="Allow pushing commits without bumping VERSION after explicit user confirmation")
 
     p_gitea_init = subparsers.add_parser("gitea-init", help="Initialize Gitea repository and tracking for workspace")
     p_gitea_init.add_argument("path", nargs="?", default=".", help="Workspace path to initialize")
@@ -608,6 +609,7 @@ def main(argv: list[str] = None):
                 sync_github=sync_gh,
                 repo_name=getattr(args, "name", None),
                 allow_existing=getattr(args, "use_existing", False),
+                allow_unversioned=getattr(args, "allow_unversioned", False),
                 _skip_auto_release=force_rel,
             )
             if not ok:

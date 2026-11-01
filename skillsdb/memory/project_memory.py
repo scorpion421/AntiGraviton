@@ -1056,7 +1056,7 @@ def analyze_conversation_epochs_and_scope(
                 _record_candidate_path(m_path)
         if '"manage_task"' in rline and '"status"' in rline:
             poll_streak += 1
-        if not active_workspace:
+        if not active_workspace and ('"PLANNER_RESPONSE"' in rline or '"USER_INPUT"' in rline or '"USER_EXPLICIT"' in rline):
             for m_win in win_path_re.findall(rline):
                 _record_candidate_path(m_win)
 

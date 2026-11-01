@@ -453,16 +453,33 @@ def verify_task(
     }
 
 
+def _is_exploratory_search_cmd(cmd: str) -> bool:
+    """Returns True if cmd is an ad-hoc shell/python search one-liner rather than a build, test, git, or skillsdb command."""
+    if not cmd or not isinstance(cmd, str):
+        return False
+    low = cmd.lower()
+    for allow_kw in ("skillsdb", "db_manager.py", "unittest", "pytest", "git ", "build.py", "deploy.py", "gitea", "gradle", "flutter ", "npm ", "cargo "):
+        if allow_kw in low:
+            return False
+    if any(k in low for k in ("select-string", "get-childitem", "grep ", "rg ", "findstr ")):
+        return True
+    if "python" in low and "-c" in low:
+        if any(k in low for k in (".read_text", ".glob(", "re.search", "re.findall", ".splitlines()", ".find(", "os.walk")):
+            return True
+    return False
+
+
 def handle_pre_tool_guardrail_hook():
     """
     Handles Antigravity PreToolUse lifecycle hook.
-    Validates tool arguments for write_file, edit_file, write_to_file, replace_file_content,
-    multi_replace_file_content, and run_command to enforce:
+    Validates and optimizes tool arguments for write_file, edit_file, write_to_file,
+    replace_file_content, multi_replace_file_content, read_file, view_file, and run_command:
     1. Zero em-dashes (Unicode U+2014) and zero en-dashes (Unicode U+2013).
     2. Zero emojis or decorative Unicode symbols.
     3. Secret/credential leak prevention.
     4. SemVer 2.0.0 release tag immutability (blocks git tag -f vX.Y.Z).
-    Returns: {"decision": "allow"} or {"decision": "deny", "reason": "..."}
+    5. Anti-salami-slicing read_file window expansion via PreToolUse 'overwrite' (expands < 350 line slices to full file if <= 800 lines, or a 650-line window if > 800 lines).
+    6. Zero-polling guard & automatic WaitMsBeforeAsync=10000 upgrade via PreToolUse 'overwrite' + Subagent Firewall enforcement on 5+ consecutive exploratory search commands.
     """
     try:
         payload_raw = sys.stdin.read()
@@ -474,6 +491,7 @@ def handle_pre_tool_guardrail_hook():
         tool_call = payload.get("toolCall")
         if not isinstance(tool_call, dict):
             tool_call = {}
+        tool_name = str(tool_call.get("name") or payload.get("tool_name") or "").strip().lower()
         raw_args = tool_call.get("args") or tool_call.get("arguments") or payload.get("tool_input") or {}
         if isinstance(raw_args, str):
             try:
@@ -491,18 +509,124 @@ def handle_pre_tool_guardrail_hook():
             or "<tool_input>"
         )
 
-        cmd_line = args.get("CommandLine") or args.get("command") or ""
-        if isinstance(cmd_line, str) and re.search(
-            r"\bgit\b[^\n;|&]*\btag\b(?=[^\n;|&]*(?:\s-f\b|\s--force\b|\s-[a-zA-Z]*f[a-zA-Z]*\b))[^\n;|&]*\bv?\d+\.\d+\.\d+\b",
-            cmd_line,
-        ):
-            reason = (
-                "SkillsDB Guardrail Blocked Command (semver-immutability): "
-                "Never overwrite an already published release tag in place (git tag -f is forbidden by SemVer 2.0.0 rule). "
-                "Increment VERSION and CHANGELOG.md to a new MAJOR.MINOR.PATCH version and publish a new release instead."
-            )
-            print(json.dumps({"decision": "deny", "reason": reason}))
+        # A. Automatic Anti-Salami-Slicing window expansion for read_file / view_file via PreToolUse overwrite
+        if tool_name in ("read_file", "view_file") or (not tool_name and ("StartLine" in args or "EndLine" in args) and "Content" not in args and "Replacement" not in args):
+            if args.get("ByteOffset") is None and (args.get("StartLine") is not None or args.get("EndLine") is not None) and target_file != "<tool_input>":
+                try:
+                    s_line = int(args.get("StartLine") or 1)
+                    e_line = int(args.get("EndLine") or s_line)
+                    req_span = e_line - s_line + 1
+                    if 0 < req_span < 350:
+                        fpath = Path(target_file)
+                        if fpath.exists() and fpath.is_file() and fpath.suffix.lower() not in SKIP_EXTENSIONS and fpath.stat().st_size <= 2_500_000:
+                            total_lines = len(fpath.read_text(encoding="utf-8", errors="ignore").splitlines())
+                            if 0 < total_lines <= 800 and req_span < total_lines:
+                                print(json.dumps({
+                                    "decision": "allow",
+                                    "overwrite": {"StartLine": 1, "EndLine": total_lines},
+                                }))
+                                return
+                            elif total_lines > 800:
+                                mid = (s_line + e_line) // 2
+                                new_start = max(1, min(s_line, mid - 324))
+                                new_end = min(total_lines, max(e_line, new_start + 649))
+                                new_start = max(1, min(new_start, new_end - 649))
+                                if (new_end - new_start) > (e_line - s_line):
+                                    print(json.dumps({
+                                        "decision": "allow",
+                                        "overwrite": {"StartLine": new_start, "EndLine": new_end},
+                                    }))
+                                    return
+                except Exception:
+                    pass
+            print(json.dumps({"decision": "allow"}))
             return
+
+        cmd_line = args.get("CommandLine") or args.get("command") or ""
+        if isinstance(cmd_line, str) and cmd_line:
+            if re.search(
+                r"\bgit\b[^\n;|&]*\btag\b(?=[^\n;|&]*(?:\s-f\b|\s--force\b|\s-[a-zA-Z]*f[a-zA-Z]*\b))[^\n;|&]*\bv?\d+\.\d+\.\d+\b",
+                cmd_line,
+            ):
+                reason = (
+                    "SkillsDB Guardrail Blocked Command (semver-immutability): "
+                    "Never overwrite an already published release tag in place (git tag -f is forbidden by SemVer 2.0.0 rule). "
+                    "Increment VERSION and CHANGELOG.md to a new MAJOR.MINOR.PATCH version and publish a new release instead."
+                )
+                print(json.dumps({"decision": "deny", "reason": reason}))
+                return
+
+            # Block shell polling of .system_generated/tasks/*.log via Get-Content / cat / type
+            cmd_low = cmd_line.lower().replace("/", "\\")
+            if ".system_generated\\tasks\\task-" in cmd_low and any(k in cmd_low for k in ("get-content", "cat ", "type ", "get-item")):
+                reason = (
+                    "SkillsDB Zero-Polling Guard (Rule 5): "
+                    "Never use run_command (Get-Content/cat) to read or poll '.system_generated/tasks/*.log'! "
+                    "Wait for automatic Reactive Wakeup when the background task finishes, or use read_file if the task has already completed."
+                )
+                print(json.dumps({"decision": "deny", "reason": reason}))
+                return
+
+            # Subagent Firewall enforcement for 5+ consecutive exploratory search commands in the main context
+            if _is_exploratory_search_cmd(cmd_line):
+                try:
+                    t_path_str = payload.get("transcriptPath") or ""
+                    cid = str(payload.get("conversationId") or "").strip()
+                    t_path = Path(t_path_str) if t_path_str else (
+                        Path.home() / ".gemini" / "antigravity" / "brain" / cid / ".system_generated" / "logs" / "transcript.jsonl"
+                        if cid else None
+                    )
+                    if t_path and t_path.exists():
+                        tail_lines = []
+                        with open(t_path, "r", encoding="utf-8", errors="ignore") as tf:
+                            for line in tf:
+                                tail_lines.append(line)
+                                if len(tail_lines) > 30:
+                                    tail_lines.pop(0)
+                        search_streak = 0
+                        for rline in reversed(tail_lines):
+                            if '"USER_INPUT"' in rline or '"USER_EXPLICIT"' in rline or '"invoke_subagent"' in rline:
+                                break
+                            if '"PLANNER_RESPONSE"' in rline and '"run_command"' in rline:
+                                try:
+                                    robj = json.loads(rline)
+                                    for tc in (robj.get("tool_calls") or []):
+                                        fn = tc.get("name") or (tc.get("function") or {}).get("name") or ""
+                                        if fn == "run_command":
+                                            targs = tc.get("args") or tc.get("arguments") or (tc.get("function") or {}).get("arguments") or {}
+                                            if isinstance(targs, str):
+                                                targs = json.loads(targs)
+                                            prev_cmd = (targs.get("CommandLine") or "") if isinstance(targs, dict) else ""
+                                            if _is_exploratory_search_cmd(prev_cmd):
+                                                search_streak += 1
+                                except Exception:
+                                    pass
+                        if search_streak >= 4:
+                            reason = (
+                                "SkillsDB Subagent Firewall (Rule 5): "
+                                "You have already executed 4+ consecutive exploratory search commands in the main context. "
+                                "Delegate open multi-file root-cause searching to invoke_subagent(TypeName='research') to prevent main-context token burn!"
+                            )
+                            print(json.dumps({"decision": "deny", "reason": reason}))
+                            return
+                except Exception:
+                    pass
+
+            # Automatic WaitMsBeforeAsync upgrade to 10000ms for normal synchronous commands via PreToolUse overwrite
+            if not bool(args.get("IsDaemon")):
+                try:
+                    wait_val = args.get("WaitMsBeforeAsync")
+                    if wait_val is not None:
+                        wait_int = int(wait_val)
+                        if 1000 <= wait_int < 10000:
+                            out_val = "10000" if isinstance(wait_val, str) else 10000
+                            print(json.dumps({
+                                "decision": "allow",
+                                "overwrite": {"WaitMsBeforeAsync": out_val},
+                            }))
+                            return
+                except Exception:
+                    pass
 
         try:
             target_path = Path(target_file)
@@ -538,4 +662,3 @@ def handle_pre_tool_guardrail_hook():
         pass
 
     print(json.dumps({"decision": "allow"}))
-

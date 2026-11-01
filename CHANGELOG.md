@@ -5,6 +5,20 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.6] - 2026-11-01
+
+### Added
+- **Deterministic `PreToolUse` Token-Economy Overwrite Engine & Subagent Firewall (`skillsdb/core/guardrails.py`, `plugin/hooks.json`, `v3.8.6`)**:
+  - **Anti-Salami-Slicing Window Expansion (`read_file` / `view_file`)**: Automatically intercepts narrow line-slice requests (`< 350 lines`) via `PreToolUse` `overwrite` and expands them with zero extra model turns to the full file (`1..N` when `<= 800 lines`) or a centered 650-line window (when `> 800 lines`), eliminating sequential 20-40 line file slicing in marathon sessions.
+  - **Automatic Synchronous Wait Upgrade (`run_command`)**: Automatically upgrades non-daemon `run_command` calls with `WaitMsBeforeAsync < 10000` (e.g. `5000` ms) to `10000` ms via `PreToolUse` `overwrite` so 5-9 second commands complete synchronously in 1 turn instead of backgrounding into 2 turns.
+  - **Subagent Firewall & Zero-Polling Enforcement in Background Chains (`run_command`)**: Blocks shell polling of `.system_generated/tasks/*.log` (`Get-Content`/`cat`) and blocks the 5th consecutive exploratory search command (`python -c`, `Select-String`, `Get-ChildItem`, `grep`) in the main context, enforcing delegation to `invoke_subagent(TypeName='research')` even during continuous background-task wakeups where `PreInvocation` does not fire.
+- **Unversioned Upload Confirmation Support (`skillsdb/memory/gitea_sync.py`, `skillsdb/cli.py`, `plugin/rules/AGENTS.md`, `v3.8.6`)**:
+  - Added `--allow-unversioned` to `skillsdb gitea-sync` and anchored the double-confirmation policy in `AGENTS.md` and `customizations.db` (`gitea-local-sync`): when the user requests uploading without a SemVer version bump, the agent asks once for explicit confirmation and then pushes cleanly to Gitea and GitHub (`--allow-unversioned --github`) without creating or moving release tags.
+
+### Fixed
+- **Transcript Workspace Inference Isolation (`skillsdb/memory/project_memory.py`, `v3.8.6`)**:
+  - Restricted `analyze_conversation_epochs_and_scope()` path extraction to `PLANNER_RESPONSE` tool calls and `USER_INPUT` steps so paths mentioned inside `MODEL:GENERIC` tool output logs never hijack the inferred workspace of another conversation.
+
 ## [1.5.5] - 2026-10-31
 
 ### Added

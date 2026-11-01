@@ -721,5 +721,82 @@ class TestGiteaSync(unittest.TestCase):
         self.assertIn("surgical_deep_shrink.py:entrypoints", msg_t2)
 
 
+    def test_v1_5_6_pre_tool_use_overwrite_and_unversioned_sync(self):
+        """Verifies v1.5.6 PreToolUse overwrite for read_file salami-slicing, run_command WaitMsBeforeAsync=10000, subagent firewall, and --allow-unversioned."""
+        import io
+        import json
+        from unittest.mock import patch
+        from skillsdb.cli import build_parser
+        from skillsdb.core.guardrails import handle_pre_tool_guardrail_hook
+
+        # 1. Verify CLI flag --allow-unversioned
+        parser = build_parser()
+        parsed = parser.parse_args(["gitea-sync", "-m", "Doc update", "--allow-unversioned", "--github"])
+        self.assertTrue(parsed.allow_unversioned)
+        self.assertTrue(parsed.github)
+
+        # 2. Verify read_file window expansion on <= 800 line file
+        small_file = self.test_dir / "small_module.py"
+        small_file.write_text("\n".join(f"line_{i} = {i}" for i in range(1, 451)) + "\n", encoding="utf-8")
+        p_small = json.dumps({
+            "toolCall": {"name": "read_file", "args": {"Path": str(small_file), "StartLine": 20, "EndLine": 60}}
+        })
+        out_s = io.StringIO()
+        with patch("sys.stdin", io.StringIO(p_small)), patch("sys.stdout", out_s):
+            handle_pre_tool_guardrail_hook()
+        res_s = json.loads(out_s.getvalue())
+        self.assertEqual(res_s["decision"], "allow")
+        self.assertEqual(res_s["overwrite"], {"StartLine": 1, "EndLine": 450})
+
+        # 3. Verify read_file window expansion on > 800 line file (e.g. 2310 lines like d.smali)
+        large_file = self.test_dir / "d.smali"
+        large_file.write_text("\n".join(f".line {i}" for i in range(1, 2311)) + "\n", encoding="utf-8")
+        p_large = json.dumps({
+            "toolCall": {"name": "read_file", "args": {"Path": str(large_file), "StartLine": 1780, "EndLine": 1820}}
+        })
+        out_l = io.StringIO()
+        with patch("sys.stdin", io.StringIO(p_large)), patch("sys.stdout", out_l):
+            handle_pre_tool_guardrail_hook()
+        res_l = json.loads(out_l.getvalue())
+        self.assertEqual(res_l["decision"], "allow")
+        self.assertIn("overwrite", res_l)
+        self.assertLessEqual(res_l["overwrite"]["StartLine"], 1500)
+        self.assertGreaterEqual(res_l["overwrite"]["EndLine"], 2100)
+        self.assertEqual(res_l["overwrite"]["EndLine"] - res_l["overwrite"]["StartLine"] + 1, 650)
+
+        # 4. Verify run_command WaitMsBeforeAsync=5000 auto-upgrades to 10000
+        p_cmd = json.dumps({
+            "toolCall": {"name": "run_command", "args": {"CommandLine": "python build.py", "WaitMsBeforeAsync": 5000}}
+        })
+        out_c = io.StringIO()
+        with patch("sys.stdin", io.StringIO(p_cmd)), patch("sys.stdout", out_c):
+            handle_pre_tool_guardrail_hook()
+        res_c = json.loads(out_c.getvalue())
+        self.assertEqual(res_c["decision"], "allow")
+        self.assertEqual(res_c["overwrite"], {"WaitMsBeforeAsync": 10000})
+
+        # 5. Verify Subagent Firewall blocks 5th consecutive exploratory search command
+        t_file = self.test_dir / "search_transcript.jsonl"
+        search_step = json.dumps({
+            "step_index": 10,
+            "type": "PLANNER_RESPONSE",
+            "tool_calls": [{"name": "run_command", "args": {"CommandLine": "python -c \"from pathlib import Path; print(Path('a').read_text())\""}}],
+        })
+        t_file.write_text("\n".join([search_step] * 4) + "\n", encoding="utf-8")
+        p_search = json.dumps({
+            "transcriptPath": str(t_file),
+            "toolCall": {
+                "name": "run_command",
+                "args": {"CommandLine": "python -c \"from pathlib import Path; print(Path('b').read_text())\"", "WaitMsBeforeAsync": 5000},
+            },
+        })
+        out_sf = io.StringIO()
+        with patch("sys.stdin", io.StringIO(p_search)), patch("sys.stdout", out_sf):
+            handle_pre_tool_guardrail_hook()
+        res_sf = json.loads(out_sf.getvalue())
+        self.assertEqual(res_sf["decision"], "deny")
+        self.assertIn("Subagent Firewall", res_sf["reason"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1301,6 +1301,7 @@ def sync_workspace(
     sync_github: bool = False,
     repo_name: Optional[str] = None,
     allow_existing: bool = False,
+    allow_unversioned: bool = False,
     _skip_auto_release: bool = False,
 ) -> bool:
     """Initializes, learns, and synchronizes a specific workspace (including Keep a Changelog releases and collision checks) to Gitea."""
@@ -1341,10 +1342,22 @@ def sync_workspace(
             else:
                 print(f"  [OK] Already up to date (HEAD: {result.get('commit_hash', '')[:7]} | {repo_url})")
 
+        if push and sync_github and not _is_temp_workspace(project_root):
+            try:
+                rem_chk = subprocess.run(["git", "remote"], cwd=str(project_root), capture_output=True, text=True, timeout=3)
+                if "github" in rem_chk.stdout.split():
+                    branch_name = _get_current_branch(project_root)
+                    gh_push = subprocess.run(["git", "push", "github", branch_name], cwd=str(project_root), capture_output=True, text=True, timeout=45)
+                    if gh_push.returncode == 0:
+                        print(f"  [OK] Pushed branch '{branch_name}' to GitHub remote")
+            except Exception:
+                pass
+
         if push and not _skip_auto_release and not _is_temp_workspace(project_root) and (project_root / "CHANGELOG.md").exists():
-            rel_tags = sync_changelog_releases(project_root, sync_github=sync_github, repo_name=target_name)
-            if rel_tags:
-                print(f"  [OK] Synced Keep a Changelog releases: {', '.join(rel_tags)}")
+            if not allow_unversioned:
+                rel_tags = sync_changelog_releases(project_root, sync_github=sync_github, repo_name=target_name)
+                if rel_tags:
+                    print(f"  [OK] Synced Keep a Changelog releases: {', '.join(rel_tags)}")
             auto_tag, _, _ = _extract_changelog_section(project_root)
             if auto_tag:
                 ahead_chk = subprocess.run(
@@ -1358,10 +1371,15 @@ def sync_workspace(
                 except ValueError:
                     ahead_cnt = 0
                 if ahead_cnt > 0:
-                    print(
-                        f"  [RELEASE REMINDER] HEAD is {ahead_cnt} commit(s) ahead of release {auto_tag}. "
-                        f"Increment VERSION + CHANGELOG.md and run 'skillsdb gitea-release' to publish a new release."
-                    )
+                    if allow_unversioned:
+                        print(
+                            f"  [OK] Unversioned upload confirmed (--allow-unversioned): HEAD is {ahead_cnt} commit(s) ahead of {auto_tag} without creating a new release tag."
+                        )
+                    else:
+                        print(
+                            f"  [RELEASE REMINDER] HEAD is {ahead_cnt} commit(s) ahead of release {auto_tag}. "
+                            f"Increment VERSION + CHANGELOG.md and run 'skillsdb gitea-release' to publish a new release (or pass '--allow-unversioned' only after explicit user confirmation)."
+                        )
         return True
     else:
         print(f"  [ERROR] {result.get('error')}")
