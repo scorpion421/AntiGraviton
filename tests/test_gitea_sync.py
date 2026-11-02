@@ -1062,5 +1062,85 @@ class TestGiteaSync(unittest.TestCase):
         self.assertEqual(res_mix["decision"], "allow")
 
 
+    def test_v1_5_13_single_call_release_sync_and_force_all_flag(self):
+        """Verifies v1.5.13 single-call batch release lookup on Gitea/GitHub, O(1) skip of unchanged historical releases, and --force-all CLI flag."""
+        import json
+        from unittest.mock import patch, MagicMock
+        from skillsdb.cli import build_parser
+        from skillsdb.memory.gitea_releases import sync_changelog_releases, parse_keep_a_changelog
+
+        # 1. Verify --force-all CLI flag on gitea-sync
+        parser = build_parser()
+        args_default = parser.parse_args(["gitea-sync", "--releases", "--github"])
+        self.assertTrue(args_default.releases)
+        self.assertFalse(args_default.force_all)
+        args_force = parser.parse_args(["gitea-sync", "--releases", "--force-all", "--github"])
+        self.assertTrue(args_force.force_all)
+
+        # 2. Create a workspace with 3 Keep a Changelog versions (v1.0.0, v1.0.1, v1.0.2)
+        repo_dir = self.test_dir / "fast_rel_repo"
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        cl_content = (
+            "# Changelog\n\n"
+            "## [1.0.2] - 2026-11-02\n\n### Added\n- Fast batch release sync.\n\n"
+            "## [1.0.1] - 2026-11-01\n\n### Fixed\n- Bug fix.\n\n"
+            "## [1.0.0] - 2026-10-30\n\n### Added\n- Initial release.\n"
+        )
+        (repo_dir / "CHANGELOG.md").write_text(cl_content, encoding="utf-8")
+        entries = parse_keep_a_changelog(repo_dir / "CHANGELOG.md")
+        self.assertEqual([e["tag"] for e in entries], ["v1.0.2", "v1.0.1", "v1.0.0"])
+
+        # Simulate v1.0.0 and v1.0.1 already existing on Gitea and GitHub, while v1.0.2 is new
+        existing_gitea = [
+            {"id": 1, "tag_name": "v1.0.0", "body": entries[2]["body"], "assets": []},
+            {"id": 2, "tag_name": "v1.0.1", "body": entries[1]["body"], "assets": []},
+        ]
+        http_calls = []
+
+        def fake_urlopen(req, timeout=5.0):
+            method = req.get_method()
+            url = req.full_url
+            http_calls.append((method, url))
+            m = MagicMock()
+            m.status = 200 if method == "GET" else 201
+            if method == "GET":
+                m.read.return_value = json.dumps(existing_gitea).encode("utf-8")
+            else:
+                m.read.return_value = json.dumps({"id": 3, "tag_name": "v1.0.2", "assets": []}).encode("utf-8")
+            m.__enter__.return_value = m
+            m.__exit__.return_value = False
+            return m
+
+        gh_sub_calls = []
+
+        def fake_sub_run(cmd, *a, **kw):
+            gh_sub_calls.append(list(cmd))
+            res = MagicMock(returncode=0, stdout="", stderr="")
+            if cmd[:2] == ["gh", "api"]:
+                res.stdout = json.dumps([
+                    {"tag_name": "v1.0.0", "body": entries[2]["body"]},
+                    {"tag_name": "v1.0.1", "body": entries[1]["body"]},
+                ])
+            return res
+
+        with patch("skillsdb.memory.gitea_releases._is_temp_workspace", return_value=False), patch(
+            "skillsdb.memory.gitea_releases.get_gitea_config",
+            return_value={"url": "http://localhost:3000", "user": "MoerthJ", "token": "tok123", "enabled": "true"},
+        ), patch("skillsdb.memory.gitea_releases._resolve_github_repo_slug", return_value="scorpion421/fast_rel_repo"), patch(
+            "urllib.request.urlopen", side_effect=fake_urlopen
+        ), patch("subprocess.run", side_effect=fake_sub_run):
+            synced = sync_changelog_releases(repo_dir, sync_github=True, overwrite_existing=False)
+
+        self.assertEqual(synced, ["v1.0.2"])
+        # Gitea must only receive 1 GET + 1 POST (zero PATCH calls for v1.0.0 and v1.0.1)
+        self.assertEqual(len(http_calls), 2)
+        self.assertEqual(http_calls[0][0], "GET")
+        self.assertEqual(http_calls[1][0], "POST")
+        # GitHub must only receive git push --tags, 1 'gh api', and 1 'gh release create v1.0.2' (zero 'gh release view' or 'edit' on v1.0.0/v1.0.1)
+        gh_release_cmds = [c for c in gh_sub_calls if len(c) >= 3 and c[0] == "gh" and c[1] == "release"]
+        self.assertEqual(len(gh_release_cmds), 1)
+        self.assertEqual(gh_release_cmds[0][:4], ["gh", "release", "create", "v1.0.2"])
+
+
 if __name__ == "__main__":
     unittest.main()

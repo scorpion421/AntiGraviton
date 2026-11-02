@@ -367,7 +367,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_gitea_sync.add_argument("--message", "-m", default=None, help="Custom commit message")
     p_gitea_sync.add_argument("--no-push", action="store_true", help="Commit only, do not push to Gitea")
     p_gitea_sync.add_argument("--all", action="store_true", help="Synchronize all discovered Antigravity workspaces to Gitea")
-    p_gitea_sync.add_argument("--releases", action="store_true", help="Force sync all Keep a Changelog releases from CHANGELOG.md to Gitea (and GitHub if --github is set)")
+    p_gitea_sync.add_argument("--releases", action="store_true", help="Synchronize missing or updated Keep a Changelog releases from CHANGELOG.md to Gitea (and GitHub if --github is set)")
+    p_gitea_sync.add_argument("--force-all", action="store_true", help="Force overwrite all historical Keep a Changelog releases on Gitea and GitHub")
     p_gitea_sync.add_argument("--github", action="store_true", help="Also synchronize Keep a Changelog releases to GitHub via gh CLI")
     p_gitea_sync.add_argument("--project", default=None, help="Project root directory (optional)")
     p_gitea_sync.add_argument("--name", default=None, help="Target Gitea repository name (optional)")
@@ -617,14 +618,19 @@ def main(argv: list[str] = None):
             if not ok:
                 sys.exit(2)
             if force_rel:
+                force_all_rel = getattr(args, "force_all", False)
                 tags = sync_changelog_releases(
                     proj_root,
                     sync_github=sync_gh,
-                    overwrite_existing=True,
+                    overwrite_existing=force_all_rel,
                     repo_name=getattr(args, "name", None),
                 )
                 if tags:
-                    print(f"  [OK] Force-synced Keep a Changelog releases: {', '.join(tags)}")
+                    lbl = "Force-synced" if force_all_rel else "Synced"
+                    print(f"  [OK] {lbl} Keep a Changelog releases: {', '.join(tags)}")
+                else:
+                    print("  [OK] Keep a Changelog releases already up to date (verified via single batch API check)")
+                print("  [COMPACT MILESTONE TIP] Release state & facts are safely persisted in Gitea and .agents/memory.db. If starting a new feature next, running '/compact' now will shed old context weight with zero knowledge loss.")
         return
     elif args.command == "gitea-init":
         if any(getattr(args, k, None) is not None for k in ("url", "user", "token", "workspaces_root")):

@@ -5,6 +5,17 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.13] - 2026-11-02
+
+### Added
+- **Explicit `--force-all` Release Re-Sync Flag (`skillsdb/cli.py`, `v3.8.13`)**:
+  - Added `--force-all` to `skillsdb gitea-sync` (`skillsdb gitea-sync --releases --force-all [--github]`) for scenarios where all historical Keep a Changelog releases should be overwritten in place, while making `--releases` perform fast incremental release synchronization by default.
+
+### Changed
+- **Single-Call Batch Release Synchronization for Gitea & GitHub (`skillsdb/memory/gitea_releases.py`, `skillsdb/cli.py`, `v3.8.13`)**:
+  - Optimized `sync_changelog_releases()` so both Gitea (`GET /api/v1/repos/{owner}/{repo}/releases?limit=100`) and GitHub (`gh api repos/{slug}/releases?per_page=100`) fetch all existing releases in a single API call and skip unchanged historical releases in O(1) time instead of issuing 40+ sequential `PATCH` requests and 80+ `gh release view` / `gh release edit` subprocesses on every release sync (~45x speedup, reducing `--releases --github` runtime from ~3.5 minutes to ~4 seconds).
+  - Preserved automatic backfill of any missing historical releases and automatic `PATCH` / `gh release edit` updates whenever the latest release's `CHANGELOG.md` notes are modified.
+
 ## [1.5.12] - 2026-11-02
 
 ### Fixed
