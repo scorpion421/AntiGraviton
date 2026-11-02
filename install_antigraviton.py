@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Unified Cross-Platform One-Command Installer for the AntiGraviton Complete Suite (v1.5.10).
+Unified Cross-Platform One-Command Installer for the AntiGraviton Complete Suite (v1.5.11).
 
-Supports Linux (systemd --user / rootless daemon), macOS (launchd LaunchAgent), and Windows.
+Supports Linux (systemd --user / rootless daemon), macOS (launchd LaunchAgent), and Windows
+across both Home workstations and Enterprise Active Directory (UNC / mapped drive) environments.
 Deploys:
 1. Non-destructive upgrade preservation of existing runtime_config, Gitea tokens, learned workspaces, and user-learned rules
-2. SkillsDB Context & Memory Engine (v3.8.10) + customizations-db Plugin + shell PATH integration
+2. SkillsDB Context & Memory Engine (v3.8.11) + customizations-db Plugin + shell PATH integration
 3. Antigravity Gitea Local Service (v1.1.2) on loopback (127.0.0.1:3000) with crash auto-recovery and optional 03:00 backup timer
 4. Zero-touch local Gitea Admin user (with optional explicit password) & API Token provisioning into SkillsDB
 5. Strict /api/healthz verification gate, organic workspace discovery, and interactive capability briefing
@@ -29,7 +30,7 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 if sys.platform == "win32":
     try:
@@ -39,6 +40,61 @@ if sys.platform == "win32":
         pass
 
 GITEA_VERSION = "28.2.0"
+
+
+def resolve_user_home() -> Path:
+    """
+    Resolves the local user profile directory reliably across both Home workstations
+    and Enterprise Active Directory workstations (where Git/MSYS2 may set HOME to a
+    mapped network drive like Q:\\ while .gemini resides in %USERPROFILE%).
+    """
+    if os.name == "nt":
+        up = os.environ.get("USERPROFILE", "").strip()
+        if up:
+            return Path(up)
+    return Path.home()
+
+
+def detect_windows_gitea_service_path() -> Optional[str]:
+    """
+    Detects the installation directory of an existing Windows 'gitea' service in ~15ms
+    via 'sc.exe qc gitea' (with PowerShell CIM fallback), avoiding WMI cold-start timeouts
+    on both Home (e.g. D:\\Gitea) and Enterprise (e.g. C:\\Gitea) workstations.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        sc_res = subprocess.run(
+            ["sc.exe", "qc", "gitea"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        if sc_res.returncode == 0 and sc_res.stdout:
+            for line in sc_res.stdout.splitlines():
+                if "BINARY_PATH_NAME" in line and ":" in line:
+                    raw_p = line.split(":", 1)[1].strip()
+                    m = re.match(r'^"([^"]+)"', raw_p)
+                    exe_p = m.group(1) if m else raw_p.split(" ")[0]
+                    if exe_p:
+                        return str(Path(exe_p).parent)
+    except Exception:
+        pass
+    try:
+        ps_check = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", "(Get-CimInstance Win32_Service -Filter \"Name='gitea'\").PathName"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        raw_p = ps_check.stdout.strip()
+        if raw_p:
+            m = re.match(r'^"([^"]+)"', raw_p)
+            exe_p = m.group(1) if m else raw_p.split(" ")[0]
+            return str(Path(exe_p).parent)
+    except Exception:
+        pass
+    return None
 
 
 def get_gitea_download_url(version: str = GITEA_VERSION, sys_platform: str = None, machine: str = None) -> str:
@@ -160,7 +216,7 @@ def ensure_posix_shell_path(bin_dir: Path) -> None:
     if os.name == "nt":
         return
     export_line = 'export PATH="$HOME/.gemini/antigravity/bin:$PATH"'
-    home = Path.home()
+    home = resolve_user_home()
     for rc_name in (".bashrc", ".zshrc", ".profile"):
         rc_path = home / rc_name
         if rc_path.exists() or rc_name == ".profile":
@@ -238,7 +294,7 @@ if __name__ == "__main__":
         pass
 
     if sys.platform.startswith("linux") and shutil.which("systemctl"):
-        systemd_user_dir = Path.home() / ".config" / "systemd" / "user"
+        systemd_user_dir = resolve_user_home() / ".config" / "systemd" / "user"
         systemd_user_dir.mkdir(parents=True, exist_ok=True)
         svc_file = systemd_user_dir / "gitea-backup.service"
         tmr_file = systemd_user_dir / "gitea-backup.timer"
@@ -340,19 +396,21 @@ def install_antigraviton(
     backup_time: str = "03:00",
     backup_retention_days: int = 14,
     skip_gitea_service: bool = False,
+    standalone: bool = False,
     sync_all_workspaces: bool = False,
 ) -> None:
-    suite_root = Path(__file__).parent.resolve()
+    suite_root = Path(os.path.abspath(__file__)).parent
     version_file = suite_root / "VERSION"
-    suite_version = version_file.read_text(encoding="utf-8-sig").strip() if version_file.exists() else "1.5.10"
-    user_home = Path.home()
+    suite_version = version_file.read_text(encoding="utf-8-sig").strip() if version_file.exists() else "1.5.11"
+    user_home = resolve_user_home()
     gemini_dir = user_home / ".gemini"
     target_db_path = gemini_dir / "database" / "customizations.db"
     target_mgr_path = gemini_dir / "database" / "db_manager.py"
     admin_user = gitea_admin_user or os.environ.get("USER") or os.environ.get("USERNAME") or getpass.getuser()
 
-    # On Windows, if PowerShell 7 / deploy-gitea.ps1 is preferred, we can still run the full Python pipeline
-    # or delegate service creation cleanly.
+    if standalone:
+        skip_gitea_service = True
+
     print("=" * 60)
     print(f"AntiGraviton Complete Suite Installer v{suite_version} (Python Cross-Platform)")
     print(f"Platform     : {sys.platform} ({platform.machine()})")
@@ -370,7 +428,7 @@ def install_antigraviton(
         preserved_state = {"runtime_config": {}, "learned_rules": []}
 
     # STEP 2: Deploy SkillsDB Core & Antigravity Plugin
-    print("[2/5] Deploying SkillsDB Engine (v3.8.10) and customizations-db Plugin...")
+    print("[2/5] Deploying SkillsDB Engine (v3.8.11) and customizations-db Plugin...")
     deploy_py = suite_root / "deploy.py"
     subprocess.run([sys.executable, str(deploy_py), "--source", str(suite_root), "--target", str(gemini_dir)], check=True)
     ensure_posix_shell_path(gemini_dir / "antigravity" / "bin")
@@ -383,32 +441,19 @@ def install_antigraviton(
     if not skip_gitea_service:
         print("[3/5] Checking Antigravity Gitea Service (v1.1.2)...")
         if not gitea_install_path:
-            if os.name == "nt":
-                # Check if existing Windows service defines path
-                try:
-                    ps_check = subprocess.run(
-                        ["powershell", "-NoProfile", "-Command", "(Get-CimInstance Win32_Service -Filter \"Name='gitea'\").PathName"],
-                        capture_output=True,
-                        text=True,
-                        timeout=5,
-                    )
-                    raw_p = ps_check.stdout.strip()
-                    if raw_p:
-                        m = re.match(r'^"([^"]+)"', raw_p)
-                        exe_p = m.group(1) if m else raw_p.split(" ")[0]
-                        gitea_install_path = str(Path(exe_p).parent)
-                except Exception:
-                    pass
-            if not gitea_install_path:
+            detected_svc_dir = detect_windows_gitea_service_path()
+            if detected_svc_dir:
+                gitea_install_path = detected_svc_dir
+            else:
                 gitea_install_path = str(user_home / "Gitea")
 
-        install_dir = Path(gitea_install_path).expanduser().resolve()
+        install_dir = Path(os.path.abspath(str(Path(gitea_install_path).expanduser())))
         print(f"      Target Gitea Service Path: {install_dir}")
         for sub in ("scripts", "custom/conf", "data/gitea-repositories", "data/avatars", "log"):
             (install_dir / sub).mkdir(parents=True, exist_ok=True)
 
         suite_gitea_dir = suite_root / "gitea-service"
-        if suite_gitea_dir.exists() and suite_gitea_dir.resolve() != install_dir:
+        if suite_gitea_dir.exists() and suite_gitea_dir.resolve() != install_dir.resolve():
             for item_rel in ("scripts/deploy-gitea.ps1", "scripts/backup-gitea.ps1", "custom/conf/app.example.ini"):
                 src_item = suite_gitea_dir / item_rel
                 if src_item.exists():
@@ -459,7 +504,6 @@ def install_antigraviton(
             subprocess.run([str(gitea_bin), "migrate", "--config", str(config_path), "--work-path", str(install_dir)], capture_output=True)
 
         if os.name == "nt":
-            # Delegate Windows Service check/start to PowerShell helper
             deploy_ps1 = install_dir / "scripts" / "deploy-gitea.ps1"
             svc_q = subprocess.run(["sc.exe", "query", "gitea"], capture_output=True, text=True)
             if svc_q.returncode == 0:
@@ -485,7 +529,6 @@ def install_antigraviton(
                         subprocess.run(["loginctl", "enable-linger", admin_user], capture_output=True)
                     print("      Registered and started rootless systemd --user service 'gitea.service'.")
             if not started:
-                # Fallback for containers / WSL without systemd
                 pg = subprocess.run(["pgrep", "-f", "gitea.*web"], capture_output=True, text=True)
                 if pg.returncode != 0 or not pg.stdout.strip():
                     log_f = open(install_dir / "log" / "gitea-daemon.log", "a", encoding="utf-8")
@@ -526,9 +569,12 @@ def install_antigraviton(
     conn = sqlite3.connect(target_db_path)
     tok_row = conn.execute("SELECT value FROM runtime_config WHERE key='gitea_token'").fetchone()
     usr_row = conn.execute("SELECT value FROM runtime_config WHERE key='gitea_user'").fetchone()
+    en_row = conn.execute("SELECT value FROM runtime_config WHERE key='gitea_enabled'").fetchone()
     conn.close()
     has_token = bool(tok_row and tok_row[0])
     existing_user = usr_row[0] if usr_row and usr_row[0] else ""
+    existing_enabled = (en_row[0] if en_row and en_row[0] else "").strip().lower()
+    preserved_active_gitea = False
 
     if not skip_gitea_service:
         bin_name = "gitea.exe" if os.name == "nt" else "gitea"
@@ -600,7 +646,11 @@ def install_antigraviton(
             else:
                 subprocess.run([sys.executable, str(target_mgr_path), "gitea-config", "--enable"])
     else:
-        subprocess.run([sys.executable, str(target_mgr_path), "gitea-config", "--disable"])
+        if not standalone and has_token and existing_enabled not in ("false", "0", "no", "off", "disabled"):
+            preserved_active_gitea = True
+            subprocess.run([sys.executable, str(target_mgr_path), "gitea-config", "--enable"])
+        else:
+            subprocess.run([sys.executable, str(target_mgr_path), "gitea-config", "--disable"])
 
     # STEP 5: Verification Gate & Telemetry
     print("[5/5] Running final health checks and workspace learning...")
@@ -633,8 +683,10 @@ def install_antigraviton(
     print("=" * 60)
     print(f"AntiGraviton Complete Suite v{suite_version} is active!")
     print("=" * 60)
-    if skip_gitea_service:
+    if skip_gitea_service and not preserved_active_gitea:
         print("   - Local Gitea Service : Skipped (Standalone SkillsDB-Only Mode)")
+    elif preserved_active_gitea:
+        print(f"   - Local Gitea Service : http://127.0.0.1:{gitea_port} (Owner: {existing_user or admin_user} - existing config preserved)")
     else:
         print(f"   - Local Gitea Service : http://127.0.0.1:{gitea_port} (Owner: {admin_user})")
     print("=" * 60)
@@ -649,7 +701,8 @@ def main():
     parser.add_argument("--backup-target-path", default="", help="Optional destination path for daily 03:00 Gitea dump backups.")
     parser.add_argument("--backup-time", default="03:00", help="Daily backup execution time in HH:MM format (default: 03:00).")
     parser.add_argument("--backup-retention-days", type=int, default=14, help="Days to retain backup archives (default: 14).")
-    parser.add_argument("--skip-gitea-service", action="store_true", help="Deploy only SkillsDB and plugin without Gitea service.")
+    parser.add_argument("--skip-gitea-service", action="store_true", help="Skip Gitea service provisioning (preserves existing Gitea config if active).")
+    parser.add_argument("--standalone", action="store_true", help="Explicitly configure Standalone SkillsDB-Only Mode without Gitea.")
     parser.add_argument("--sync-all-workspaces", action="store_true", help="Immediately mirror all discovered workspaces to Gitea.")
     args = parser.parse_args()
 
@@ -662,6 +715,7 @@ def main():
         backup_time=args.backup_time,
         backup_retention_days=args.backup_retention_days,
         skip_gitea_service=args.skip_gitea_service,
+        standalone=args.standalone,
         sync_all_workspaces=args.sync_all_workspaces,
     )
 

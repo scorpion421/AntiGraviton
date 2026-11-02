@@ -140,13 +140,13 @@ class TestGiteaSync(unittest.TestCase):
 
     def test_discover_all_workspaces(self):
         """Verifies multi-root workspace discovery finds active Antigravity projects."""
-        repo_root = Path(__file__).resolve().parent.parent
+        repo_root = Path(os.path.abspath(__file__)).parent.parent
         workspaces = discover_all_workspaces(base_dir=repo_root.parent)
         self.assertGreaterEqual(len(workspaces), 1)
 
     def test_gitea_service_templates_and_relocation_regex(self):
         """Verifies app.example.ini includes LevelDB-free immediate queues and deploy-gitea.ps1 self-heals WORK_PATH."""
-        repo_root = Path(__file__).resolve().parent.parent
+        repo_root = Path(os.path.abspath(__file__)).parent.parent
         example_ini = (repo_root / "gitea-service" / "custom" / "conf" / "app.example.ini").read_text(encoding="utf-8")
         self.assertIn("[queue]", example_ini)
         self.assertIn("[queue.common]", example_ini)
@@ -954,6 +954,45 @@ class TestGiteaSync(unittest.TestCase):
             from skillsdb.memory.gitea_config import _is_excluded_workspace_path
             self.assertTrue(_is_excluded_workspace_path(Path("C:/")))
             self.assertTrue(_is_excluded_workspace_path(Path("D:/")))
+
+
+
+    def test_v1_5_11_home_and_enterprise_ad_dual_scenario_hardening(self):
+        """Verifies v1.5.11 Home vs Enterprise AD profile resolution, UNC-to-drive normalization, POSIX wrapper, and fast service path detection."""
+        from unittest.mock import patch, MagicMock
+        from skillsdb.config import resolve_user_home
+        from skillsdb.memory.gitea_config import _normalize_workspace_path, _is_excluded_workspace_path
+        import install_antigraviton as ia
+        import deploy as dep
+
+        # 1. Enterprise AD scenario: HOME=Q:\ but USERPROFILE=C:\Users\moerthj
+        with patch.dict(os.environ, {"USERPROFILE": r"C:\Users\moerthj", "HOME": "Q:\\", "HOMEDRIVE": "Q:", "HOMEPATH": "\\", "HOMESHARE": r"\\fileserver02.atliwest.local\home$\moerthj"}):
+            if os.name == "nt":
+                self.assertEqual(str(resolve_user_home()), r"C:\Users\moerthj")
+                self.assertEqual(str(dep.resolve_user_home()), r"C:\Users\moerthj")
+                self.assertEqual(str(ia.resolve_user_home()), r"C:\Users\moerthj")
+                self.assertTrue(_is_excluded_workspace_path(Path(r"\\fileserver02.atliwest.local\home$\moerthj")))
+                self.assertTrue(_is_excluded_workspace_path(Path("Q:\\")))
+                with patch.object(Path, "exists", return_value=True):
+                    norm_p = _normalize_workspace_path(Path(r"\\fileserver02.atliwest.local\home$\moerthj\Antigravity\AntiGraviton"))
+                    self.assertEqual(str(norm_p).lower(), r"q:\antigravity\antigraviton")
+
+        # 2. Home scenario: USERPROFILE=C:\Users\MickyFoley, secondary drive D:\Gitea
+        with patch.dict(os.environ, {"USERPROFILE": r"C:\Users\MickyFoley", "HOME": r"C:\Users\MickyFoley", "HOMEDRIVE": "C:", "HOMEPATH": r"\Users\MickyFoley", "HOMESHARE": ""}):
+            if os.name == "nt":
+                self.assertEqual(str(resolve_user_home()), r"C:\Users\MickyFoley")
+                self.assertTrue(_is_excluded_workspace_path(Path(r"C:\Users\MickyFoley")))
+                home_proj = _normalize_workspace_path(Path(r"D:\Antigravity\AntiGraviton"))
+                self.assertEqual(str(home_proj).lower(), r"d:\antigravity\antigraviton")
+
+        # 3. Verify sc.exe qc gitea binary path parser for both D:\Gitea (Home) and C:\Gitea (Enterprise)
+        if os.name == "nt":
+            mock_sc_home = MagicMock(returncode=0, stdout='        BINARY_PATH_NAME   : "D:\\Gitea\\gitea.exe" web --config "D:\\Gitea\\custom\\conf\\app.ini"\n')
+            with patch("subprocess.run", return_value=mock_sc_home):
+                self.assertEqual(ia.detect_windows_gitea_service_path(), r"D:\Gitea")
+            mock_sc_ent = MagicMock(returncode=0, stdout='        BINARY_PATH_NAME   : "C:\\Gitea\\gitea.exe" web --config "C:\\Gitea\\custom\\conf\\app.ini"\n')
+            with patch("subprocess.run", return_value=mock_sc_ent):
+                self.assertEqual(ia.detect_windows_gitea_service_path(), r"C:\Gitea")
 
 
 if __name__ == "__main__":

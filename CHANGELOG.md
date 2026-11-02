@@ -5,6 +5,20 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.11] - 2026-11-02
+
+### Added
+- **Dual-Scenario Home & Enterprise Active Directory Environment Support (`skillsdb/config.py`, `skillsdb/memory/gitea_config.py`, `deploy.py`, `install_antigraviton.py`, `install-antigraviton.ps1`, `v3.8.11`)**:
+  - Added `resolve_user_home()` across `skillsdb/config.py`, `deploy.py`, and `install_antigraviton.py` so Windows installations always resolve `.gemini` via `%USERPROFILE%` even when Git for Windows or MSYS2 sets `HOME` to a mapped corporate network drive (`HOMEDRIVE` + `HOMEPATH`, e.g. `Q:\`).
+  - Added `_normalize_workspace_path()` in `skillsdb/memory/gitea_config.py` to automatically map Enterprise AD `HOMESHARE` UNC paths (`\\server\home$\user\...`) back to their mounted `HOMEDRIVE` (`Q:\...`) during workspace learning and discovery while keeping local drive paths (`C:\...`, `D:\...`) untouched on Home workstations.
+  - Added `--standalone` (Python) and `-Standalone` (PowerShell) installer switches for explicit Standalone SkillsDB-Only Mode configuration, while preserving existing active Gitea tokens (`gitea-config --enable`) when `--skip-gitea-service` / `-SkipGiteaService` is used for fast SkillsDB upgrades on machines that already run Gitea.
+  - Added `detect_windows_gitea_service_path()` (`sc.exe qc gitea`) for ~15ms Windows service binary path detection without WMI cold-start timeouts across both Home (`D:\Gitea`) and Enterprise (`C:\Gitea`) installations.
+
+### Fixed
+- **Git Credential Helper & POSIX Wrapper Path Resolution on Enterprise Domain Workstations (`deploy.py`, `skillsdb/memory/gitea_config.py`, `v3.8.11`)**:
+  - Updated the deployed `~/.gemini/antigravity/bin/skillsdb` POSIX shell wrapper to resolve `_AGY_HOME` from `$USERPROFILE` (converted to forward slashes) before falling back to `$HOME`, and to prefer `python` over `python3` in `PATH`, preventing `can't open file 'Q:\\.gemini\\database\\db_manager.py'` errors when Git for Windows invokes `!skillsdb gitea-credential-helper` via `/bin/sh`.
+  - Extended `_is_excluded_workspace_path()` to exclude Enterprise AD `HOMESHARE` and `HOMEDRIVE+HOMEPATH` root directories alongside `%USERPROFILE%`.
+
 ## [1.5.10] - 2026-11-01
 
 ### Changed

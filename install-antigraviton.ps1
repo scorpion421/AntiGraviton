@@ -1,13 +1,13 @@
 <#
 .SYNOPSIS
-    Unified One-Command Installer for the AntiGraviton Complete Suite (v1.5.10).
+    Unified One-Command Installer for the AntiGraviton Complete Suite (v1.5.11).
 
 .DESCRIPTION
     Deploys the complete AntiGraviton environment for Google Antigravity IDE across
     all three target scenarios (Enterprise AD/UNC, Desktop with scheduled backup, and Laptop/Secondary Drive):
     0. Automatic PowerShell 7 (pwsh) & Python 3 runtime bootstrap + IDE/Windows Terminal default shell configuration
     1. Non-destructive upgrade preservation of existing runtime_config, Gitea tokens, learned workspaces, and user-learned rules
-    2. SkillsDB Context & Memory Engine (v3.8.10) + customizations-db Plugin + UTF-8 manifest deployment
+    2. SkillsDB Context & Memory Engine (v3.8.11) + customizations-db Plugin + UTF-8 manifest deployment
     3. Antigravity Gitea Local Windows Service (v1.1.2) with 3-tier elevation handling (direct admin, optional DPAPI, or UAC),
        secondary drive NTFS ACL setup, SCM auto-recovery, non-elevated start/stop permissions, and optional 03:00 backup task
     4. Zero-touch local Gitea Admin user (with optional explicit password) & API Token provisioning into SkillsDB
@@ -40,7 +40,10 @@
     Optional. Daily execution time for the scheduled Gitea backup task when BackupTargetPath is provided (default: "03:00").
 
 .PARAMETER SkipGiteaService
-    Optional switch. If set, deploys only SkillsDB and the Antigravity plugin without provisioning the Gitea Windows Service.
+    Optional switch. If set, skips Gitea Windows Service provisioning while preserving an existing active Gitea configuration.
+
+.PARAMETER Standalone
+    Optional switch. If set, explicitly configures Standalone SkillsDB-Only Mode without Gitea.
 
 .PARAMETER SyncAllWorkspaces
     Optional switch. If set, immediately runs 'skillsdb gitea-sync --all' after installation to mirror all discovered Antigravity projects.
@@ -81,6 +84,9 @@ param(
     [switch]$SkipGiteaService,
 
     [Parameter(Mandatory = $false)]
+    [switch]$Standalone,
+
+    [Parameter(Mandatory = $false)]
     [switch]$SyncAllWorkspaces
 )
 
@@ -88,9 +94,13 @@ $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $false
 $ProgressPreference = "SilentlyContinue"
 
+if ($Standalone) {
+    $SkipGiteaService = [switch]::Present
+}
+
 $suiteRoot = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
 $versionFile = Join-Path $suiteRoot "VERSION"
-$suiteVersion = if (Test-Path $versionFile) { (Get-Content $versionFile -Raw).Trim() } else { "1.5.10" }
+$suiteVersion = if (Test-Path $versionFile) { (Get-Content $versionFile -Raw).Trim() } else { "1.5.11" }
 $userHome = if ($env:USERPROFILE) { $env:USERPROFILE } else { [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile) }
 $geminiDir = Join-Path $userHome ".gemini"
 $targetDbPath = Join-Path $geminiDir "database\customizations.db"
@@ -263,7 +273,7 @@ except Exception as e:
 # ---------------------------------------------------------------------------
 # STEP 2: Deploy SkillsDB Core & Antigravity Plugin
 # ---------------------------------------------------------------------------
-Write-Host "[2/5] Deploying SkillsDB Engine (v3.8.10) and customizations-db Plugin..."
+Write-Host "[2/5] Deploying SkillsDB Engine (v3.8.11) and customizations-db Plugin..."
 $deployPy = Join-Path $suiteRoot "deploy.py"
 $deployPs1 = Join-Path $suiteRoot "deploy.ps1"
 
@@ -353,15 +363,28 @@ if (-not $SkipGiteaService) {
     if (-not $GiteaInstallPath) {
         if ($existingSvc) {
             try {
-                $wmiSvc = Get-CimInstance Win32_Service -Filter "Name='gitea'" -ErrorAction SilentlyContinue
-                if ($wmiSvc -and $wmiSvc.PathName) {
-                    if ($wmiSvc.PathName -match '^"([^"]+)"') {
+                $scOut = (& sc.exe qc gitea 2>$null | Out-String)
+                if ($scOut -match 'BINARY_PATH_NAME\s*:\s*(.+)') {
+                    $rawPath = $Matches[1].Trim()
+                    if ($rawPath -match '^"([^"]+)"') {
                         $GiteaInstallPath = Split-Path -Parent $Matches[1]
                     } else {
-                        $GiteaInstallPath = Split-Path -Parent ($wmiSvc.PathName.Split(' ')[0])
+                        $GiteaInstallPath = Split-Path -Parent ($rawPath.Split(' ')[0])
                     }
                 }
             } catch {}
+            if (-not $GiteaInstallPath) {
+                try {
+                    $wmiSvc = Get-CimInstance Win32_Service -Filter "Name='gitea'" -ErrorAction SilentlyContinue
+                    if ($wmiSvc -and $wmiSvc.PathName) {
+                        if ($wmiSvc.PathName -match '^"([^"]+)"') {
+                            $GiteaInstallPath = Split-Path -Parent $Matches[1]
+                        } else {
+                            $GiteaInstallPath = Split-Path -Parent ($wmiSvc.PathName.Split(' ')[0])
+                        }
+                    }
+                } catch {}
+            }
         }
         if (-not $GiteaInstallPath) {
             $GiteaInstallPath = Join-Path $userHome "Gitea"
@@ -527,15 +550,19 @@ import sqlite3, sys
 conn = sqlite3.connect(sys.argv[1])
 tok = conn.execute("SELECT value FROM runtime_config WHERE key='gitea_token'").fetchone()
 usr = conn.execute("SELECT value FROM runtime_config WHERE key='gitea_user'").fetchone()
+en = conn.execute("SELECT value FROM runtime_config WHERE key='gitea_enabled'").fetchone()
 conn.close()
 t_val = tok[0] if tok and tok[0] else ""
 u_val = usr[0] if usr and usr[0] else ""
-print(f"{bool(t_val)}|{u_val}")
+e_val = (en[0] if en and en[0] else "").strip().lower()
+print(f"{bool(t_val)}|{u_val}|{e_val}")
 "@
 $cfgOut = ($checkConfigPy | & python - $targetDbPath | Out-String).Trim()
-$cfgParts = $cfgOut -split '\|', 2
+$cfgParts = $cfgOut -split '\|', 3
 $hasToken = if ($cfgParts.Count -ge 1) { $cfgParts[0] } else { "False" }
 $existingGiteaUser = if ($cfgParts.Count -ge 2) { $cfgParts[1] } else { "" }
+$existingEnabled = if ($cfgParts.Count -ge 3) { $cfgParts[2] } else { "" }
+$preservedActiveGitea = $false
 
 if (-not $SkipGiteaService) {
     $giteaExe = Join-Path $GiteaInstallPath "gitea.exe"
@@ -580,7 +607,7 @@ if (-not $SkipGiteaService) {
                     Write-Host "      Automatically provisioned and registered Gitea API token for user '$GiteaAdminUser'." -ForegroundColor Green
                 }
             } else {
-                & python $targetMgrPath gitea-config
+                & python $targetMgrPath gitea-config --enable
             }
         } catch {
             Write-Host "      Notice: Automatic user/token provisioning encountered an issue: $_"
@@ -617,7 +644,12 @@ except Exception:
         $linkBotEmailPy | & python - $giteaDb 2>$null | Out-Null
     }
 } else {
-    & python $targetMgrPath gitea-config --disable
+    if (-not $Standalone -and $hasToken -eq "True" -and ($existingEnabled -notin @("false", "0", "no", "off", "disabled"))) {
+        $preservedActiveGitea = $true
+        & python $targetMgrPath gitea-config --enable
+    } else {
+        & python $targetMgrPath gitea-config --disable
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -663,10 +695,12 @@ Write-Host "============================================================" -Foreg
 Write-Host "AntiGraviton Complete Suite v$suiteVersion is active!" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host "1. Active Core Capabilities:" -ForegroundColor Green
-Write-Host "   - SkillsDB Engine (v3.8.10): ~95% token reduction via on-demand FTS5 micro-skills"
+Write-Host "   - SkillsDB Engine (v3.8.11): ~95% token reduction via on-demand FTS5 micro-skills"
 Write-Host "   - Episodic Project Memory : .agents/memory.db (decisions, facts, tasks, snapshots)"
-if ($SkipGiteaService) {
+if ($SkipGiteaService -and -not $preservedActiveGitea) {
     Write-Host "   - Local Gitea Service     : Skipped (Standalone SkillsDB-Only Mode)"
+} elseif ($preservedActiveGitea) {
+    Write-Host "   - Local Gitea Service     : http://127.0.0.1:$GiteaPort (Owner: $(if ($existingGiteaUser) { $existingGiteaUser } else { $GiteaAdminUser }), existing config preserved)"
 } else {
     Write-Host "   - Local Gitea Service     : http://127.0.0.1:$GiteaPort (Owner: $GiteaAdminUser, auto-recovery active)"
 }

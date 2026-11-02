@@ -14,8 +14,8 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-__version__ = "3.8.10"
-__suite_version__ = "1.5.10"
+__version__ = "3.8.11"
+__suite_version__ = "1.5.11"
 
 # Model capability tiers
 TIER_LEAN = "lean"          # Gemini Flash, Flash-Lite, micro-skills, minimal token footprint
@@ -36,8 +36,22 @@ SKILL_CLUSTERS = {
     "antigravity": ["antigravity-guide", "agy-customizations", "plugin", "automation", "generative_ui", "ui-plugin-navigation"]
 }
 
+
+def resolve_user_home() -> Path:
+    """
+    Resolves the local user profile directory reliably across both Home workstations
+    and Enterprise Active Directory workstations (where Git/MSYS2 may set HOME to a
+    mapped network drive like Q:\\ while .gemini resides in %USERPROFILE%).
+    """
+    if os.name == "nt":
+        up = os.environ.get("USERPROFILE", "").strip()
+        if up:
+            return Path(up)
+    return Path.home()
+
+
 # Dynamically resolve user-relative paths
-GEMINI_DIR = Path.home() / ".gemini"
+GEMINI_DIR = resolve_user_home() / ".gemini"
 DB_DIR = GEMINI_DIR / "database"
 DB_PATH = DB_DIR / "customizations.db"
 GLOBAL_PLUGINS_PATH = GEMINI_DIR / "config" / "plugins"
@@ -45,7 +59,7 @@ ARCHIVED_PLUGINS_PATH = GEMINI_DIR / "plugins_archive"
 BUILTIN_SKILLS_PATH = GEMINI_DIR / "antigravity" / "builtin" / "skills"
 
 # Default network share fallback for team synchronization
-DEFAULT_REMOTE_SHARE = Path(os.environ.get("SKILLSDB_REMOTE_SHARE") or str(Path.home() / ".gemini" / "share" / "customizations.db"))
+DEFAULT_REMOTE_SHARE = Path(os.environ.get("SKILLSDB_REMOTE_SHARE") or str(GEMINI_DIR / "share" / "customizations.db"))
 
 # Gitea integration settings (configured via runtime_config in customizations.db or environment variables)
 GITEA_DEFAULT_URL = os.environ.get("SKILLSDB_GITEA_URL") or "http://127.0.0.1:3000"

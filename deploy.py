@@ -2,7 +2,8 @@
 """
 Cross-platform deployment script for Antigravity Customizations Database.
 Deploys customizations.db, db_manager.py, and the customizations-db plugin
-to the active user's ~/.gemini directory with zero hardcoded paths.
+to the active user's ~/.gemini directory with zero hardcoded paths across
+both Home (local profile) and Enterprise Active Directory (UNC / mapped drive) environments.
 """
 
 import os
@@ -14,6 +15,19 @@ import sqlite3
 import argparse
 import contextlib
 from pathlib import Path
+
+
+def resolve_user_home() -> Path:
+    """
+    Resolves the local user profile directory reliably across both Home workstations
+    and Enterprise Active Directory workstations (where Git/MSYS2 may set HOME to a
+    mapped network drive like Q:\\ while .gemini resides in %USERPROFILE%).
+    """
+    if os.name == "nt":
+        up = os.environ.get("USERPROFILE", "").strip()
+        if up:
+            return Path(up)
+    return Path.home()
 
 
 def safe_deploy_database(source_db_file: Path, target_db_file: Path) -> None:
@@ -128,15 +142,16 @@ def safe_deploy_database(source_db_file: Path, target_db_file: Path) -> None:
 
 
 def deploy(source_dir: Path = None, target_dir: Path = None):
+    user_home = resolve_user_home()
     if not source_dir:
-        source_dir = Path(__file__).parent.resolve()
+        source_dir = Path(os.path.abspath(__file__)).parent
     else:
-        source_dir = Path(source_dir).resolve()
+        source_dir = Path(os.path.abspath(str(source_dir)))
 
     if not target_dir:
-        target_dir = Path.home() / ".gemini"
+        target_dir = user_home / ".gemini"
     else:
-        target_dir = Path(target_dir).resolve()
+        target_dir = Path(os.path.abspath(str(target_dir)))
 
     target_db_dir = target_dir / "database"
     target_config_dir = target_dir / "config"
@@ -166,12 +181,31 @@ def deploy(source_dir: Path = None, target_dir: Path = None):
     print(f"      Database deployed to: {target_db_dir}")
 
     # Deploy global CLI wrapper to ~/.gemini/antigravity/bin (in system PATH)
+    # Works across both Home workstations ($HOME == $USERPROFILE) and Enterprise AD workstations
+    # (where Git/MSYS2 /bin/sh sets $HOME to HOMEDRIVE+HOMEPATH e.g. Q:\ while .gemini lives in $USERPROFILE).
     target_bin_dir = target_dir / "antigravity" / "bin"
     target_bin_dir.mkdir(parents=True, exist_ok=True)
     cmd_path = target_bin_dir / "skillsdb.cmd"
-    cmd_path.write_text('@echo off\r\nset "PATH=%USERPROFILE%\\.local\\bin;%PATH%"\r\npython "%USERPROFILE%\\.gemini\\database\\db_manager.py" %*\r\n', encoding="ascii")
+    cmd_path.write_text(
+        '@echo off\r\nset "PATH=%USERPROFILE%\\.local\\bin;%PATH%"\r\npython "%USERPROFILE%\\.gemini\\database\\db_manager.py" %*\r\n',
+        encoding="ascii",
+    )
     sh_path = target_bin_dir / "skillsdb"
-    sh_path.write_text('#!/bin/sh\nexport PATH="$HOME/.local/bin:$PATH"\npython3 "$HOME/.gemini/database/db_manager.py" "$@"\n', encoding="utf-8")
+    sh_wrapper = (
+        "#!/bin/sh\n"
+        'if [ -n "$USERPROFILE" ]; then\n'
+        '    _AGY_HOME=$(printf \'%s\' "$USERPROFILE" | tr \'\\\\\' \'/\')\n'
+        "else\n"
+        '    _AGY_HOME="$HOME"\n'
+        "fi\n"
+        'export PATH="$_AGY_HOME/.local/bin:$PATH"\n'
+        "if command -v python >/dev/null 2>&1; then\n"
+        '    exec python "$_AGY_HOME/.gemini/database/db_manager.py" "$@"\n'
+        "else\n"
+        '    exec python3 "$_AGY_HOME/.gemini/database/db_manager.py" "$@"\n'
+        "fi\n"
+    )
+    sh_path.write_text(sh_wrapper, encoding="utf-8", newline="\n")
     try:
         sh_path.chmod(0o755)
     except Exception:
@@ -284,11 +318,13 @@ def deploy(source_dir: Path = None, target_dir: Path = None):
     except Exception as err:
         print(f"Verification notice: {err}")
 
-    # 6. Global Git Ignore configuration
+    # 6. Global Git Ignore configuration (explicit path for both Home and Enterprise AD HOMEDRIVE environments)
     print("[6/6] Ensuring global Git ignore for project memory...")
     try:
         import subprocess
-        user_home_str = str(Path.home())
+        user_home_str = str(user_home)
+        canonical_ignore = user_home / ".gitignore_global"
+        canonical_posix = str(canonical_ignore).replace("\\", "/")
         git_check = subprocess.run(
             ["git", "config", "--global", "core.excludesfile"],
             cwd=user_home_str,
@@ -296,16 +332,13 @@ def deploy(source_dir: Path = None, target_dir: Path = None):
             text=True
         )
         global_ignore_path = git_check.stdout.strip()
-        if not global_ignore_path:
-            global_ignore_path = str(Path.home() / ".gitignore_global")
+        if not global_ignore_path or global_ignore_path.startswith("~"):
+            global_ignore_path = str(canonical_ignore)
             subprocess.run(
-                ["git", "config", "--global", "core.excludesfile", global_ignore_path.replace("\\", "/")],
+                ["git", "config", "--global", "core.excludesfile", canonical_posix],
                 cwd=user_home_str,
                 check=True
             )
-        else:
-            if global_ignore_path.startswith("~"):
-                global_ignore_path = str(Path.home() / global_ignore_path[2:])
 
         ignore_file = Path(global_ignore_path)
         existing_content = ignore_file.read_text(encoding="utf-8") if ignore_file.exists() else ""
@@ -341,4 +374,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

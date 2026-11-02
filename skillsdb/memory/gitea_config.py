@@ -23,8 +23,76 @@ from ..config import (
     GITEA_DEFAULT_USER,
     GITEA_DEFAULT_TOKEN,
     GITEA_SERVICE_NAME,
+    resolve_user_home,
 )
 from ..core.db import managed_connection, execute_with_retry
+
+_UNC_TO_DRIVE_CACHE: Optional[Dict[str, str]] = None
+
+
+def _get_unc_to_drive_map() -> Dict[str, str]:
+    """
+    Builds and caches a mapping of UNC share roots (lowercase, without trailing slash)
+    to their mounted Windows drive roots (e.g. '\\\\fileserver02...\\home$\\user' -> 'Q:\\')
+    using both HOMESHARE/HOMEDRIVE environment variables and active DRIVE_REMOTE mounts.
+    """
+    global _UNC_TO_DRIVE_CACHE
+    if _UNC_TO_DRIVE_CACHE is not None:
+        return _UNC_TO_DRIVE_CACHE
+    mapping: Dict[str, str] = {}
+    if os.name == "nt":
+        homeshare = os.environ.get("HOMESHARE", "").strip().rstrip("\\/")
+        homedrive = os.environ.get("HOMEDRIVE", "").strip().rstrip("\\/")
+        if homeshare and homedrive and len(homedrive) == 2 and homedrive[1] == ":":
+            mapping[homeshare.lower()] = homedrive.upper() + "\\"
+        try:
+            import ctypes
+            bitmask = ctypes.windll.kernel32.GetLogicalDrives()
+            for i in range(26):
+                if bitmask & (1 << i):
+                    drv = f"{chr(65 + i)}:\\"
+                    # DRIVE_REMOTE == 4
+                    if ctypes.windll.kernel32.GetDriveTypeW(drv) == 4:
+                        try:
+                            unc_root = str(Path(drv).resolve()).rstrip("\\/")
+                            if unc_root.startswith("\\\\?\\UNC\\"):
+                                unc_root = "\\\\" + unc_root[8:]
+                            if unc_root.startswith("\\\\"):
+                                mapping[unc_root.lower()] = drv
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+    _UNC_TO_DRIVE_CACHE = mapping
+    return mapping
+
+
+def _normalize_workspace_path(project_root: Path) -> Path:
+    """
+    Normalizes a workspace path across both Home (local drives C:\\, D:\\) and Enterprise
+    Active Directory environments (where Path.resolve() converts a mapped network drive
+    like Q:\\ into its underlying SMB UNC share \\\\server\\home$\\user).
+    Maps UNC paths under mounted network drives or HOMESHARE back to their drive letter.
+    """
+    raw = os.path.abspath(str(project_root))
+    if os.name == "nt" and raw.startswith("\\\\"):
+        raw_lower = raw.rstrip("\\/").lower()
+        # Check explicit HOMESHARE env override first (also supports unit test mocking), then cached drive mounts
+        unc_map = dict(_get_unc_to_drive_map())
+        homeshare = os.environ.get("HOMESHARE", "").strip().rstrip("\\/")
+        homedrive = os.environ.get("HOMEDRIVE", "").strip().rstrip("\\/")
+        if homeshare and homedrive and len(homedrive) == 2 and homedrive[1] == ":":
+            unc_map[homeshare.lower()] = homedrive.upper() + "\\"
+        for share_lower, drive_root in sorted(unc_map.items(), key=lambda x: len(x[0]), reverse=True):
+            if raw_lower == share_lower or raw_lower.startswith(share_lower + "\\"):
+                rel = raw.rstrip("\\/")[len(share_lower):].lstrip("\\/")
+                mapped_candidate = Path(drive_root + rel) if rel else Path(drive_root)
+                try:
+                    if mapped_candidate.exists():
+                        return mapped_candidate
+                except Exception:
+                    pass
+    return Path(raw)
 
 
 def _is_temp_workspace(project_root: Path) -> bool:
@@ -40,8 +108,9 @@ def _is_temp_workspace(project_root: Path) -> bool:
 def _is_excluded_workspace_path(project_root: Path, allow_temp_subdirs: bool = False) -> bool:
     """
     Returns True if project_root is inside OS temp (unless allow_temp_subdirs=True),
-    user home root, protected ~/.gemini subdirectories, or OS/application installation
-    directories (such as %LOCALAPPDATA%/Programs/antigravity).
+    bare drive roots (C:\\, D:\\, Q:\\), local user home root (%USERPROFILE%), Enterprise AD
+    network home root (%HOMESHARE% or mapped network drive root), protected ~/.gemini
+    subdirectories, or OS/application installation directories.
     """
     if not project_root:
         return True
@@ -49,13 +118,27 @@ def _is_excluded_workspace_path(project_root: Path, allow_temp_subdirs: bool = F
         return True
     try:
         abs_root = Path(os.path.abspath(str(project_root)))
-        home_abs = Path(os.path.abspath(str(Path.home())))
+        user_home_abs = Path(os.path.abspath(str(resolve_user_home())))
+        path_home_abs = Path(os.path.abspath(str(Path.home())))
         gemini_abs = Path(os.path.abspath(str(GEMINI_DIR)))
         ag_data_abs = gemini_abs / "antigravity"
         scratch_abs = ag_data_abs / "scratch"
         temp_abs = Path(os.path.abspath(str(tempfile.gettempdir())))
-        if len(abs_root.parts) <= 1 or abs_root in (home_abs, gemini_abs, ag_data_abs, scratch_abs, temp_abs):
+        if len(abs_root.parts) <= 1 or abs_root in (user_home_abs, path_home_abs, gemini_abs, ag_data_abs, scratch_abs, temp_abs):
             return True
+        if os.name == "nt":
+            abs_clean = str(abs_root).rstrip("\\/").lower()
+            homeshare = os.environ.get("HOMESHARE", "").strip().rstrip("\\/")
+            if homeshare and abs_clean == homeshare.lower():
+                return True
+            if abs_clean in _get_unc_to_drive_map():
+                return True
+            homedrive = os.environ.get("HOMEDRIVE", "").strip()
+            homepath = os.environ.get("HOMEPATH", "").strip()
+            if homedrive and homepath:
+                hd_root = os.path.abspath(homedrive + homepath).rstrip("\\/").lower()
+                if abs_clean == hd_root:
+                    return True
         for sub in ("config", "database", "plugins_archive", "share", "credentials"):
             try:
                 abs_root.relative_to(gemini_abs / sub)
@@ -87,7 +170,7 @@ def _is_excluded_workspace_path(project_root: Path, allow_temp_subdirs: bool = F
                 exe_path = Path(os.path.abspath(agent_exe))
                 if len(exe_path.parents) >= 3:
                     app_install_root = exe_path.parents[2]
-                    if app_install_root != home_abs and len(app_install_root.parts) >= 2:
+                    if app_install_root not in (user_home_abs, path_home_abs) and len(app_install_root.parts) >= 2:
                         abs_root.relative_to(app_install_root)
                         return True
             except ValueError:
@@ -128,7 +211,7 @@ def register_git_credential_helper(gitea_url: Optional[str] = None) -> None:
     """
     Registers 'skillsdb gitea-credential-helper' in global Git config for the local Gitea
     endpoint so manual 'git push' / 'git pull' commands in terminals work seamlessly
-    without storing tokens in .git/config.
+    without storing tokens in .git/config across both Home and Enterprise AD workstations.
     """
     if not shutil.which("git"):
         return
@@ -248,7 +331,7 @@ def learn_workspace(project_root: Path, db_path: Path = DB_PATH, touch_timestamp
     if not project_root or _is_excluded_workspace_path(project_root):
         return None
     try:
-        abs_root = Path(os.path.abspath(str(project_root)))
+        abs_root = _normalize_workspace_path(project_root)
         if not abs_root.exists() or not abs_root.is_dir():
             return None
         if not ((abs_root / ".agents").exists() or (abs_root / ".git" / "HEAD").exists()):
@@ -286,7 +369,7 @@ def learn_workspace(project_root: Path, db_path: Path = DB_PATH, touch_timestamp
                         except ValueError:
                             skip_insert = True
                             break
-                    if ex_key == ws_key and ex_val == str(abs_root) and ex_ts:
+                    if ex_key == ws_key and ex_ts:
                         preserved_ts = ex_ts
                     if ex_key != ws_key:
                         execute_with_retry(cur, "DELETE FROM runtime_config WHERE key = ?;", (ex_key,))
@@ -311,9 +394,11 @@ def get_learned_workspaces(db_path: Path = DB_PATH, prune_missing: bool = True) 
     1. Protected non-workspace paths (e.g. ~/.gemini/config/plugins/*, ~, temp dirs) left over from older versions
     2. Case-insensitive duplicate workspace keys (keeping the most recently updated or primary workspace path)
     3. Deleted project folders when the parent drive/directory is reachable
+    Also normalizes Enterprise AD UNC paths back to their mounted drive letter.
     """
     learned: Dict[str, str] = {}
     stale_keys: List[str] = []
+    normalized_updates: List[Tuple[str, str]] = []
     valid_paths_to_scrub: List[Path] = []
     if not db_path or not Path(db_path).exists():
         return learned
@@ -334,7 +419,10 @@ def get_learned_workspaces(db_path: Path = DB_PATH, prune_missing: bool = True) 
                     if not name or not v:
                         stale_keys.append(k)
                         continue
-                    p = Path(v)
+                    p = _normalize_workspace_path(Path(v))
+                    if str(p) != v:
+                        v = str(p)
+                        normalized_updates.append((v, k))
                     if _is_excluded_workspace_path(p):
                         stale_keys.append(k)
                         for stray in (".agents", ".git"):
@@ -374,8 +462,11 @@ def get_learned_workspaces(db_path: Path = DB_PATH, prune_missing: bool = True) 
                                 stale_keys.append(k)
                         except Exception:
                             pass
+                if normalized_updates:
+                    cur.executemany("UPDATE runtime_config SET value = ? WHERE key = ?;", normalized_updates)
                 if stale_keys:
                     cur.executemany("DELETE FROM runtime_config WHERE key = ?;", [(sk,) for sk in set(stale_keys)])
+                if normalized_updates or stale_keys:
                     conn.commit()
         for p in valid_paths_to_scrub:
             _scrub_workspace_git_config_credentials(p, db_path=db_path)
@@ -516,7 +607,7 @@ def discover_all_workspaces(base_dir: Optional[Path] = None, db_path: Path = DB_
         try:
             if not p.exists() or not p.is_dir():
                 return
-            abs_p = Path(os.path.abspath(str(p)))
+            abs_p = _normalize_workspace_path(p)
             if _is_excluded_workspace_path(abs_p):
                 return
             norm_key = str(abs_p).lower()
