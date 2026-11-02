@@ -5,6 +5,14 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.12] - 2026-11-02
+
+### Fixed
+- **Subagent Firewall Exemption for Targeted Single-Host & Remote WMI/CIM Diagnostic Commands (`skillsdb/core/guardrails.py`, `plugin/rules/AGENTS.md`, `v3.8.12`)**:
+  - Exempted targeted remote and local system administration, WMI/CIM, PowerShell remoting, DPAPI credentialed, SMB/UNC share, and Windows service/registry/EventLog/MECM commands (`Invoke-Command`, `Get-CimInstance`, `Set-CimInstance`, `Remove-CimInstance`, `Invoke-CimMethod`, `Get-WmiObject`, `Enter-PSSession`, `-ComputerName`, `-CimSession`, `Import-Clixml`, `PSCredential`, `New-PSDrive`, UNC `\\host\c$`, `sc.exe`, `reg.exe`, `Get-Service`, `Get-WinEvent`, `root\ccm`) from `_is_exploratory_search_cmd()`. Because `research` subagents execute in a read-only local sandbox without `run_command` or network/DPAPI access, single-host WMI and remote PowerShell diagnostics (even when piping to `Get-ChildItem` or `Select-String`) now run directly in the main context without triggering a false-positive `[RULE 5 SUBAGENT FIREWALL]` denial on the 5th command.
+  - Hardened the `search_streak` counter in `handle_pre_tool_guardrail_hook()` so it resets when a non-exploratory `run_command` turn or a `<CONTEXT_SUMMARY>` compaction boundary occurs, ensuring only truly consecutive local codebase search turns count toward the 4-turn threshold.
+  - Replaced remaining `Path.home()` transcript/brain directory lookups in `skillsdb/core/guardrails.py` and `skillsdb/memory/project_memory.py` with `resolve_user_home()`.
+
 ## [1.5.11] - 2026-11-02
 
 ### Added

@@ -881,7 +881,7 @@ def mem_search(conn: sqlite3.Connection, query: str):
 
 def mem_prune(conn: sqlite3.Connection, max_snapshots: int = 10, max_age_days: int = 30):
     """Reconciles deleted conversation IDs, prunes expired snapshots, and vacuums database."""
-    brain_dir = Path.home() / ".gemini" / "antigravity" / "brain"
+    brain_dir = resolve_user_home() / ".gemini" / "antigravity" / "brain"
     existing_cids = set()
     if brain_dir.exists():
         existing_cids = {f.name for f in brain_dir.iterdir() if f.is_dir()}
@@ -973,7 +973,7 @@ def analyze_conversation_epochs_and_scope(
     if not cid:
         return result
 
-    b_dir = Path(brain_dir) if brain_dir else (Path.home() / ".gemini" / "antigravity" / "brain")
+    b_dir = Path(brain_dir) if brain_dir else (resolve_user_home() / ".gemini" / "antigravity" / "brain")
     t_file = b_dir / str(cid) / ".system_generated" / "logs" / "transcript.jsonl"
     if not t_file.exists():
         return result
@@ -1559,7 +1559,7 @@ def handle_pre_invocation_hook():
         "   - Tooling Anomaly Note (No Recurring Silent Workarounds): If an internal AntiGraviton/SkillsDB command, hook, or Gitea/GitHub sync exhibits a bug that forces a manual workaround in the background, finish the task first and add a brief note at the end of your response suggesting a root-cause fix in AntiGraviton.",
         "4. TURN-ECONOMY, PARALLEL BATCHING & DIAGNOSTIC PROTOCOL (MANDATORY):",
         "   - Anti-Salami-Slicing (Read Budget): Read files <= 800 lines completely in 1 call. For files > 800 lines, locate exact line numbers via grep/script first and batch all read_file calls in parallel within a single turn. Never slice a file across sequential 80-120 line turns.",
-        "   - Subagent Firewall (invoke_subagent): Solve known 1-3 file fixes directly in the main context. Delegate open-ended root-cause hunting (>= 4 search steps) or scanning > 5 files/logs to a 'research' subagent (returning exact file paths, line numbers, and root cause) so search noise never bloats the main context.",
+        "   - Subagent Firewall (invoke_subagent): Solve known 1-3 file fixes and targeted single-host / remote WMI / CIM / system admin diagnostics directly in the main context. Delegate open-ended local codebase root-cause hunting (>= 4 search steps) or scanning > 5 local files to a 'research' subagent (returning exact file paths, line numbers, and root cause) so search noise never bloats the main context.",
         "   - Cluster-Fix & Chained Pipelines: When a bug pattern is found, check the entire project for all occurrences of that bug class before rebuilding, and chain build/test/verify into one command ('build && test && verify').",
         "   - Zero-Polling & Local Indexing: Use WaitMsBeforeAsync=5000-10000 for fast commands; when a task backgrounds, NEVER poll 'manage_task status' (wait for automatic Reactive Wakeup). For codebases > 300 files requiring >= 3 analysis rounds, build a local SQLite index in scratch/ instead of repeated brute-force file scans.\n"
     ]
@@ -1739,7 +1739,7 @@ def calculate_transcript_savings(
     Scans Antigravity transcript files to compute both date-scoped (default: today UTC)
     and cumulative all-time prompt tokens avoided using dynamic database baselines.
     """
-    b_dir = Path(brain_dir) if brain_dir else (Path.home() / ".gemini" / "antigravity" / "brain")
+    b_dir = Path(brain_dir) if brain_dir else (resolve_user_home() / ".gemini" / "antigravity" / "brain")
     if not b_dir.exists():
         return None
 

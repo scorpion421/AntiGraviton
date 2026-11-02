@@ -14,6 +14,7 @@ import subprocess
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Tuple, Optional
+from skillsdb.config import resolve_user_home
 
 # Invariant characters
 EM_DASH = "\u2014"
@@ -453,13 +454,98 @@ def verify_task(
     }
 
 
+_HOST_ADMIN_EXEMPT_KEYWORDS = (
+    "invoke-command",
+    "icm ",
+    "get-ciminstance",
+    "gcim ",
+    "set-ciminstance",
+    "remove-ciminstance",
+    "invoke-cimmethod",
+    "new-cimsession",
+    "remove-cimsession",
+    "get-wmiobject",
+    "gwmi ",
+    "invoke-wmimethod",
+    "remove-wmiobject",
+    "set-wmiinstance",
+    "enter-pssession",
+    "new-pssession",
+    "remove-pssession",
+    "-computername",
+    "-cimsession",
+    "import-clixml",
+    "pscredential",
+    "convertto-securestring",
+    "new-psdrive",
+    ".credential.xml",
+    "\\\\",
+    "\\c$",
+    "\\admin$",
+    "\\ipc$",
+    "get-service",
+    "set-service",
+    "restart-service",
+    "stop-service",
+    "start-service",
+    "get-process",
+    "stop-process",
+    "get-winevent",
+    "get-eventlog",
+    "get-itemproperty",
+    "set-itemproperty",
+    "new-itemproperty",
+    "remove-itemproperty",
+    "test-connection",
+    "test-netconnection",
+    "resolve-dnsname",
+    "sc.exe",
+    "reg.exe",
+    "gpupdate",
+    "psexec",
+    "schtasks",
+    "wevtutil",
+    "dism",
+    "sfc ",
+    "msiexec",
+    "wusa",
+    "pnputil",
+    "root\\ccm",
+    "root/ccm",
+    "sms_",
+    "cmpivot",
+    "transcript.jsonl",
+    "transcript_full.jsonl",
+)
+
+
 def _is_exploratory_search_cmd(cmd: str) -> bool:
-    """Returns True if cmd is an ad-hoc shell/python search one-liner rather than a build, test, git, or skillsdb command."""
+    """
+    Returns True if cmd is an ad-hoc local codebase shell/python search one-liner rather than
+    a build, test, git, skillsdb, or targeted single-host / remote WMI / CIM / system admin command.
+    """
     if not cmd or not isinstance(cmd, str):
         return False
     low = cmd.lower()
-    for allow_kw in ("skillsdb", "db_manager.py", "unittest", "pytest", "git ", "build.py", "deploy.py", "gitea", "gradle", "flutter ", "npm ", "cargo "):
+    for allow_kw in (
+        "skillsdb",
+        "db_manager.py",
+        "unittest",
+        "pytest",
+        "git ",
+        "build.py",
+        "deploy.py",
+        "install_antigraviton",
+        "gitea",
+        "gradle",
+        "flutter ",
+        "npm ",
+        "cargo ",
+    ):
         if allow_kw in low:
+            return False
+    for admin_kw in _HOST_ADMIN_EXEMPT_KEYWORDS:
+        if admin_kw in low:
             return False
     if any(k in low for k in ("select-string", "get-childitem", "grep ", "rg ", "findstr ")):
         return True
@@ -485,7 +571,7 @@ def _was_file_region_read_in_current_epoch(
         t_path_str = payload.get("transcriptPath") or ""
         cid = str(payload.get("conversationId") or "").strip()
         t_path = Path(t_path_str) if t_path_str else (
-            Path.home() / ".gemini" / "antigravity" / "brain" / cid / ".system_generated" / "logs" / "transcript.jsonl"
+            resolve_user_home() / ".gemini" / "antigravity" / "brain" / cid / ".system_generated" / "logs" / "transcript.jsonl"
             if cid else None
         )
         if not t_path or not t_path.exists():
@@ -638,7 +724,7 @@ def handle_pre_tool_guardrail_hook():
                     t_path_str = payload.get("transcriptPath") or ""
                     cid = str(payload.get("conversationId") or "").strip()
                     t_path = Path(t_path_str) if t_path_str else (
-                        Path.home() / ".gemini" / "antigravity" / "brain" / cid / ".system_generated" / "logs" / "transcript.jsonl"
+                        resolve_user_home() / ".gemini" / "antigravity" / "brain" / cid / ".system_generated" / "logs" / "transcript.jsonl"
                         if cid else None
                     )
                     if t_path and t_path.exists():
@@ -650,20 +736,33 @@ def handle_pre_tool_guardrail_hook():
                                     tail_lines.pop(0)
                         search_streak = 0
                         for rline in reversed(tail_lines):
-                            if '"USER_INPUT"' in rline or '"USER_EXPLICIT"' in rline or '"invoke_subagent"' in rline:
+                            if (
+                                '"USER_INPUT"' in rline
+                                or '"USER_EXPLICIT"' in rline
+                                or '"invoke_subagent"' in rline
+                                or "<CONTEXT_SUMMARY>" in rline
+                            ):
                                 break
                             if '"PLANNER_RESPONSE"' in rline and '"run_command"' in rline:
                                 try:
                                     robj = json.loads(rline)
+                                    turn_had_run_cmd = False
+                                    turn_had_exploratory = False
                                     for tc in (robj.get("tool_calls") or []):
                                         fn = tc.get("name") or (tc.get("function") or {}).get("name") or ""
                                         if fn == "run_command":
+                                            turn_had_run_cmd = True
                                             targs = tc.get("args") or tc.get("arguments") or (tc.get("function") or {}).get("arguments") or {}
                                             if isinstance(targs, str):
                                                 targs = json.loads(targs)
                                             prev_cmd = (targs.get("CommandLine") or "") if isinstance(targs, dict) else ""
                                             if _is_exploratory_search_cmd(prev_cmd):
-                                                search_streak += 1
+                                                turn_had_exploratory = True
+                                    if turn_had_run_cmd:
+                                        if turn_had_exploratory:
+                                            search_streak += 1
+                                        else:
+                                            break
                                 except Exception:
                                     pass
                         if search_streak >= 4:

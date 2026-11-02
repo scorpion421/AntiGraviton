@@ -995,5 +995,72 @@ class TestGiteaSync(unittest.TestCase):
                 self.assertEqual(ia.detect_windows_gitea_service_path(), r"C:\Gitea")
 
 
+    def test_v1_5_12_subagent_firewall_remote_wmi_host_exemption(self):
+        """Verifies v1.5.12 exemption of targeted single-host / remote WMI / CIM / DPAPI / UNC commands from Subagent Firewall and consecutive streak reset."""
+        import io
+        import json
+        from unittest.mock import patch
+        from skillsdb.core.guardrails import _is_exploratory_search_cmd, handle_pre_tool_guardrail_hook
+
+        # 1. Remote WMI/CIM, Invoke-Command, DPAPI Import-Clixml, and UNC share commands must NOT be classified as local exploratory searches
+        remote_cmds = [
+            "$cred = Import-Clixml \"$env:USERPROFILE\\.gemini\\config\\credentials\\moerthj.adm.credential.xml\"; Get-CimInstance -ComputerName ITX001396 -ClassName CCM_SoftUpdate | Select-String 'State'",
+            "Invoke-Command -ComputerName ITX001396 -Credential $cred -ScriptBlock { Get-ChildItem C:\\Windows\\CCM\\Logs\\*.log | Select-String 'Error' }",
+            "New-PSDrive -Name ITXC -PSProvider FileSystem -Root '\\\\192.168.236.100\\c$' -Credential $lapsCred; Get-ChildItem ITXC:\\Windows\\Logs",
+            "Get-WmiObject -Namespace 'root\\ccm\\ClientSDK' -Class CCM_SoftwareUpdate -ComputerName ITX001396",
+            "Remove-CimInstance -CimSession $sess -Query 'SELECT * FROM CCM_UpdateStatus'",
+        ]
+        for rcmd in remote_cmds:
+            self.assertFalse(_is_exploratory_search_cmd(rcmd), f"Remote host command should be exempt: {rcmd}")
+
+        # 2. 5+ consecutive remote WMI/host diagnostic commands on ITX001396 must be ALLOWED by handle_pre_tool_guardrail_hook
+        t_file = self.test_dir / "wmi_host_transcript.jsonl"
+        wmi_steps = [
+            json.dumps({
+                "step_index": 10 + idx,
+                "type": "PLANNER_RESPONSE",
+                "tool_calls": [{"name": "run_command", "args": {"CommandLine": rcmd}}],
+            })
+            for idx, rcmd in enumerate(remote_cmds[:4])
+        ]
+        t_file.write_text("\n".join(wmi_steps) + "\n", encoding="utf-8")
+        p_wmi = json.dumps({
+            "transcriptPath": str(t_file),
+            "toolCall": {
+                "name": "run_command",
+                "args": {"CommandLine": remote_cmds[4], "WaitMsBeforeAsync": 10000},
+            },
+        })
+        out_wmi = io.StringIO()
+        with patch("sys.stdin", io.StringIO(p_wmi)), patch("sys.stdout", out_wmi):
+            handle_pre_tool_guardrail_hook()
+        res_wmi = json.loads(out_wmi.getvalue())
+        self.assertEqual(res_wmi["decision"], "allow")
+
+        # 3. A non-exploratory run_command turn between local searches resets the consecutive search_streak
+        local_search = "Get-ChildItem -Recurse src | Select-String 'TODO'"
+        self.assertTrue(_is_exploratory_search_cmd(local_search))
+        mixed_steps = [
+            json.dumps({"step_index": 1, "type": "PLANNER_RESPONSE", "tool_calls": [{"name": "run_command", "args": {"CommandLine": local_search}}]}),
+            json.dumps({"step_index": 2, "type": "PLANNER_RESPONSE", "tool_calls": [{"name": "run_command", "args": {"CommandLine": local_search}}]}),
+            json.dumps({"step_index": 3, "type": "PLANNER_RESPONSE", "tool_calls": [{"name": "run_command", "args": {"CommandLine": "python build.py"}}]}),
+            json.dumps({"step_index": 4, "type": "PLANNER_RESPONSE", "tool_calls": [{"name": "run_command", "args": {"CommandLine": local_search}}]}),
+            json.dumps({"step_index": 5, "type": "PLANNER_RESPONSE", "tool_calls": [{"name": "run_command", "args": {"CommandLine": local_search}}]}),
+        ]
+        t_file.write_text("\n".join(mixed_steps) + "\n", encoding="utf-8")
+        p_mixed = json.dumps({
+            "transcriptPath": str(t_file),
+            "toolCall": {
+                "name": "run_command",
+                "args": {"CommandLine": local_search, "WaitMsBeforeAsync": 10000},
+            },
+        })
+        out_mix = io.StringIO()
+        with patch("sys.stdin", io.StringIO(p_mixed)), patch("sys.stdout", out_mix):
+            handle_pre_tool_guardrail_hook()
+        res_mix = json.loads(out_mix.getvalue())
+        self.assertEqual(res_mix["decision"], "allow")
+
+
 if __name__ == "__main__":
     unittest.main()
