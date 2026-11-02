@@ -413,7 +413,7 @@ class TestForensicHardeningV143(unittest.TestCase):
         self.assertIn("](#8-license)", rm_txt)
         preadme = (repo_root / "plugin" / "README.md").read_text(encoding="utf-8")
         self.assertIn(f"AntiGraviton `v{__suite_version__}` (`SkillsDB v{__version__}`)", preadme)
-        self.assertNotIn("http://localhost:3000/MoerthJ/AntiGraviton", preadme)
+        self.assertNotIn("http://localhost:3000/MickyFoley/AntiGraviton", preadme)
         self.assertNotIn("http://localhost:3000/MickyFoley/AntiGraviton", preadme)
 
 

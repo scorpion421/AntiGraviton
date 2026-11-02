@@ -51,6 +51,21 @@ SECRET_PATTERNS = [
     ("GitHub Personal Access Token", re.compile(r"\bgh[pousr]-[a-zA-Z0-9]{36,}\b")),
     ("AWS Access Key ID", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
     ("Private Key Header", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----")),
+    (
+        "Hardcoded Personal or Corporate Identifier",
+        re.compile(
+            r"\b(?:"
+            + "moerth" + "j"
+            + r"|"
+            + "atli" + "west"
+            + r"|"
+            + "itx000" + "133"
+            + r"|"
+            + "fileserver" + "02"
+            + r")\b",
+            re.IGNORECASE,
+        ),
+    ),
 ]
 
 SKIP_EXTENSIONS = {
@@ -499,11 +514,12 @@ _HOST_ADMIN_EXEMPT_KEYWORDS = (
     "test-connection",
     "test-netconnection",
     "resolve-dnsname",
-    "sc.exe",
+    "invoke-sqlcmd",
+    "sqlconnection",
+    "sqlcommand",
+    "sqldataadapter",
     "reg.exe",
     "gpupdate",
-    "psexec",
-    "schtasks",
     "wevtutil",
     "dism",
     "sfc ",
@@ -714,6 +730,33 @@ def handle_pre_tool_guardrail_hook():
                     "SkillsDB Zero-Polling Guard (Rule 5): "
                     "Never use run_command (Get-Content/cat) to read or poll '.system_generated/tasks/*.log'! "
                     "Wait for automatic Reactive Wakeup when the background task finishes, or use read_file if the task has already completed."
+                )
+                print(json.dumps({"decision": "deny", "reason": reason}))
+                return
+
+            # Hard SOC/EDR Guardrail: Block Scheduled Tasks, remote service creation, PsExec, or C:\Windows\Temp script execution on remote servers/clients
+            is_remote_ctx = any(
+                rk in cmd_low
+                for rk in ("invoke-command", "icm ", "-computername", "-cimsession", "enter-pssession", "new-pssession", "\\\\")
+            )
+            has_forbidden_lateral_pattern = any(
+                fk in cmd_low
+                for fk in (
+                    "register-scheduledtask",
+                    "start-scheduledtask",
+                    "new-scheduledtaskaction",
+                    "schtasks",
+                    "psexec",
+                    "sc.exe \\\\",
+                    "windows\\temp\\",
+                )
+            )
+            if (is_remote_ctx and has_forbidden_lateral_pattern) or "sc.exe \\\\" in cmd_low or "psexec" in cmd_low:
+                reason = (
+                    "SkillsDB Security Guardrail (no-server-scheduled-tasks-or-temp-scripts): "
+                    "Creating Scheduled Tasks (Register-ScheduledTask / schtasks), remote services (sc.exe \\\\), PsExec, or staging scripts in C:\\Windows\\Temp "
+                    "on MECM or remote hosts is strictly forbidden (triggers SOC/EDR lateral movement alerts). "
+                    "Use exclusively official MECM native channels (SQL read queries on CM_CM2, WMI SMS_Client, CMPivot, or MECM Run Scripts) or ask the user."
                 )
                 print(json.dumps({"decision": "deny", "reason": reason}))
                 return

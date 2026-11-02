@@ -5,6 +5,14 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.14] - 2026-11-02
+
+### Changed
+- **Hierarchical IT Audit Directory Standard & 100% Live Runtime Identity Resolution (`plugin/rules/AGENTS.md`, `database/customizations.db`, `skillsdb/core/guardrails.py`, `v3.8.14`)**:
+  - Updated Rule 4 (`Admin elevation and 100% transparent IT audit standard`) and `customizations.db` from `C:\IT_ADMIN_<USERNAME>\<Date>_<Target>_<Task>\` to the structured hierarchy `C:\IT_ADMIN_LOGS\<USERNAME>\<TASK>\<TARGET>\<Date>\<hh_mm_ss>\` (and task folder `\IT_ADMIN_LOGS\<USERNAME>\`) with persistent `AuditLog_<Target>_<Date>_<hh_mm_ss>.log` files.
+  - Replaced all hardcoded personal usernames, workstation hostnames, and corporate Active Directory domain names across `AGENTS.md`, `customizations.db`, `README.md`, `LICENSE`, and unit tests with 100% live runtime environment queries (`$env:USERNAME`, `[System.Net.Dns]::GetHostEntry($env:COMPUTERNAME).HostName`, `[System.Security.Principal.WindowsIdentity]::GetCurrent().Name`, `$cred.UserName`) and neutral test fixtures.
+  - Added a `Hardcoded Personal or Corporate Identifier` pattern to `SECRET_PATTERNS` in `skillsdb/core/guardrails.py` so `skillsdb guardrail check` and the `PreToolUse` hook automatically block accidental commits of personal or corporate domain identifiers.
+
 ## [1.5.13] - 2026-11-02
 
 ### Added
@@ -179,7 +187,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **GitHub Licensee `AGPL-3.0` Badge Detection (`LICENSE`, `v3.7.11`)**:
-  - Removed the custom preamble above the canonical `GNU AFFERO GENERAL PUBLIC LICENSE` header in `LICENSE` and placed the `Copyright (C) 2026 scorpion421 (MickyFoley / MoerthJ)` attribution inside the standard GNU appendix block so GitHub's Licensee parser automatically displays the `AGPL-3.0` license badge.
+  - Removed the custom preamble above the canonical `GNU AFFERO GENERAL PUBLIC LICENSE` header in `LICENSE` and placed the `Copyright (C) 2026 scorpion421 (MickyFoley)` attribution inside the standard GNU appendix block so GitHub's Licensee parser automatically displays the `AGPL-3.0` license badge.
 
 ## [1.4.10] - 2026-10-29
 
@@ -193,7 +201,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Single-Source-of-Truth Version Synchronization in `build.py` (`build.py`, `skillsdb/config.py`, `v3.7.9`)**:
   - Added `sync_project_versions()` to `build.py` so updating `__version__` and `__suite_version__` in `skillsdb/config.py` and running `python build.py` automatically synchronizes `VERSION`, `plugin/plugin.json`, `plugin/README.md`, `README.md`, `install-antigraviton.ps1`, `install_antigraviton.py`, `.agents/skills/install-antigraviton/SKILL.md`, `database/db_manager.py`, and `runtime_config.schema_version` in `database/customizations.db`.
 - **Site-Neutral Tracked `plugin/README.md` with Dynamic Deployment Enrichment (`plugin/README.md`, `deploy.py`)**:
-  - Replaced the hardcoded site-specific Gitea username in `plugin/README.md` with a neutral `http://localhost:3000` service reference in Git while teaching `deploy.py` to dynamically inject the active machine's `gitea_user` (`MickyFoley` or `MoerthJ`) from `runtime_config` into `~/.gemini/config/plugins/customizations-db/README.md`.
+  - Replaced the hardcoded site-specific Gitea username in `plugin/README.md` with a neutral `http://localhost:3000` service reference in Git while teaching `deploy.py` to dynamically inject the active machine's `gitea_user` (`MickyFoley` or active user) from `runtime_config` into `~/.gemini/config/plugins/customizations-db/README.md`.
 
 ## [1.4.8] - 2026-10-29
 

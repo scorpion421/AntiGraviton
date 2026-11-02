@@ -33,7 +33,7 @@ _UNC_TO_DRIVE_CACHE: Optional[Dict[str, str]] = None
 def _get_unc_to_drive_map() -> Dict[str, str]:
     """
     Builds and caches a mapping of UNC share roots (lowercase, without trailing slash)
-    to their mounted Windows drive roots (e.g. '\\\\fileserver02...\\home$\\user' -> 'Q:\\')
+    to their mounted Windows drive roots (e.g. '\\\\fileserver...\\home$\\user' -> 'Q:\\')
     using both HOMESHARE/HOMEDRIVE environment variables and active DRIVE_REMOTE mounts.
     """
     global _UNC_TO_DRIVE_CACHE

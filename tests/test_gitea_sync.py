@@ -965,16 +965,16 @@ class TestGiteaSync(unittest.TestCase):
         import install_antigraviton as ia
         import deploy as dep
 
-        # 1. Enterprise AD scenario: HOME=Q:\ but USERPROFILE=C:\Users\moerthj
-        with patch.dict(os.environ, {"USERPROFILE": r"C:\Users\moerthj", "HOME": "Q:\\", "HOMEDRIVE": "Q:", "HOMEPATH": "\\", "HOMESHARE": r"\\fileserver02.atliwest.local\home$\moerthj"}):
+        # 1. Enterprise AD scenario: HOME=Q:\ but USERPROFILE=C:\Users\corpuser
+        with patch.dict(os.environ, {"USERPROFILE": r"C:\Users\corpuser", "HOME": "Q:\\", "HOMEDRIVE": "Q:", "HOMEPATH": "\\", "HOMESHARE": r"\\fileserver01.corp.example.com\home$\corpuser"}):
             if os.name == "nt":
-                self.assertEqual(str(resolve_user_home()), r"C:\Users\moerthj")
-                self.assertEqual(str(dep.resolve_user_home()), r"C:\Users\moerthj")
-                self.assertEqual(str(ia.resolve_user_home()), r"C:\Users\moerthj")
-                self.assertTrue(_is_excluded_workspace_path(Path(r"\\fileserver02.atliwest.local\home$\moerthj")))
+                self.assertEqual(str(resolve_user_home()), r"C:\Users\corpuser")
+                self.assertEqual(str(dep.resolve_user_home()), r"C:\Users\corpuser")
+                self.assertEqual(str(ia.resolve_user_home()), r"C:\Users\corpuser")
+                self.assertTrue(_is_excluded_workspace_path(Path(r"\\fileserver01.corp.example.com\home$\corpuser")))
                 self.assertTrue(_is_excluded_workspace_path(Path("Q:\\")))
                 with patch.object(Path, "exists", return_value=True):
-                    norm_p = _normalize_workspace_path(Path(r"\\fileserver02.atliwest.local\home$\moerthj\Antigravity\AntiGraviton"))
+                    norm_p = _normalize_workspace_path(Path(r"\\fileserver01.corp.example.com\home$\corpuser\Antigravity\AntiGraviton"))
                     self.assertEqual(str(norm_p).lower(), r"q:\antigravity\antigraviton")
 
         # 2. Home scenario: USERPROFILE=C:\Users\MickyFoley, secondary drive D:\Gitea
@@ -1004,7 +1004,7 @@ class TestGiteaSync(unittest.TestCase):
 
         # 1. Remote WMI/CIM, Invoke-Command, DPAPI Import-Clixml, and UNC share commands must NOT be classified as local exploratory searches
         remote_cmds = [
-            "$cred = Import-Clixml \"$env:USERPROFILE\\.gemini\\config\\credentials\\moerthj.adm.credential.xml\"; Get-CimInstance -ComputerName ITX001396 -ClassName CCM_SoftUpdate | Select-String 'State'",
+            "$cred = Import-Clixml \"$env:USERPROFILE\\.gemini\\config\\credentials\\corpuser.adm.credential.xml\"; Get-CimInstance -ComputerName ITX001396 -ClassName CCM_SoftUpdate | Select-String 'State'",
             "Invoke-Command -ComputerName ITX001396 -Credential $cred -ScriptBlock { Get-ChildItem C:\\Windows\\CCM\\Logs\\*.log | Select-String 'Error' }",
             "New-PSDrive -Name ITXC -PSProvider FileSystem -Root '\\\\192.168.236.100\\c$' -Credential $lapsCred; Get-ChildItem ITXC:\\Windows\\Logs",
             "Get-WmiObject -Namespace 'root\\ccm\\ClientSDK' -Class CCM_SoftwareUpdate -ComputerName ITX001396",
@@ -1125,7 +1125,7 @@ class TestGiteaSync(unittest.TestCase):
 
         with patch("skillsdb.memory.gitea_releases._is_temp_workspace", return_value=False), patch(
             "skillsdb.memory.gitea_releases.get_gitea_config",
-            return_value={"url": "http://localhost:3000", "user": "MoerthJ", "token": "tok123", "enabled": "true"},
+            return_value={"url": "http://localhost:3000", "user": "CorpUser", "token": "tok123", "enabled": "true"},
         ), patch("skillsdb.memory.gitea_releases._resolve_github_repo_slug", return_value="scorpion421/fast_rel_repo"), patch(
             "urllib.request.urlopen", side_effect=fake_urlopen
         ), patch("subprocess.run", side_effect=fake_sub_run):
@@ -1140,6 +1140,20 @@ class TestGiteaSync(unittest.TestCase):
         gh_release_cmds = [c for c in gh_sub_calls if len(c) >= 3 and c[0] == "gh" and c[1] == "release"]
         self.assertEqual(len(gh_release_cmds), 1)
         self.assertEqual(gh_release_cmds[0][:4], ["gh", "release", "create", "v1.0.2"])
+
+
+    def test_v1_5_14_hierarchical_it_admin_logs_and_personal_identifier_guardrail(self):
+        """Verifies v1.5.14 C:\\IT_ADMIN_LOGS\\<USERNAME>\\<TASK>\\<TARGET>\\<Date>\\<hh_mm_ss>\\ standard and personal identifier leak guardrail."""
+        from skillsdb.core.guardrails import check_text
+
+        agents_md = (Path(__file__).resolve().parent.parent / "plugin" / "rules" / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("C:\\IT_ADMIN_LOGS\\<USERNAME>\\<TASK>\\<TARGET>\\<Date>\\<hh_mm_ss>\\", agents_md)
+        self.assertIn("\\IT_ADMIN_LOGS\\<USERNAME>\\", agents_md)
+        self.assertEqual(check_text(agents_md, filename="AGENTS.md"), [])
+
+        leaked_snippet = "Origin: " + "ITX000" + "133." + "atli" + "west.local"
+        violations = check_text(leaked_snippet, filename="script.ps1")
+        self.assertTrue(any(v["rule"] == "secret-leak-detection" for v in violations))
 
 
 if __name__ == "__main__":
