@@ -1531,11 +1531,12 @@ def compute_routing_decision(
     else:
         subagent_research_model = budget["default_research_subagent_model"]
 
-    # Cross-pool subagent protection: when main chat runs on Claude 5.5 (Pool 1C),
-    # shift general subagents to 'pro' or 'flash' (Pool 1A/1B) so Claude quota is 100% preserved!
+    # Cross-pool subagent protection & Strict Coding Quality Guarantee:
+    # Coding/implementation subagents (TypeName='self') NEVER downgrade to Flash on Ultra/Pro!
+    # They stay 100% on Gemini 4 Argon ('inherit' when main is Argon, or 'pro' when main is Claude 5.5).
     if active_pool == POOL_AGY_CLAUDE:
-        subagent_general_model = "flash" if (account_tier == "lite" or effective_mode == "shield") else "pro"
-    elif active_pool == POOL_AGY_GEMINI_HIGH and effective_mode == "shield":
+        subagent_general_model = "flash" if account_tier == "lite" else "pro"
+    elif account_tier == "lite":
         subagent_general_model = "flash"
     else:
         subagent_general_model = "inherit"
