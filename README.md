@@ -1,7 +1,7 @@
-# AntiGraviton complete suite (`v2.0.0-beta.4`)
+# AntiGraviton complete suite (`v2.0.0`)
 
-[![Version](https://img.shields.io/badge/version-2.0.0-beta.4-blue.svg)](CHANGELOG.md)
-[![SkillsDB](https://img.shields.io/badge/SkillsDB-v4.0.0-beta.4-007ec6.svg)](skillsdb/)
+[![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](CHANGELOG.md)
+[![SkillsDB](https://img.shields.io/badge/SkillsDB-v4.0.0-007ec6.svg)](skillsdb/)
 [![Gitea Service](https://img.shields.io/badge/Gitea_Service-v1.1.2-green.svg)](gitea-service/)
 [![Tests](https://img.shields.io/badge/tests-94%2F94%20passing-brightgreen.svg)](tests/)
 [![Antigravity](https://img.shields.io/badge/compatible-Google%20Antigravity%202.0-orange.svg)](https://deepmind.google/)
@@ -10,7 +10,7 @@
 [![License](https://img.shields.io/badge/license-AGPLv3_%2B_Commons_Clause-blue.svg)](LICENSE)
 
 **Turnkey agentic development environment for Google Antigravity IDE**  
-*Combining **SkillsDB (`v4.0.0-beta.4`)** + **Antigravity Gitea Windows service (`v1.1.2`)** in a single one-command distribution.*
+*Combining **SkillsDB (`v4.0.0`)** + **Antigravity Gitea Windows service (`v1.1.2`)** in a single one-command distribution.*
 
 ---
 
@@ -33,7 +33,9 @@
 
 It bundles two tightly integrated systems into a single repository and installer:
 
-1. **SkillsDB context and memory engine (`v4.0.0-beta.4`)**:
+1. **SkillsDB context and memory engine (`v4.0.0`)**:
+   - **Multi-pool Golden-Ratio (`61.8%` / `85.0%`) agent control plane**: Governs `Ultra` (16 parallel reader threads) and `Pro` (8 parallel reader threads) coding subscriptions across all 4 quota pools (`Pool 1A: Gemini 4 Argon [Fast|Med|High]`, `Pool 1B: Gemini 3.8 Flash [Fast|Med|High]`, `Pool 1C: Claude Opus/Sonnet 5.5 [Fast|Med|High]`, `Pool 1D: GPT-OSS 120B [Medium]`, `Pool 2: @google/gemini-cli`, `Pool 3: AI Studio REST`, `Pool 4: gemini.google.com`), keeping 100% of code generation on `Gemini 4 Argon` (or `Claude 5.5`) while routing `research` subagents to `Flash` at zero extra turns via `PreToolUse` overwrite.
+   - **Multi-file AST contract mapper (`skillsdb ast-map`) and Context-Shield (`skillsdb gemini-digest`)**: Extracts exact class, method, and function signatures with `[Lstart-Lend]` line boundaries at ~95-98% token compression in ~50-70ms before editing, and offloads large log/diff digests so raw search noise never bloats the main conversation window.
    - **On-demand micro-skill routing**: Replaces static plugin prompt bloat (~35,000 tokens/turn) with a compact (~450 token) routing directive, Antigravity `v2.28.0+` Turn-1 prompt pre-routing, and surgical SQLite FTS5 micro-skill retrieval (`--summary`, `--section`).
    - **Persistent episodic project memory (`.agents/memory.db`)**: Automatically records structural file/offset facts (`mem-save-fact`), multi-step work items (`mem-task-add`), architectural decisions, and milestone snapshots (`mem-save-snapshot`), and re-hydrates them every 50 steps so mid-session IDE `<CONTEXT_SUMMARY>` compactions never cause the model to re-read files repeatedly.
    - **Organic on-demand workspace learning and transcript inference**: Ships with zero hardcoded paths or credentials. Automatically learns project paths as you work (`mem-init`, `mem-save-fact`, `mem-save-snapshot`, `gitea-init`), discovers Antigravity IDE workspaces from `~/.gemini/config/projects/*.json` and `~/.gemini/antigravity/scratch`, and infers the active project root directly from `transcript.jsonl` file paths when no formal IDE folder is open (`workspacePaths: []`).
@@ -46,7 +48,7 @@ It bundles two tightly integrated systems into a single repository and installer
 
 ## 2. Measured impact in daily development
 
-| Metric | Standard Antigravity setup | AntiGraviton suite (`v2.0.0-beta.4`) | Real-world improvement |
+| Metric | Standard Antigravity setup | AntiGraviton suite (`v2.0.0`) | Real-world improvement |
 | :--- | :--- | :--- | :--- |
 | **System and plugin context load** | ~35,000 tokens / turn | **~1,500 tokens / turn** | **~95% lower base overhead** |
 | **Token consumption (60-turn session, benchmarked on Gemini 4 Argon High)** | ~3.39M input tokens | **~0.83M input tokens** | **~75.5% total token savings (4x session capacity)** |
@@ -139,7 +141,7 @@ powershell -ExecutionPolicy Bypass -File .\install-antigraviton.ps1
 ```text
 AntiGraviton/
 |-- LICENSE                        # GNU AGPL v3.0 + Commons Clause v1.0 (no commercial resale)
-|-- VERSION                        # SemVer 2.0.0 suite release version (2.0.0-beta.4)
+|-- VERSION                        # SemVer 2.0.0 suite release version (2.0.0)
 |-- CHANGELOG.md                   # SemVer release history
 |-- README.md                      # Suite documentation
 |-- install-antigraviton.ps1       # Unified 1-command installer (SkillsDB + Gitea + Auto-Token)
@@ -150,7 +152,7 @@ AntiGraviton/
 |   `-- skills/
 |       `-- install-antigraviton/
 |           `-- SKILL.md           # Antigravity IDE 1-prompt onboarding skill
-|-- skillsdb/                      # Modular Python package source (v4.0.0-beta.4)
+|-- skillsdb/                      # Modular Python package source (v4.0.0)
 |   |-- config.py
 |   |-- schema.py
 |   |-- guardrails.py
@@ -178,8 +180,17 @@ AntiGraviton/
 Once installed, `skillsdb` is globally available in your PATH and inside every Antigravity terminal:
 
 ```powershell
-# View database telemetry and active token-saving architecture
+# View database telemetry, 4-pool quota router status, and active runtime profile
 skillsdb stats
+skillsdb quota-status
+skillsdb profile
+
+# Extract multi-file AST contract map (Lstart-Lend) or FIM slice before coding
+skillsdb ast-map "skillsdb/core/quota_router.py" "skillsdb/core/detector.py" --filter "detect"
+skillsdb fim slice "skillsdb/core/guardrails.py" --symbol "handle_pre_tool_guardrail_hook"
+
+# Offload large log, file, or git diff analysis (Context Shield)
+skillsdb gemini-digest --files "logs/*.log" --query "Summarize root cause and line numbers"
 
 # Run full 9-point system diagnostics & restore UTF-8 manifests after IDE updates
 skillsdb doctor

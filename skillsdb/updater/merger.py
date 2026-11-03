@@ -42,12 +42,12 @@ def find_repo_root() -> Path:
 
 
 def _extract_skillsdb_version_from_release(tag: str, name: str, body: str) -> str:
-    """Extracts the SkillsDB engine version (e.g. 3.7.2) from an AntiGraviton release title or body."""
+    """Extracts the SkillsDB engine version (e.g. 4.0.0) from an AntiGraviton release title or body."""
     combined = f"{name or ''}\n{body or ''}"
-    m = re.search(r"SkillsDB\s+[(`'\"]*v?(\d+\.\d+\.\d+)", combined, re.IGNORECASE)
+    m = re.search(r"SkillsDB\s+[(`'\"]*v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.\-]+)?)", combined, re.IGNORECASE)
     if m:
         return m.group(1)
-    m2 = re.search(r"\bv(3\.\d+\.\d+)\b", combined)
+    m2 = re.search(r"\bv([34]\.\d+\.\d+(?:-[0-9A-Za-z.\-]+)?)\b", combined)
     if m2:
         return m2.group(1)
     return tag

@@ -5,6 +5,30 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-11-03
+
+### Added
+- **Multi-pool Golden-Ratio (`61.8%` / `85.0%`) agent control plane (`skillsdb/core/quota_router.py`, `skillsdb/core/detector.py`, `skillsdb/core/guardrails.py`, `v4.0.0`)**:
+  - Promotes the complete `v2.0.0-beta.1..4` architecture to the first stable Major Release **`AntiGraviton v2.0.0` (`SkillsDB v4.0.0`)**.
+  - Governs `Ultra` (`Google AI Ultra`, 16 parallel reader threads) and `Pro` (`Google AI Pro`, 8 parallel reader threads) coding subscriptions across all 4 quota pools: Pool 1 (internal Antigravity 5-hour rolling window across `Pool 1A: Gemini 4 Argon`, `Pool 1B: Gemini 3.8 Flash`, `Pool 1C: Claude Opus 5.5 / Sonnet 5.5`, and `Pool 1D: GPT-OSS 120B`), Pool 2 (`@google/gemini-cli` OAuth), Pool 3 (`Google AI Studio` REST API), and Pool 4 (`gemini.google.com` Deep Research clipboard handover bridge).
+  - Implements the 13-combination model and reasoning effort catalog (`Fast`, `Medium`, `High` on `Argon`, `Flash 3.8`, `Opus 5.5`, `Sonnet 5.5`, and fixed `Medium` on `GPT-OSS 120B`) with live mid-session `<USER_SETTINGS_CHANGE>` transcript detection.
+- **Multi-file AST contract mapper (`skillsdb ast-map`), Context-Backpack detector, and Context-Shield CLI/MCP suite (`skillsdb/core/fim.py`, `skillsdb/core/quota_router.py`, `skillsdb/platform/mcp_server.py`, `v4.0.0`)**:
+  - Added `skillsdb ast-map`, `skillsdb quota-status` (alias `quota`), `skillsdb gemini-digest`, `skillsdb gemini-handover`, `skillsdb gemini-ingest`, and full 15-tool `stdio` MCP server coverage (`skillsdb_ast_map`, `skillsdb_quota_status`, `skillsdb_gemini_digest`, `skillsdb_gemini_handover`, `skillsdb_gemini_ingest`, `skillsdb_context`, `skillsdb_task_board`).
+  - Added `measure_session_backpack()` to track active uncompacted context weight (`LIGHT`, `MODERATE`, `HEAVY`) and automatically recommend contract-first AST mapping or fresh-context Argon subagent splitting (`TypeName="self", Model="pro"`).
+
+### Changed
+- **Strict Argon/Claude coding guarantee and dynamic concurrency scaling (`skillsdb/core/guardrails.py`, `skillsdb/core/concurrency.py`, `plugin/rules/AGENTS.md`, `v4.0.0`)**:
+  - Enforces 0-turn `PreToolUse` rewriting of exploratory `TypeName="research"` subagents from `Model="inherit"` to `"flash"` (`Pool 1B`), while guaranteeing that `TypeName="self"` coding subagents are never downgraded to `Flash`.
+  - Dynamically scales parallel SQLite WAL reader workers via `resolve_optimal_workers()` (`16` on `Ultra`, `8` on `Pro`, `1` on `Local`/`Offline`).
+
+### Removed
+- **Breaking: Removed legacy `Gemini 3.1 Pro` model definitions and non-coding `Lite` / `Free` subscription tiers (`skillsdb/core/detector.py`, `skillsdb/core/quota_router.py`, `plugin/rules/AGENTS.md`, `v4.0.0`)**:
+  - Focusing AntiGraviton v2.0.0 exclusively on the 5 active Antigravity models and professional `Ultra` / `Pro` coding subscriptions.
+
+### Fixed
+- **Standalone bundler relative-import transformation and end-to-end control plane diagnostics (`build.py`, `skillsdb/updater/merger.py`, `v4.0.0`)**:
+  - Updated `build.py` to convert indented function-level relative imports into `pass` when compiling standalone `database/db_manager.py`, and updated `_extract_skillsdb_version_from_release()` in `merger.py` to recognize `SkillsDB v4.x.y` releases.
+
 ## [2.0.0-beta.4] - 2026-11-03
 
 ### Added
