@@ -1447,10 +1447,27 @@ def handle_pre_invocation_hook():
         except Exception:
             _sync_builtin_fn = None
 
+    model_hint = payload.get("modelName") or payload.get("model")
+    routing_dec = None
+    current_routing_sig = ""
+    try:
+        routing_dec = compute_routing_decision(
+            cid=cid,
+            db_path=central_db_override,
+            model_name_hint=model_hint,
+            brain_dir=brain_dir_override,
+        )
+        current_routing_sig = (
+            f"{routing_dec['account_tier']}:{routing_dec['effective_mode']}:{routing_dec['state']['model_name']}"
+        )
+    except Exception:
+        routing_dec = None
+
     # Deduplicate per (conversationId, workspace, temporal_epoch) so Antigravity's
     # per-tool-step PreInvocation calls within the same session epoch do not bloat
-    # transcript.jsonl, while a new day, >4h temporal epoch, or every 50-step bucket
-    # automatically re-hydrates the Turn-Economy Guardrail AND .agents/memory.db context.
+    # transcript.jsonl, while a new day, >4h temporal epoch, mid-session model/effort switch,
+    # or every 50-step bucket automatically re-hydrates the Turn-Economy Guardrail,
+    # Multi-Pool Quota Router, and .agents/memory.db context.
     workspace_key = explicit_ws_key
     dedup_token = f"{workspace_key}@{epoch_info['epoch_key']}"
     if cid:
@@ -1471,16 +1488,25 @@ def handle_pre_invocation_hook():
                 max_step = epoch_info.get("max_step_index", 0)
                 drift_key = f"{cid}:drift_bucket"
                 anomaly_key = f"{cid}:anomaly_step"
+                routing_sig_key = f"{cid}:routing_sig"
                 last_bucket = state.get(drift_key, 0)
                 last_anomaly = state.get(anomaly_key, -100)
+                prev_routing_sig = state.get(routing_sig_key, "")
                 need_drift_guard = False
+                need_routing_refresh = False
                 if drift_bucket > last_bucket:
                     state[drift_key] = drift_bucket
                     need_drift_guard = True
+                    need_routing_refresh = True
                 elif (read_streak >= 6 or poll_streak >= 2 or bool(rep_file)) and (max_step - last_anomaly >= 25):
                     state[anomaly_key] = max_step
                     need_drift_guard = True
-                if need_drift_guard:
+                    need_routing_refresh = True
+                if current_routing_sig and prev_routing_sig != current_routing_sig:
+                    state[routing_sig_key] = current_routing_sig
+                    if prev_routing_sig:
+                        need_routing_refresh = True
+                if need_drift_guard or need_routing_refresh or (current_routing_sig and not prev_routing_sig):
                     try:
                         _HOOK_STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
                     except Exception:
@@ -1493,6 +1519,8 @@ def handle_pre_invocation_hook():
                         except Exception:
                             pass
                     inject_msgs.append("[SKILLSDB SELF-HEALING: Restored Windows UTF-8 application manifests after mid-session Antigravity IDE update]")
+                if need_routing_refresh and routing_dec:
+                    inject_msgs.append(format_hook_routing_banner(routing_dec).strip())
                 if need_drift_guard:
                     proj_flag = f' --project "{root_path}"' if root_path else ""
                     inject_msgs.append(
@@ -1520,6 +1548,8 @@ def handle_pre_invocation_hook():
                 return
             state[cid] = dedup_token
             state[f"{cid}:drift_bucket"] = epoch_info.get("step_bucket", 0)
+            if current_routing_sig:
+                state[f"{cid}:routing_sig"] = current_routing_sig
             if len(state) > 100:
                 keys = list(state.keys())[-50:]
                 state = {k: state[k] for k in keys}
@@ -1533,7 +1563,6 @@ def handle_pre_invocation_hook():
         except Exception:
             pass
 
-    model_hint = payload.get("modelName") or payload.get("model")
     tier, tdesc = detect_model_tier(cid=cid, model_name_hint=model_hint)
     lines = []
     if utf8_healed:
