@@ -1221,13 +1221,15 @@ def publish_gitea_release(
     except Exception:
         pass
 
+    is_prerelease = bool(prerelease) or ("-" in final_tag.lstrip("vV"))
+    current_branch = _get_current_branch(project_root)
     payload_dict = {
         "tag_name": final_tag,
-        "target_commitish": target_commit or "main",
+        "target_commitish": target_commit or (current_branch if is_prerelease else "main"),
         "name": final_title,
         "body": final_notes,
         "draft": False,
-        "prerelease": bool(prerelease),
+        "prerelease": is_prerelease,
     }
 
     html_url = None
@@ -1273,13 +1275,14 @@ def publish_gitea_release(
             try:
                 gh_slug = _resolve_github_repo_slug(project_root)
                 repo_args = ["--repo", gh_slug] if gh_slug else []
-                subprocess.run(["git", "push", "github", "main"], cwd=str(project_root), capture_output=True, timeout=30)
+                prerelease_args = ["--prerelease"] if is_prerelease else []
+                subprocess.run(["git", "push", "github", current_branch], cwd=str(project_root), capture_output=True, timeout=30)
                 subprocess.run(["git", "push", "github", final_tag], cwd=str(project_root), capture_output=True, timeout=30)
                 chk = subprocess.run(["gh", "release", "view", final_tag] + repo_args, cwd=str(project_root), capture_output=True, text=True, timeout=15)
                 if chk.returncode == 0:
-                    gh_res = subprocess.run(["gh", "release", "edit", final_tag, "--title", final_title, "--notes-file", tmp_path] + repo_args, cwd=str(project_root), capture_output=True, text=True, timeout=20)
+                    gh_res = subprocess.run(["gh", "release", "edit", final_tag, "--title", final_title, "--notes-file", tmp_path] + prerelease_args + repo_args, cwd=str(project_root), capture_output=True, text=True, timeout=20)
                 else:
-                    gh_res = subprocess.run(["gh", "release", "create", final_tag, "--title", final_title, "--notes-file", tmp_path] + repo_args, cwd=str(project_root), capture_output=True, text=True, timeout=20)
+                    gh_res = subprocess.run(["gh", "release", "create", final_tag, "--title", final_title, "--notes-file", tmp_path] + prerelease_args + repo_args, cwd=str(project_root), capture_output=True, text=True, timeout=20)
                 if gh_res.returncode != 0:
                     print(f"  [WARN] Could not publish GitHub release {final_tag}: {(gh_res.stderr or '').strip()}")
             finally:

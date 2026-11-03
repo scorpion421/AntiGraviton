@@ -116,11 +116,13 @@ def sync_project_versions(repo_root: Path, suite_ver: str, eng_ver: str) -> None
             p_data["version"] = eng_ver
             plugin_json_path.write_text(_json.dumps(p_data, indent=2) + "\n", encoding="utf-8")
 
+    semver_pat = r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.\-]+)?"
+
     _replace_regex_in_file(
         repo_root / "plugin" / "README.md",
         [
             (
-                r"AntiGraviton `v[0-9.]+` \(`SkillsDB v[0-9.]+`\)",
+                rf"AntiGraviton `v{semver_pat}` \(`SkillsDB v{semver_pat}`\)",
                 f"AntiGraviton `v{suite_ver}` (`SkillsDB v{eng_ver}`)",
             ),
         ],
@@ -129,44 +131,44 @@ def sync_project_versions(repo_root: Path, suite_ver: str, eng_ver: str) -> None
     _replace_regex_in_file(
         repo_root / "README.md",
         [
-            (r"# AntiGraviton complete suite \(`v[0-9.]+`\)", f"# AntiGraviton complete suite (`v{suite_ver}`)"),
-            (r"badge/version-[0-9.]+-blue\.svg", f"badge/version-{suite_ver}-blue.svg"),
-            (r"badge/SkillsDB-v[0-9.]+-007ec6\.svg", f"badge/SkillsDB-v{eng_ver}-007ec6.svg"),
+            (rf"# AntiGraviton complete suite \(`v{semver_pat}`\)", f"# AntiGraviton complete suite (`v{suite_ver}`)"),
+            (r"badge/version-[0-9A-Za-z.\-]+-blue\.svg", f"badge/version-{suite_ver}-blue.svg"),
+            (r"badge/SkillsDB-v[0-9A-Za-z.\-]+-007ec6\.svg", f"badge/SkillsDB-v{eng_ver}-007ec6.svg"),
             (r"badge/tests-[0-9]+%2F[0-9]+%20passing-brightgreen\.svg", f"badge/tests-{test_count}%2F{test_count}%20passing-brightgreen.svg"),
-            (r"\*\*SkillsDB \(`v[0-9.]+`\)\*\*", f"**SkillsDB (`v{eng_ver}`)**"),
-            (r"\*\*SkillsDB context and memory engine \(`v[0-9.]+`\)\*\*", f"**SkillsDB context and memory engine (`v{eng_ver}`)**"),
-            (r"\| AntiGraviton suite \(`v[0-9.]+`\) \|", f"| AntiGraviton suite (`v{suite_ver}`) |"),
-            (r"# SemVer 2\.0\.0 suite release version \([0-9.]+\)", f"# SemVer 2.0.0 suite release version ({suite_ver})"),
-            (r"# Modular Python package source \(v[0-9.]+\)", f"# Modular Python package source (v{eng_ver})"),
+            (rf"\*\*SkillsDB \(`v{semver_pat}`\)\*\*", f"**SkillsDB (`v{eng_ver}`)**"),
+            (rf"\*\*SkillsDB context and memory engine \(`v{semver_pat}`\)\*\*", f"**SkillsDB context and memory engine (`v{eng_ver}`)**"),
+            (rf"\| AntiGraviton suite \(`v{semver_pat}`\) \|", f"| AntiGraviton suite (`v{suite_ver}`) |"),
+            (rf"# SemVer 2\.0\.0 suite release version \({semver_pat}\)", f"# SemVer 2.0.0 suite release version ({suite_ver})"),
+            (rf"# Modular Python package source \(v{semver_pat}\)", f"# Modular Python package source (v{eng_ver})"),
         ],
     )
 
     _replace_regex_in_file(
         repo_root / "install-antigraviton.ps1",
         [
-            (r"AntiGraviton Complete Suite \(v[0-9.]+\)", f"AntiGraviton Complete Suite (v{suite_ver})"),
-            (r"SkillsDB Context & Memory Engine \(v[0-9.]+\)", f"SkillsDB Context & Memory Engine (v{eng_ver})"),
-            (r'else \{ "[0-9.]+" \}', f'else {{ "{suite_ver}" }}'),
-            (r"Deploying SkillsDB Engine \(v[0-9.]+\)", f"Deploying SkillsDB Engine (v{eng_ver})"),
-            (r"SkillsDB Engine \(v[0-9.]+\):", f"SkillsDB Engine (v{eng_ver}):"),
+            (rf"AntiGraviton Complete Suite \(v{semver_pat}\)", f"AntiGraviton Complete Suite (v{suite_ver})"),
+            (rf"SkillsDB Context & Memory Engine \(v{semver_pat}\)", f"SkillsDB Context & Memory Engine (v{eng_ver})"),
+            (rf'else \{{ "{semver_pat}" \}}', f'else {{ "{suite_ver}" }}'),
+            (rf"Deploying SkillsDB Engine \(v{semver_pat}\)", f"Deploying SkillsDB Engine (v{eng_ver})"),
+            (rf"SkillsDB Engine \(v{semver_pat}\):", f"SkillsDB Engine (v{eng_ver}):"),
         ],
     )
 
     _replace_regex_in_file(
         repo_root / "install_antigraviton.py",
         [
-            (r"AntiGraviton Complete Suite \(v[0-9.]+\)", f"AntiGraviton Complete Suite (v{suite_ver})"),
-            (r"SkillsDB Context & Memory Engine \(v[0-9.]+\)", f"SkillsDB Context & Memory Engine (v{eng_ver})"),
-            (r'else "[0-9.]+"', f'else "{suite_ver}"'),
-            (r"Deploying SkillsDB Engine \(v[0-9.]+\)", f"Deploying SkillsDB Engine (v{eng_ver})"),
+            (rf"AntiGraviton Complete Suite \(v{semver_pat}\)", f"AntiGraviton Complete Suite (v{suite_ver})"),
+            (rf"SkillsDB Context & Memory Engine \(v{semver_pat}\)", f"SkillsDB Context & Memory Engine (v{eng_ver})"),
+            (rf'else "{semver_pat}"', f'else "{suite_ver}"'),
+            (rf"Deploying SkillsDB Engine \(v{semver_pat}\)", f"Deploying SkillsDB Engine (v{eng_ver})"),
         ],
     )
 
     _replace_regex_in_file(
         repo_root / ".agents" / "skills" / "install-antigraviton" / "SKILL.md",
         [
-            (r"\(SkillsDB v[0-9.]+ \+", f"(SkillsDB v{eng_ver} +"),
-            (r"\*\*SkillsDB Context & Memory Engine \(`v[0-9.]+`\)\*\*", f"**SkillsDB Context & Memory Engine (`v{eng_ver}`)**"),
+            (rf"\(SkillsDB v{semver_pat} \+", f"(SkillsDB v{eng_ver} +"),
+            (rf"\*\*SkillsDB Context & Memory Engine \(`v{semver_pat}`\)\*\*", f"**SkillsDB Context & Memory Engine (`v{eng_ver}`)**"),
         ],
     )
 
@@ -211,7 +213,7 @@ def bundle():
     eng_ver = m_ver.group(1) if m_ver else "3.7.9"
     suite_ver = m_sver.group(1) if m_sver else "1.4.9"
 
-    header_str = re.sub(r"Version:\s*[0-9.]+", f"Version: {eng_ver}", HEADER.strip())
+    header_str = re.sub(r"Version:\s*[0-9A-Za-z.\-]+", f"Version: {eng_ver}", HEADER.strip())
     bundled_chunks = [header_str]
 
     sync_project_versions(repo_root, suite_ver, eng_ver)

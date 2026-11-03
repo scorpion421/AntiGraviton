@@ -443,11 +443,12 @@ def sync_changelog_releases(
                 tag = entry["tag"]
                 body = entry["body"]
                 rel_title = f"{repo_name} {tag}"
+                is_prerelease = "-" in entry["version"]
                 if tag in existing_map:
                     existing_body = (existing_map[tag].get("body") or "").strip()
                     is_latest = (tag == latest_tag)
                     body_matches = (existing_body == body.strip()) if is_latest else ("keepachangelog.com" in existing_body)
-                    if not overwrite_existing and body_matches:
+                    if not overwrite_existing and body_matches and bool(existing_map[tag].get("prerelease")) == is_prerelease:
                         if is_latest:
                             _attach_release_binary_assets(base_url, owner, repo_name, existing_map[tag].get("id"), tag, existing_map[tag].get("assets", []), token, project_root)
                         continue
@@ -458,13 +459,28 @@ def sync_changelog_releases(
                     target_url = f"{base_url}/api/v1/repos/{owner}/{repo_name}/releases"
                     method = "POST"
 
+                target_branch = "beta" if is_prerelease else "main"
+                try:
+                    br_res = subprocess.run(
+                        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                        cwd=str(project_root),
+                        capture_output=True,
+                        text=True,
+                        timeout=3,
+                    )
+                    br_name = (br_res.stdout or "").strip()
+                    if is_prerelease and br_res.returncode == 0 and br_name and br_name != "HEAD":
+                        target_branch = br_name
+                except Exception:
+                    pass
+
                 payload = json.dumps({
                     "tag_name": tag,
-                    "target_commitish": "main",
+                    "target_commitish": target_branch,
                     "name": rel_title,
                     "body": body,
                     "draft": False,
-                    "prerelease": False,
+                    "prerelease": is_prerelease,
                 }).encode("utf-8")
                 up_req = urllib.request.Request(
                     target_url,
@@ -555,9 +571,10 @@ def sync_changelog_releases(
                     tf.write(body)
                     tmp_path = tf.name
                 try:
+                    prerelease_args = ["--prerelease"] if ("-" in entry["version"]) else []
                     if gh_action == "edit":
                         gh_e = subprocess.run(
-                            ["gh", "release", "edit", tag, "--title", rel_title, "--notes-file", tmp_path] + repo_args,
+                            ["gh", "release", "edit", tag, "--title", rel_title, "--notes-file", tmp_path] + prerelease_args + repo_args,
                             cwd=str(project_root),
                             capture_output=True,
                             timeout=20,
@@ -566,7 +583,7 @@ def sync_changelog_releases(
                             synced_tags.append(tag)
                     else:
                         gh_c = subprocess.run(
-                            ["gh", "release", "create", tag, "--title", rel_title, "--notes-file", tmp_path] + repo_args,
+                            ["gh", "release", "create", tag, "--title", rel_title, "--notes-file", tmp_path] + prerelease_args + repo_args,
                             cwd=str(project_root),
                             capture_output=True,
                             timeout=20,
