@@ -14,10 +14,10 @@ MODULE_ORDER = [
     "core/db.py",
     "search/synonyms.py",
     "core/detector.py",
+    "core/fim.py",
     "core/quota_router.py",
     "core/concurrency.py",
     "core/guardrails.py",
-    "core/fim.py",
     "memory/writer_queue.py",
     "platform/windows_utf8.py",
     "platform/mcp_server.py",
@@ -47,6 +47,7 @@ Version: 3.7.3
 
 import os
 import io
+import ast
 import sys
 import re
 import glob
@@ -263,7 +264,7 @@ def bundle():
                 continue
 
             # Skip top-level standard library imports already in header
-            if line == stripped and re.match(r"^(import|from)\s+(os|io|sys|re|glob|json|time|stat|uuid|queue|random|atexit|base64|shutil|sqlite3|tempfile|argparse|threading|subprocess|contextlib|importlib|urllib|concurrent|pathlib|datetime|typing)\b", stripped):
+            if line == stripped and re.match(r"^(import|from)\s+(os|io|ast|sys|re|glob|json|time|stat|uuid|queue|random|atexit|base64|shutil|sqlite3|tempfile|argparse|threading|subprocess|contextlib|importlib|urllib|concurrent|pathlib|datetime|typing)\b", stripped):
                 if "(" in stripped and ")" not in stripped:
                     in_multiline_skip = True
                 continue

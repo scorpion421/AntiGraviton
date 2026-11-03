@@ -15,7 +15,7 @@ from ..config import DB_PATH, __version__
 from ..core.db import get_connection, init_db
 from ..core.guardrails import check_text, fix_text
 from ..core.fim import slice_fim, slice_fim_symbol, format_fim_block
-from ..core.quota_router import compute_routing_decision, execute_gemini_digest
+from ..core.quota_router import compute_routing_decision, execute_gemini_digest, execute_ast_map
 from ..search.fts import suggest_skills, get_skill, get_active_rules
 from ..memory.agent_templates import list_agent_templates, get_agent_template, format_agent_prompt
 from ..memory.gitea_sync import gitea_status_summary, save_code_commit
@@ -129,9 +129,22 @@ TOOLS_REGISTRY = [
             "properties": {
                 "files": {"type": "array", "items": {"type": "string"}, "description": "File paths or globs to digest"},
                 "query": {"type": "string", "description": "Analysis question or extraction instruction"},
-                "tier": {"type": "string", "description": "Execution tier: auto, ultra, pro, or lite"}
+                "tier": {"type": "string", "description": "Execution tier: auto, ultra, or pro"}
             },
             "required": ["query"]
+        }
+    },
+    {
+        "name": "skillsdb_ast_map",
+        "description": "Extract a multi-file AST Contract & Line-Offset Map (classes, functions, signatures, and exact Lstart-Lend ranges) at ~95% token compression before editing.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "files": {"type": "array", "items": {"type": "string"}, "description": "File paths or globs to map"},
+                "symbol_filter": {"type": "string", "description": "Optional substring filter for class/function names"},
+                "save_fact_key": {"type": "string", "description": "Optional fact key to persist in .agents/memory.db"}
+            },
+            "required": ["files"]
         }
     }
 ]
@@ -242,6 +255,14 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> str:
                 files=args.get("files") or [],
                 query=args.get("query") or "Summarize key findings and line numbers.",
                 execution_tier=args.get("tier") or "auto",
+            )
+            return json.dumps(res, indent=2)
+
+        elif name == "skillsdb_ast_map":
+            res = execute_ast_map(
+                files=args.get("files") or [],
+                symbol_filter=args.get("symbol_filter"),
+                save_fact_key=args.get("save_fact_key"),
             )
             return json.dumps(res, indent=2)
 

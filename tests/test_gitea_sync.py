@@ -1168,6 +1168,7 @@ class TestGiteaSync(unittest.TestCase):
         from skillsdb.core.quota_router import (
             compute_routing_decision,
             execute_gemini_digest,
+            execute_ast_map,
             get_ledger_24h_summary,
         )
         from skillsdb.core.guardrails import handle_pre_tool_guardrail_hook
@@ -1287,8 +1288,23 @@ class TestGiteaSync(unittest.TestCase):
         self.assertIn("0x800f0922", digest_res["digest"])
         self.assertIn("L61", digest_res["digest"])
 
+        # 5. Verify AST Contract & Line-Offset Mapper (skillsdb ast-map) and Context-Backpack telemetry
+        self.assertIn("backpack", dec_pro)
+        self.assertIn(dec_pro["backpack"]["backpack_state"], ("LIGHT", "MODERATE", "HEAVY"))
+        ast_res = execute_ast_map(
+            files=[str(Path(__file__).resolve().parent.parent / "skillsdb" / "core" / "fim.py")],
+            symbol_filter="extract_ast_contract_map",
+            save_fact_key="fim_ast_contract",
+            project_root=self.test_dir,
+            db_path=temp_central_db,
+        )
+        self.assertTrue(ast_res["success"])
+        self.assertIn("def extract_ast_contract_map", ast_res["contract_map"])
+        self.assertGreater(ast_res["compression_pct"], 50.0)
+
         l24 = get_ledger_24h_summary(db_path=temp_central_db)
         self.assertGreaterEqual(l24["subagent_24h_rewrites"], 2)
+        self.assertGreaterEqual(l24["ast_map_24h_calls"], 1)
         self.assertGreater(l24["saved_agy_tokens_total"], 0)
 
 

@@ -14,6 +14,7 @@ from .core.detector import get_profile, set_profile
 from .core.quota_router import (
     print_quota_status,
     execute_gemini_digest,
+    execute_ast_map,
     create_web_handover,
     ingest_web_response,
 )
@@ -339,16 +340,25 @@ def build_parser() -> argparse.ArgumentParser:
     mem_prune_parser.add_argument("--project", default=None, help="Project root directory (optional)")
 
     # Model Profile & Multi-Pool Quota Router Commands
-    profile_parser = subparsers.add_parser("profile", help="View or configure model tier, account quota tier (ultra/pro/lite), effort level (fast/medium/high), and routing mode")
+    profile_parser = subparsers.add_parser("profile", help="View or configure model tier, account quota tier (ultra/pro), effort level (fast/medium/high), and routing mode")
     profile_parser.add_argument("action", nargs="?", default="get", choices=["get", "set", "auto"], help="Profile action (default: get)")
     profile_parser.add_argument("tier", nargs="?", default=None, help="Model tier when action is 'set' (ultra, pro, lite, standard, lean, local, offline, auto)")
-    profile_parser.add_argument("--account-tier", default=None, choices=["ultra", "pro", "lite", "auto"], help="Set subscription account quota tier (ultra, pro, lite, auto)")
+    profile_parser.add_argument("--account-tier", default=None, choices=["ultra", "pro", "lite", "auto"], help="Set subscription account quota tier (ultra, pro, auto)")
     profile_parser.add_argument("--effort", default=None, choices=["fast", "medium", "high", "auto"], help="Set reasoning effort override (fast, medium, high, auto)")
-    profile_parser.add_argument("--mode", default=None, choices=["auto", "balanced", "shield", "conserve", "turbo", "direct"], help="Set quota router operating mode")
+    profile_parser.add_argument("--mode", default=None, choices=["auto", "balanced", "golden_ratio", "shield", "conserve", "turbo", "direct"], help="Set quota router operating mode")
     profile_parser.add_argument("--api-key", default=None, help="Configure Google AI Studio GEMINI_API_KEY in runtime_config (or 'clear' to remove)")
 
-    quota_parser = subparsers.add_parser("quota-status", aliases=["quota"], help="Display 4-pool quota router status, 13-model effort matrix, 5h/24h usage, and offload savings")
+    quota_parser = subparsers.add_parser("quota-status", aliases=["quota"], help="Display 4-pool quota router status, 13-model effort matrix, Context Backpack, and offload savings")
     quota_parser.add_argument("--json", action="store_true", help="Output full routing telemetry as JSON")
+
+    ast_map_parser = subparsers.add_parser("ast-map", help="Extract multi-file AST Contract & Line-Offset Map (Lstart-Lend) at ~95%% token compression before coding")
+    ast_map_parser.add_argument("files", nargs="*", default=None, help="File paths or glob patterns to map")
+    ast_map_parser.add_argument("--files", "-f", dest="opt_files", nargs="+", default=None, help="File paths or glob patterns (flag alias)")
+    ast_map_parser.add_argument("--filter", "-s", default=None, help="Optional symbol/class/function substring filter")
+    ast_map_parser.add_argument("--public-only", action="store_true", help="Exclude private (_prefixed) functions and methods")
+    ast_map_parser.add_argument("--save-fact", default=None, help="Optional fact key to persist the contract map directly into .agents/memory.db")
+    ast_map_parser.add_argument("--project", default=None, help="Project root directory (optional)")
+    ast_map_parser.add_argument("--json", action="store_true", help="Output contract map as JSON")
 
     digest_parser = subparsers.add_parser("gemini-digest", help="Offload large file, log, or git diff analysis to external Gemini pools (Context Shield)")
     digest_parser.add_argument("--files", "-f", nargs="+", default=None, help="File paths or glob patterns to digest")
@@ -848,6 +858,27 @@ def main(argv: list[str] = None):
                 get_profile(db_path=DB_PATH)
         elif args.command in ("quota-status", "quota"):
             print_quota_status(as_json=getattr(args, "json", False), db_path=DB_PATH)
+        elif args.command == "ast-map":
+            proj_p = Path(args.project) if getattr(args, "project", None) else None
+            target_files = list(getattr(args, "files", None) or []) + list(getattr(args, "opt_files", None) or [])
+            res = execute_ast_map(
+                files=target_files,
+                symbol_filter=getattr(args, "filter", None),
+                include_private=not getattr(args, "public_only", False),
+                save_fact_key=getattr(args, "save_fact", None),
+                project_root=proj_p,
+                db_path=DB_PATH,
+            )
+            if getattr(args, "json", False):
+                print(json.dumps(res, indent=2))
+            elif not res.get("success"):
+                print(f"Error: {res.get('error', 'ast-map failed')}")
+                sys.exit(1)
+            else:
+                print(f"\n=== AST CONTRACT & LINE-OFFSET MAP ({res['file_count']} files, {res['total_lines']} lines) ===")
+                print(f"Token Compression: ~{res['raw_tokens']:,} raw tokens -> ~{res['map_tokens']:,} tokens (-{res['compression_pct']}%, saved ~{res['saved_agy_tokens']:,} AGY tokens in {res['latency_ms']} ms)\n")
+                print(res["contract_map"])
+                print("\n===========================================================================\n")
         elif args.command == "gemini-digest":
             proj_p = Path(args.project) if getattr(args, "project", None) else None
             res = execute_gemini_digest(

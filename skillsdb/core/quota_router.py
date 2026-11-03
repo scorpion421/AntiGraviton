@@ -48,6 +48,7 @@ from .detector import (
     detect_model_and_pool,
     tier_to_display_label,
 )
+from .fim import extract_ast_contract_map
 
 
 ACCOUNT_TIER_BUDGETS = {
@@ -304,6 +305,104 @@ def record_quota_ledger_entry(
         pass
 
 
+def measure_session_backpack(cid: str = None, brain_dir: Path = None) -> Dict[str, Any]:
+    """
+    Measures the active conversation's Context Backpack ('Rucksack-Gewicht'):
+      - Uncompacted steps and model turns since the last <CONTEXT_SUMMARY> compaction boundary
+      - Estimated backpack token weight carried on every main-chat turn
+      - Backpack classification ('LIGHT', 'MODERATE', 'HEAVY') and Contract-First Coding Split directive
+    """
+    b_dir = Path(brain_dir) if brain_dir else (GEMINI_DIR / "antigravity" / "brain")
+    default_res = {
+        "conversation_id": cid,
+        "total_steps": 0,
+        "uncompacted_steps": 0,
+        "uncompacted_turns": 0,
+        "backpack_tokens": 0,
+        "backpack_state": "LIGHT",
+        "coding_split_strategy": "DIRECT_ARGON (Backpack light: execute coupled & single-file edits directly in main chat on Gemini 4 Argon)",
+    }
+    if not b_dir.exists():
+        return default_res
+
+    t_file: Optional[Path] = None
+    resolved_cid = cid
+    if cid:
+        cand = b_dir / cid / ".system_generated" / "logs" / "transcript.jsonl"
+        if cand.exists():
+            t_file = cand
+    if t_file is None:
+        newest_mtime = -1.0
+        for folder in b_dir.iterdir():
+            if not folder.is_dir() or folder.name == "tempmediaStorage":
+                continue
+            cand = folder / ".system_generated" / "logs" / "transcript.jsonl"
+            if cand.exists():
+                try:
+                    mt = cand.stat().st_mtime
+                    if mt > newest_mtime:
+                        newest_mtime = mt
+                        t_file = cand
+                        resolved_cid = folder.name
+                except OSError:
+                    continue
+
+    if t_file is None or not t_file.exists():
+        return default_res
+
+    total_steps = 0
+    uncompacted_steps = 0
+    uncompacted_turns = 0
+    active_chars = 0
+
+    try:
+        with open(t_file, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                total_steps += 1
+                if "<CONTEXT_SUMMARY>" in line and '"USER_INPUT"' in line:
+                    uncompacted_steps = 1
+                    uncompacted_turns = 0
+                    active_chars = min(len(line), 24000)
+                else:
+                    uncompacted_steps += 1
+                    active_chars += min(len(line), 16000)
+                    if '"PLANNER_RESPONSE"' in line or '"source": "MODEL"' in line or '"source":"MODEL"' in line:
+                        uncompacted_turns += 1
+    except Exception:
+        return default_res
+
+    backpack_tokens = max(1200, active_chars // 4)
+    if uncompacted_steps >= 75 or backpack_tokens >= 60000:
+        b_state = "HEAVY"
+        strategy = (
+            f"FRESH_ARGON_SPLIT (Backpack HEAVY: ~{backpack_tokens:,} tokens/turn across {uncompacted_steps} uncompacted steps! "
+            "Keep interfaces & coupled logic in main chat, delegate isolated module/test files to invoke_subagent(TypeName='self', Model='pro') "
+            "for 100% Argon coding in a fresh 0-token context, and run 'skillsdb ast-map <files>' before multi-file edits)"
+        )
+    elif uncompacted_steps >= 35 or backpack_tokens >= 28000:
+        b_state = "MODERATE"
+        strategy = (
+            f"AST_CONTRACT_FIRST (Backpack MODERATE: ~{backpack_tokens:,} tokens/turn across {uncompacted_steps} steps. "
+            "Run 'skillsdb ast-map <files>' for exact Lstart-Lend signatures before reading/editing multiple files)"
+        )
+    else:
+        b_state = "LIGHT"
+        strategy = (
+            f"DIRECT_ARGON (Backpack LIGHT: ~{backpack_tokens:,} tokens/turn across {uncompacted_steps} steps. "
+            "Execute coupled and single-file edits directly in main chat on Gemini 4 Argon)"
+        )
+
+    return {
+        "conversation_id": resolved_cid,
+        "total_steps": total_steps,
+        "uncompacted_steps": uncompacted_steps,
+        "uncompacted_turns": uncompacted_turns,
+        "backpack_tokens": backpack_tokens,
+        "backpack_state": b_state,
+        "coding_split_strategy": strategy,
+    }
+
+
 def get_ledger_24h_summary(db_path: Path = DB_PATH) -> Dict[str, Any]:
     """Queries quota_ledger for external 24h request counts and cumulative Antigravity savings."""
     summary = {
@@ -311,6 +410,7 @@ def get_ledger_24h_summary(db_path: Path = DB_PATH) -> Dict[str, Any]:
         "aistudio_24h_requests": 0,
         "web_24h_handovers": 0,
         "subagent_24h_rewrites": 0,
+        "ast_map_24h_calls": 0,
         "saved_agy_tokens_24h": 0,
         "saved_agy_turns_24h": 0,
         "saved_agy_tokens_total": 0,
@@ -342,6 +442,8 @@ def get_ledger_24h_summary(db_path: Path = DB_PATH) -> Dict[str, Any]:
                     summary["web_24h_handovers"] += cnt
                 elif p_name == "agy_subagent_rewrite":
                     summary["subagent_24h_rewrites"] += cnt
+                elif p_name == "local_ast_map":
+                    summary["ast_map_24h_calls"] += cnt
                 summary["saved_agy_tokens_24h"] += s_tok
                 summary["saved_agy_turns_24h"] += s_turns
 
@@ -372,13 +474,14 @@ def compute_routing_decision(
       1. Account quota tier ('ultra' or 'pro' exclusively)
       2. Active Antigravity model family & internal pool (1A, 1B, 1C, 1D)
       3. Active reasoning effort level ('fast', 'medium', 'high')
-      4. Rolling 5-hour Antigravity load and 24-hour external pool budgets
+      4. Rolling 5-hour Antigravity load, Context Backpack weight, and 24-hour external pool budgets
     """
     state = detect_model_and_pool(cid=cid, db_path=db_path, model_name_hint=model_name_hint)
     account_tier = "ultra" if state["account_tier"] == "ultra" else "pro"
     budget = ACCOUNT_TIER_BUDGETS[account_tier]
 
     rolling_5h = scan_rolling_5h_antigravity_usage(brain_dir=brain_dir)
+    backpack = measure_session_backpack(cid=cid, brain_dir=brain_dir)
     ledger_24h = get_ledger_24h_summary(db_path=db_path)
     ext_pools = detect_external_pools(db_path=db_path)
 
@@ -405,10 +508,10 @@ def compute_routing_decision(
         else:
             effective_mode = "balanced"
 
-    # Dynamic digest line threshold (tighter when High effort or Golden Ratio / Shield is active)
-    if effective_mode == "shield":
+    # Dynamic digest line threshold (tighter when High effort, Heavy Backpack, or Golden Ratio / Shield is active)
+    if effective_mode == "shield" or backpack["backpack_state"] == "HEAVY":
         digest_line_threshold = min(100, budget["digest_line_threshold_golden_ratio"])
-    elif effective_mode == "golden_ratio":
+    elif effective_mode == "golden_ratio" or backpack["backpack_state"] == "MODERATE":
         digest_line_threshold = budget["digest_line_threshold_golden_ratio"]
     elif active_effort == EFFORT_HIGH:
         digest_line_threshold = budget["digest_line_threshold_high_effort"]
@@ -428,11 +531,15 @@ def compute_routing_decision(
 
     # Golden Ratio step-by-step coding & quota optimization advice
     degradation_advice = ""
-    if load_pct >= budget["golden_ratio_pct"]:
+    if load_pct >= budget["golden_ratio_pct"] or backpack["backpack_state"] == "HEAVY":
         claude_turns = rolling_5h["pools"][POOL_AGY_CLAUDE]["turns"]
         steps_advice = [
             "Coding Guarantee: Keep 100% of code generation on Gemini 4 Argon (never Flash)"
         ]
+        if backpack["backpack_state"] == "HEAVY":
+            steps_advice.append(
+                f"Backpack Guard ({backpack['uncompacted_steps']} steps, ~{backpack['backpack_tokens']:,} tok/turn): Use 'skillsdb ast-map <files>' for signatures and delegate isolated module/test coding to fresh invoke_subagent(TypeName='self', Model='pro')"
+            )
         if active_effort == EFFORT_HIGH and EFFORT_MEDIUM in state["supported_efforts"]:
             steps_advice.append(
                 f"Step 1 (Golden Ratio >= 62%): Switch {state['model_family']} Effort High (3.5x) -> Medium (2.2x) for standard coding (-37% burn, same Argon quality)"
@@ -453,6 +560,7 @@ def compute_routing_decision(
         "subagent_research_model": subagent_research_model,
         "subagent_general_model": subagent_general_model,
         "rolling_5h": rolling_5h,
+        "backpack": backpack,
         "load_pct_5h": load_pct,
         "soft_limit_5h_units": soft_limit,
         "pool_5h_units": pool_5h_units,
@@ -468,6 +576,7 @@ def format_hook_routing_banner(decision: Dict[str, Any]) -> str:
     """Formats a compact, high-signal routing directive banner for PreInvocation hook injection."""
     st = decision["state"]
     r5 = decision["rolling_5h"]
+    bp = decision["backpack"]
     l24 = decision["ledger_24h"]
     ext = decision["external_pools"]
 
@@ -477,8 +586,9 @@ def format_hook_routing_banner(decision: Dict[str, Any]) -> str:
     lines = [
         f"[SKILLSDB MULTI-POOL QUOTA ROUTER: Account={decision['account_tier'].upper()} | Mode={decision['effective_mode'].upper()} | Active={st['model_name']} (Pool={st['pool']}, Weight={st['quota_weight']}x)]",
         f"  * 5h Antigravity Window: {r5['total_turns']} turns ({r5['total_weighted_units']:.1f}/{decision['soft_limit_5h_units']:.0f} weighted units, {decision['load_pct_5h']:.0f}%) | Pool 1A Argon: {r5['pools'][POOL_AGY_GEMINI_HIGH]['turns']}t | Pool 1B Flash: {r5['pools'][POOL_AGY_GEMINI_FAST]['turns']}t | Pool 1C Claude: {r5['pools'][POOL_AGY_CLAUDE]['turns']}t | Pool 1D GPT-OSS: {r5['pools'][POOL_AGY_OPEN_WEIGHT]['turns']}t",
+        f"  * Session Context Backpack: {bp['backpack_state']} (~{bp['backpack_tokens']:,} tok/turn, {bp['uncompacted_steps']} uncompacted steps) -> Strategy: {bp['coding_split_strategy']}",
         f"  * External Gemini Pools (24h): Pool 2 CLI-OAuth={cli_state} ({l24['cli_24h_requests']}/{decision['cli_daily_limit']} RPD) | Pool 3 AIStudio-API={api_state} ({l24['aistudio_24h_requests']}/{decision['aistudio_daily_limit']} RPD) | Saved: ~{l24['saved_agy_tokens_total']:,} AGY tokens ({l24['saved_agy_turns_total']} turns)",
-        f"  * Golden Ratio Policy: 100% Argon/Claude for Coding (TypeName='self' -> '{decision['subagent_general_model']}'). Read-only 'research' subagents -> Model='{decision['subagent_research_model']}' (max {decision['max_workers']} workers). Offload read-only files > {decision['digest_line_threshold']} lines via 'skillsdb gemini-digest'.",
+        f"  * Golden Ratio Policy: 100% Argon/Claude for Coding (TypeName='self' -> '{decision['subagent_general_model']}'). Read-only 'research' subagents -> Model='{decision['subagent_research_model']}' (max {decision['max_workers']} workers). Offload read-only files > {decision['digest_line_threshold']} lines via 'skillsdb gemini-digest' or 'skillsdb ast-map <files>'.",
     ]
     if decision["degradation_advice"]:
         lines.append(f"  * Quota Optimization Advice: {decision['degradation_advice']}")
@@ -943,6 +1053,58 @@ def ingest_web_response(
     }
 
 
+def execute_ast_map(
+    files: List[str],
+    symbol_filter: Optional[str] = None,
+    include_private: bool = True,
+    save_fact_key: Optional[str] = None,
+    project_root: Optional[Path] = None,
+    db_path: Path = DB_PATH,
+) -> Dict[str, Any]:
+    """
+    Executes multi-file AST Contract & Line-Offset extraction, records token savings in
+    quota_ledger (pool='local_ast_map'), and optionally persists the contract map in .agents/memory.db.
+    """
+    res = extract_ast_contract_map(
+        files=files,
+        symbol_filter=symbol_filter,
+        include_private=include_private,
+    )
+    if not res.get("success"):
+        return res
+
+    record_quota_ledger_entry(
+        pool="local_ast_map",
+        execution_tier="pro",
+        model_used="python-ast-contract-mapper",
+        effort_level="medium",
+        input_tokens=res["raw_tokens"],
+        output_tokens=res["map_tokens"],
+        saved_agy_tokens=res["saved_agy_tokens"],
+        saved_agy_turns=res["saved_agy_turns"],
+        latency_ms=res["latency_ms"],
+        status="ok",
+        task_summary=f"ast-map ({res['file_count']} files): {', '.join(res['files_mapped'][:5])}",
+        db_path=db_path,
+    )
+
+    if save_fact_key:
+        try:
+            from ..memory.project_memory import get_project_connection, find_project_root, mem_save_fact
+            target_root = Path(project_root) if project_root else find_project_root()
+            pconn = get_project_connection(target_root)
+            try:
+                compact_fact = re.sub(r"\s+", " ", res["contract_map"]).strip()[:700]
+                mem_save_fact(pconn, save_fact_key, compact_fact, reason="Auto-saved via skillsdb ast-map")
+            finally:
+                pconn.close()
+        except Exception:
+            pass
+
+    res["saved_fact_key"] = save_fact_key
+    return res
+
+
 def print_quota_status(as_json: bool = False, cid: str = None, db_path: Path = DB_PATH):
     """Displays the comprehensive 4-Pool & 13-Model/Effort Quota Router Dashboard."""
     decision = compute_routing_decision(cid=cid, db_path=db_path)
@@ -952,6 +1114,7 @@ def print_quota_status(as_json: bool = False, cid: str = None, db_path: Path = D
 
     st = decision["state"]
     r5 = decision["rolling_5h"]
+    bp = decision["backpack"]
     l24 = decision["ledger_24h"]
     ext = decision["external_pools"]
 
@@ -962,6 +1125,10 @@ def print_quota_status(as_json: bool = False, cid: str = None, db_path: Path = D
     eff_list = " / ".join(e.capitalize() for e in st["supported_efforts"])
     print(f"Reasoning Effort:     {st['effort_level'].upper()} (Supported: {eff_list} | Quota Weight: {st['quota_weight']}x)")
     print(f"Detection Source:     {st['source']}")
+
+    print("\n--- Session Context Backpack & Contract-First Coding Split ---")
+    print(f"  Backpack State:     {bp['backpack_state']} (~{bp['backpack_tokens']:,} tokens/turn | {bp['uncompacted_steps']} uncompacted steps, {bp['uncompacted_turns']} turns)")
+    print(f"  Coding Split Rule:  {bp['coding_split_strategy']}")
 
     print("\n--- Pool 1: Antigravity Internal 5-Hour Rolling Window ---")
     print(f"  Total 5h Activity:  {r5['total_turns']} turns ({r5['total_weighted_units']:.1f} / {decision['soft_limit_5h_units']:.0f} weighted units -> {decision['load_pct_5h']:.1f}%)")
@@ -981,7 +1148,8 @@ def print_quota_status(as_json: bool = False, cid: str = None, db_path: Path = D
 
     print("\n--- Active Routing Thresholds & Measured Offload Savings ---")
     print(f"  * Context-Shield Digest Threshold: > {decision['digest_line_threshold']} lines -> 'skillsdb gemini-digest --files <paths> --query \"...\"'")
-    print(f"  * Subagent PreToolUse Overwrite:   research -> Model='{decision['subagent_research_model']}' | general -> Model='{decision['subagent_general_model']}'")
+    print(f"  * AST Contract Mapper:             'skillsdb ast-map <files>' ({l24.get('ast_map_24h_calls', 0)} maps in 24h)")
+    print(f"  * Subagent PreToolUse Overwrite:   research -> Model='{decision['subagent_research_model']}' | coding (self) -> Model='{decision['subagent_general_model']}'")
     print(f"  * 24h Antigravity Quota Saved:     ~{l24['saved_agy_tokens_24h']:,} tokens ({l24['saved_agy_turns_24h']} turns avoided, {l24['subagent_24h_rewrites']} subagent rewrites)")
     print(f"  * All-Time Offload Quota Saved:    ~{l24['saved_agy_tokens_total']:,} tokens ({l24['saved_agy_turns_total']} turns avoided)")
     if decision["degradation_advice"]:

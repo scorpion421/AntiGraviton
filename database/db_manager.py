@@ -12,6 +12,7 @@ Version: 3.8.15
 
 import os
 import io
+import ast
 import sys
 import re
 import glob
@@ -1158,6 +1159,436 @@ def get_profile(cid: str = None, db_path: Path = None):
 
 
 # =====================================================================
+# SECTION: skillsdb.core.fim
+# =====================================================================
+def slice_fim(
+    file_path: Path,
+    target_line: int,
+    prefix_lines: int = 25,
+    suffix_lines: int = 25
+) -> Dict[str, Any]:
+    """
+    Extracts a surgical Fill-in-the-Middle window around a target line.
+    Returns prefix lines, suffix lines, full file token count, and sliced token count.
+    """
+    fpath = Path(file_path)
+    if not fpath.exists() or not fpath.is_file():
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    content = fpath.read_text(encoding="utf-8", errors="replace")
+    all_lines = content.splitlines(keepends=True)
+    total_lines = len(all_lines)
+
+    # 1-indexed target line adjusted to 0-index
+    prefix_lines = max(0, prefix_lines)
+    suffix_lines = max(0, suffix_lines)
+    t_idx = max(0, min(total_lines - 1 if total_lines else 0, target_line - 1))
+
+    prefix_start = max(0, t_idx - prefix_lines)
+    suffix_end = min(total_lines, t_idx + suffix_lines + 1)
+
+    prefix_chunk = "".join(all_lines[prefix_start:t_idx])
+    target_line_content = all_lines[t_idx] if total_lines > 0 else ""
+    suffix_chunk = "".join(all_lines[t_idx + 1:suffix_end])
+
+    full_tokens = estimate_tokens(content)
+    sliced_tokens = estimate_tokens(prefix_chunk + target_line_content + suffix_chunk)
+    tokens_saved = max(0, full_tokens - sliced_tokens)
+
+    return {
+        "file": str(fpath),
+        "target_line": (t_idx + 1) if total_lines > 0 else 0,
+        "prefix_start_line": (prefix_start + 1) if total_lines > 0 else 0,
+        "prefix_end_line": max(prefix_start + 1, t_idx) if total_lines > 0 else 0,
+        "suffix_start_line": min(suffix_end, t_idx + 2) if total_lines > 0 else 0,
+        "suffix_end_line": suffix_end,
+        "total_file_lines": total_lines,
+        "prefix": prefix_chunk,
+        "middle": target_line_content,
+        "target_line_content": target_line_content,
+        "suffix": suffix_chunk,
+        "full_file_tokens": full_tokens,
+        "sliced_tokens": sliced_tokens,
+        "tokens_saved": tokens_saved,
+    }
+
+
+def slice_fim_symbol(
+    file_path: Path,
+    symbol_name: str,
+    prefix_lines: int = 20,
+    suffix_lines: int = 20
+) -> Dict[str, Any]:
+    """
+    Finds the definition line of a symbol (function, class, variable) and slices the FIM window.
+    """
+    fpath = Path(file_path)
+    if not fpath.exists() or not fpath.is_file():
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    content = fpath.read_text(encoding="utf-8", errors="replace")
+    all_lines = content.splitlines()
+
+    # Search for def, async def, class, func, fn, struct, enum, const, let, var symbol patterns
+    pat = re.compile(rf"\b(?:(?:async\s+)?def|class|function|func|fn|struct|enum|var|let|const|val|interface|type)\s+{re.escape(symbol_name)}\b")
+    match_line = None
+
+    for idx, line in enumerate(all_lines, 1):
+        if pat.search(line):
+            match_line = idx
+            break
+
+    if match_line is None:
+        # Fallback to direct symbol substring search
+        for idx, line in enumerate(all_lines, 1):
+            if symbol_name in line:
+                match_line = idx
+                break
+
+    if match_line is None:
+        raise ValueError(f"Symbol '{symbol_name}' not found in {file_path}")
+
+    res = slice_fim(fpath, match_line, prefix_lines=prefix_lines, suffix_lines=suffix_lines)
+    res["symbol"] = symbol_name
+    return res
+
+
+def format_fim_block(fim_dict: Dict[str, Any]) -> str:
+    """Formats FIM slices into standard Codestral-style <fim_prefix>, <fim_suffix> blocks."""
+    lines = [
+        f"=== CODESTRAL FIM SLICE: {fim_dict['file']} ===",
+        f"Target Line: {fim_dict['target_line']} | Lines {fim_dict['prefix_start_line']}-{fim_dict['suffix_end_line']} of {fim_dict['total_file_lines']}",
+        f"Token Compression: {fim_dict['sliced_tokens']} tokens (~{fim_dict['tokens_saved']} tokens saved, -{(fim_dict['tokens_saved'] / max(1, fim_dict['full_file_tokens']) * 100):.1f}%)",
+        "",
+        "<fim_prefix>",
+        fim_dict["prefix"].rstrip(),
+        "<fim_suffix>",
+        fim_dict["suffix"].rstrip(),
+        "<fim_middle>",
+        f"# Target line to refactor/replace: {fim_dict['target_line_content'].strip()}",
+        "===============================================",
+    ]
+    return "\n".join(lines)
+
+
+def _format_ast_expr(node: Optional[ast.AST]) -> str:
+    """Safely unparses an AST type annotation or default value expression."""
+    if node is None:
+        return ""
+    try:
+        return ast.unparse(node)
+    except Exception:
+        return "..."
+
+
+def _format_ast_signature(fn_node: ast.AST) -> str:
+    """Formats a compact function/method argument & return signature from an AST FunctionDef/AsyncFunctionDef."""
+    args_obj = getattr(fn_node, "args", None)
+    if not args_obj:
+        return "()"
+    parts: List[str] = []
+    pos_args = list(getattr(args_obj, "posonlyargs", [])) + list(getattr(args_obj, "args", []))
+    defaults = list(getattr(args_obj, "defaults", []))
+    num_no_def = len(pos_args) - len(defaults)
+
+    for idx, arg in enumerate(pos_args):
+        piece = arg.arg
+        if arg.annotation:
+            ann_s = _format_ast_expr(arg.annotation)
+            if len(ann_s) <= 28:
+                piece += f": {ann_s}"
+        if idx >= num_no_def:
+            def_node = defaults[idx - num_no_def]
+            def_s = _format_ast_expr(def_node)
+            if len(def_s) <= 20:
+                piece += f"={def_s}"
+            else:
+                piece += "=..."
+        parts.append(piece)
+
+    if getattr(args_obj, "vararg", None):
+        parts.append(f"*{args_obj.vararg.arg}")
+    elif getattr(args_obj, "kwonlyargs", None):
+        parts.append("*")
+
+    kw_args = list(getattr(args_obj, "kwonlyargs", []))
+    kw_defs = list(getattr(args_obj, "kw_defaults", []))
+    for idx, kw in enumerate(kw_args):
+        piece = kw.arg
+        if idx < len(kw_defs) and kw_defs[idx] is not None:
+            def_s = _format_ast_expr(kw_defs[idx])
+            piece += f"={def_s}" if len(def_s) <= 20 else "=..."
+        parts.append(piece)
+
+    if getattr(args_obj, "kwarg", None):
+        parts.append(f"**{args_obj.kwarg.arg}")
+
+    sig = f"({', '.join(parts)})"
+    ret_node = getattr(fn_node, "returns", None)
+    if ret_node is not None:
+        ret_s = _format_ast_expr(ret_node)
+        if ret_s and len(ret_s) <= 36:
+            sig += f" -> {ret_s}"
+    return sig
+
+
+def _first_doc_line(node: ast.AST) -> str:
+    """Returns the first summary sentence of an AST docstring if present."""
+    try:
+        doc = ast.get_docstring(node, clean=True)
+        if doc:
+            first = doc.strip().splitlines()[0].strip()
+            return first[:110]
+    except Exception:
+        pass
+    return ""
+
+
+def _extract_python_ast_contracts(
+    content: str,
+    symbol_filter: Optional[str] = None,
+    include_private: bool = True,
+) -> Dict[str, Any]:
+    """Parses Python source into a compact interface & line-offset contract map."""
+    tree = ast.parse(content)
+    filt = (symbol_filter or "").strip().lower()
+
+    imports: List[str] = []
+    constants: List[str] = []
+    classes: List[Dict[str, Any]] = []
+    functions: List[Dict[str, Any]] = []
+
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imports.append(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            names = ", ".join(a.name for a in node.names[:6])
+            if len(node.names) > 6:
+                names += ", ..."
+            imports.append(f"{mod}: {{{names}}}" if mod else names)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for t in targets:
+                if isinstance(t, ast.Name):
+                    name = t.id
+                    if not include_private and name.startswith("_") and not name.startswith("__"):
+                        continue
+                    if filt and filt not in name.lower():
+                        continue
+                    if name.isupper() or name.startswith("__"):
+                        constants.append(f"{name} [L{node.lineno}]")
+        elif isinstance(node, ast.ClassDef):
+            cname = node.name
+            end_l = getattr(node, "end_lineno", node.lineno)
+            bases = [_format_ast_expr(b) for b in node.bases]
+            base_str = f"({', '.join(bases)})" if bases else ""
+            methods: List[str] = []
+            for item in node.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    mname = item.name
+                    if not include_private and mname.startswith("_") and not mname.startswith("__"):
+                        continue
+                    if filt and (filt not in cname.lower() and filt not in mname.lower()):
+                        continue
+                    m_end = getattr(item, "end_lineno", item.lineno)
+                    prefix = "async def" if isinstance(item, ast.AsyncFunctionDef) else "def"
+                    sig = _format_ast_signature(item)
+                    doc_s = _first_doc_line(item)
+                    doc_tag = f"  # {doc_s}" if doc_s else ""
+                    methods.append(f"{prefix} {mname}{sig} [L{item.lineno}-L{m_end}]{doc_tag}")
+            if filt and filt not in cname.lower() and not methods:
+                continue
+            classes.append({
+                "header": f"class {cname}{base_str} [L{node.lineno}-L{end_l}]",
+                "doc": _first_doc_line(node),
+                "methods": methods,
+            })
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            fname = node.name
+            if not include_private and fname.startswith("_") and not fname.startswith("__"):
+                continue
+            if filt and filt not in fname.lower():
+                continue
+            end_l = getattr(node, "end_lineno", node.lineno)
+            prefix = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
+            sig = _format_ast_signature(node)
+            doc_s = _first_doc_line(node)
+            doc_tag = f"  # {doc_s}" if doc_s else ""
+            functions.append(f"{prefix} {fname}{sig} [L{node.lineno}-L{end_l}]{doc_tag}")
+
+    return {
+        "imports": imports[:16],
+        "constants": constants[:20],
+        "classes": classes,
+        "functions": functions,
+    }
+
+
+def _extract_generic_regex_contracts(
+    content: str,
+    symbol_filter: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Fallback structure & line-offset extractor for PowerShell, TS/JS, Go, Rust, C#, Java, Kotlin, Dart."""
+    filt = (symbol_filter or "").strip().lower()
+    lines = content.splitlines()
+    functions: List[str] = []
+    classes: List[Dict[str, Any]] = []
+
+    cls_re = re.compile(r"^\s*(?:export\s+)?(?:public\s+|private\s+|abstract\s+)?(?:class|interface|struct|enum)\s+([A-Za-z_][A-Za-z0-9_]*)")
+    fn_re = re.compile(
+        r"^\s*(?:export\s+)?(?:async\s+)?(?:function|def|func|fn)\s+([A-Za-z_][A-Za-z0-9_-]*)\s*(\([^)]*\))?"
+    )
+
+    for idx, raw_line in enumerate(lines, 1):
+        cm = cls_re.match(raw_line)
+        if cm:
+            cname = cm.group(1)
+            if not filt or filt in cname.lower():
+                classes.append({
+                    "header": f"{raw_line.strip().rstrip('{').strip()} [L{idx}]",
+                    "doc": "",
+                    "methods": [],
+                })
+            continue
+        fm = fn_re.match(raw_line)
+        if fm:
+            fname = fm.group(1)
+            if not filt or filt in fname.lower():
+                functions.append(f"{raw_line.strip().rstrip('{').strip()} [L{idx}]")
+
+    return {
+        "imports": [],
+        "constants": [],
+        "classes": classes,
+        "functions": functions,
+    }
+
+
+def extract_ast_contract_map(
+    files: List[str],
+    symbol_filter: Optional[str] = None,
+    include_private: bool = True,
+) -> Dict[str, Any]:
+    """
+    Builds a multi-file AST Contract & Line-Offset Map so Gemini 4 Argon can inspect
+    exact function signatures, class hierarchies, and Lstart-Lend ranges at ~95-98%
+    token compression before executing surgical read_file / edit_file calls.
+    """
+    start_t = time.perf_counter()
+    resolved_files: List[Path] = []
+    for pattern in (files or []):
+        p_obj = Path(pattern)
+        if p_obj.exists() and p_obj.is_file():
+            resolved_files.append(p_obj)
+        else:
+            for m in glob.glob(pattern, recursive=True):
+                mp = Path(m)
+                if mp.exists() and mp.is_file():
+                    resolved_files.append(mp)
+
+    # Deduplicate preserving order
+    seen = set()
+    unique_files: List[Path] = []
+    for f in resolved_files:
+        key = str(f.resolve()).lower()
+        if key not in seen:
+            seen.add(key)
+            unique_files.append(f)
+
+    if not unique_files:
+        return {
+            "success": False,
+            "error": "No matching source files found for ast-map.",
+            "files_mapped": [],
+        }
+
+    file_maps: List[Dict[str, Any]] = []
+    total_raw_tokens = 0
+    total_lines = 0
+
+    for fpath in unique_files[:20]:
+        try:
+            content = fpath.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        line_cnt = len(content.splitlines())
+        raw_tok = estimate_tokens(content)
+        total_raw_tokens += raw_tok
+        total_lines += line_cnt
+
+        parsed_map = None
+        if fpath.suffix.lower() == ".py":
+            try:
+                parsed_map = _extract_python_ast_contracts(
+                    content,
+                    symbol_filter=symbol_filter,
+                    include_private=include_private,
+                )
+            except Exception:
+                parsed_map = None
+        if parsed_map is None:
+            parsed_map = _extract_generic_regex_contracts(content, symbol_filter=symbol_filter)
+
+        file_maps.append({
+            "file": fpath.name,
+            "path": str(fpath),
+            "lines": line_cnt,
+            "raw_tokens": raw_tok,
+            "imports": parsed_map["imports"],
+            "constants": parsed_map["constants"],
+            "classes": parsed_map["classes"],
+            "functions": parsed_map["functions"],
+        })
+
+    formatted = format_ast_contract_map({
+        "files": file_maps,
+        "total_lines": total_lines,
+        "total_raw_tokens": total_raw_tokens,
+    })
+    map_tokens = estimate_tokens(formatted)
+    saved_tokens = max(0, total_raw_tokens - map_tokens)
+    compression_pct = round((saved_tokens / max(1, total_raw_tokens)) * 100.0, 1)
+    latency_ms = int((time.perf_counter() - start_t) * 1000)
+
+    return {
+        "success": True,
+        "files_mapped": [fm["file"] for fm in file_maps],
+        "file_count": len(file_maps),
+        "total_lines": total_lines,
+        "raw_tokens": total_raw_tokens,
+        "map_tokens": map_tokens,
+        "saved_agy_tokens": saved_tokens,
+        "saved_agy_turns": max(1, len(file_maps)),
+        "compression_pct": compression_pct,
+        "latency_ms": latency_ms,
+        "contract_map": formatted,
+        "files": file_maps,
+    }
+
+
+def format_ast_contract_map(data: Dict[str, Any]) -> str:
+    """Formats the extracted AST contract map into a compact, line-indexed reference."""
+    out: List[str] = []
+    for fm in data.get("files", []):
+        out.append(f"### File: {fm['file']} ({fm['lines']} lines, ~{fm['raw_tokens']:,} raw tokens)")
+        if fm.get("imports"):
+            out.append(f"  Imports: {'; '.join(fm['imports'][:10])}")
+        if fm.get("constants"):
+            out.append(f"  Constants: {', '.join(fm['constants'][:12])}")
+        for cls in fm.get("classes", []):
+            doc_s = f"  # {cls['doc']}" if cls.get("doc") else ""
+            out.append(f"  * {cls['header']}{doc_s}")
+            for m in cls.get("methods", []):
+                out.append(f"      - {m}")
+        for fn in fm.get("functions", []):
+            out.append(f"  * {fn}")
+        out.append("")
+    return "\n".join(out).strip()
+
+
+# =====================================================================
 # SECTION: skillsdb.core.quota_router
 # =====================================================================
 ACCOUNT_TIER_BUDGETS = {
@@ -1414,6 +1845,104 @@ def record_quota_ledger_entry(
         pass
 
 
+def measure_session_backpack(cid: str = None, brain_dir: Path = None) -> Dict[str, Any]:
+    """
+    Measures the active conversation's Context Backpack ('Rucksack-Gewicht'):
+      - Uncompacted steps and model turns since the last <CONTEXT_SUMMARY> compaction boundary
+      - Estimated backpack token weight carried on every main-chat turn
+      - Backpack classification ('LIGHT', 'MODERATE', 'HEAVY') and Contract-First Coding Split directive
+    """
+    b_dir = Path(brain_dir) if brain_dir else (GEMINI_DIR / "antigravity" / "brain")
+    default_res = {
+        "conversation_id": cid,
+        "total_steps": 0,
+        "uncompacted_steps": 0,
+        "uncompacted_turns": 0,
+        "backpack_tokens": 0,
+        "backpack_state": "LIGHT",
+        "coding_split_strategy": "DIRECT_ARGON (Backpack light: execute coupled & single-file edits directly in main chat on Gemini 4 Argon)",
+    }
+    if not b_dir.exists():
+        return default_res
+
+    t_file: Optional[Path] = None
+    resolved_cid = cid
+    if cid:
+        cand = b_dir / cid / ".system_generated" / "logs" / "transcript.jsonl"
+        if cand.exists():
+            t_file = cand
+    if t_file is None:
+        newest_mtime = -1.0
+        for folder in b_dir.iterdir():
+            if not folder.is_dir() or folder.name == "tempmediaStorage":
+                continue
+            cand = folder / ".system_generated" / "logs" / "transcript.jsonl"
+            if cand.exists():
+                try:
+                    mt = cand.stat().st_mtime
+                    if mt > newest_mtime:
+                        newest_mtime = mt
+                        t_file = cand
+                        resolved_cid = folder.name
+                except OSError:
+                    continue
+
+    if t_file is None or not t_file.exists():
+        return default_res
+
+    total_steps = 0
+    uncompacted_steps = 0
+    uncompacted_turns = 0
+    active_chars = 0
+
+    try:
+        with open(t_file, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                total_steps += 1
+                if "<CONTEXT_SUMMARY>" in line and '"USER_INPUT"' in line:
+                    uncompacted_steps = 1
+                    uncompacted_turns = 0
+                    active_chars = min(len(line), 24000)
+                else:
+                    uncompacted_steps += 1
+                    active_chars += min(len(line), 16000)
+                    if '"PLANNER_RESPONSE"' in line or '"source": "MODEL"' in line or '"source":"MODEL"' in line:
+                        uncompacted_turns += 1
+    except Exception:
+        return default_res
+
+    backpack_tokens = max(1200, active_chars // 4)
+    if uncompacted_steps >= 75 or backpack_tokens >= 60000:
+        b_state = "HEAVY"
+        strategy = (
+            f"FRESH_ARGON_SPLIT (Backpack HEAVY: ~{backpack_tokens:,} tokens/turn across {uncompacted_steps} uncompacted steps! "
+            "Keep interfaces & coupled logic in main chat, delegate isolated module/test files to invoke_subagent(TypeName='self', Model='pro') "
+            "for 100% Argon coding in a fresh 0-token context, and run 'skillsdb ast-map <files>' before multi-file edits)"
+        )
+    elif uncompacted_steps >= 35 or backpack_tokens >= 28000:
+        b_state = "MODERATE"
+        strategy = (
+            f"AST_CONTRACT_FIRST (Backpack MODERATE: ~{backpack_tokens:,} tokens/turn across {uncompacted_steps} steps. "
+            "Run 'skillsdb ast-map <files>' for exact Lstart-Lend signatures before reading/editing multiple files)"
+        )
+    else:
+        b_state = "LIGHT"
+        strategy = (
+            f"DIRECT_ARGON (Backpack LIGHT: ~{backpack_tokens:,} tokens/turn across {uncompacted_steps} steps. "
+            "Execute coupled and single-file edits directly in main chat on Gemini 4 Argon)"
+        )
+
+    return {
+        "conversation_id": resolved_cid,
+        "total_steps": total_steps,
+        "uncompacted_steps": uncompacted_steps,
+        "uncompacted_turns": uncompacted_turns,
+        "backpack_tokens": backpack_tokens,
+        "backpack_state": b_state,
+        "coding_split_strategy": strategy,
+    }
+
+
 def get_ledger_24h_summary(db_path: Path = DB_PATH) -> Dict[str, Any]:
     """Queries quota_ledger for external 24h request counts and cumulative Antigravity savings."""
     summary = {
@@ -1421,6 +1950,7 @@ def get_ledger_24h_summary(db_path: Path = DB_PATH) -> Dict[str, Any]:
         "aistudio_24h_requests": 0,
         "web_24h_handovers": 0,
         "subagent_24h_rewrites": 0,
+        "ast_map_24h_calls": 0,
         "saved_agy_tokens_24h": 0,
         "saved_agy_turns_24h": 0,
         "saved_agy_tokens_total": 0,
@@ -1452,6 +1982,8 @@ def get_ledger_24h_summary(db_path: Path = DB_PATH) -> Dict[str, Any]:
                     summary["web_24h_handovers"] += cnt
                 elif p_name == "agy_subagent_rewrite":
                     summary["subagent_24h_rewrites"] += cnt
+                elif p_name == "local_ast_map":
+                    summary["ast_map_24h_calls"] += cnt
                 summary["saved_agy_tokens_24h"] += s_tok
                 summary["saved_agy_turns_24h"] += s_turns
 
@@ -1482,13 +2014,14 @@ def compute_routing_decision(
       1. Account quota tier ('ultra' or 'pro' exclusively)
       2. Active Antigravity model family & internal pool (1A, 1B, 1C, 1D)
       3. Active reasoning effort level ('fast', 'medium', 'high')
-      4. Rolling 5-hour Antigravity load and 24-hour external pool budgets
+      4. Rolling 5-hour Antigravity load, Context Backpack weight, and 24-hour external pool budgets
     """
     state = detect_model_and_pool(cid=cid, db_path=db_path, model_name_hint=model_name_hint)
     account_tier = "ultra" if state["account_tier"] == "ultra" else "pro"
     budget = ACCOUNT_TIER_BUDGETS[account_tier]
 
     rolling_5h = scan_rolling_5h_antigravity_usage(brain_dir=brain_dir)
+    backpack = measure_session_backpack(cid=cid, brain_dir=brain_dir)
     ledger_24h = get_ledger_24h_summary(db_path=db_path)
     ext_pools = detect_external_pools(db_path=db_path)
 
@@ -1515,10 +2048,10 @@ def compute_routing_decision(
         else:
             effective_mode = "balanced"
 
-    # Dynamic digest line threshold (tighter when High effort or Golden Ratio / Shield is active)
-    if effective_mode == "shield":
+    # Dynamic digest line threshold (tighter when High effort, Heavy Backpack, or Golden Ratio / Shield is active)
+    if effective_mode == "shield" or backpack["backpack_state"] == "HEAVY":
         digest_line_threshold = min(100, budget["digest_line_threshold_golden_ratio"])
-    elif effective_mode == "golden_ratio":
+    elif effective_mode == "golden_ratio" or backpack["backpack_state"] == "MODERATE":
         digest_line_threshold = budget["digest_line_threshold_golden_ratio"]
     elif active_effort == EFFORT_HIGH:
         digest_line_threshold = budget["digest_line_threshold_high_effort"]
@@ -1538,11 +2071,15 @@ def compute_routing_decision(
 
     # Golden Ratio step-by-step coding & quota optimization advice
     degradation_advice = ""
-    if load_pct >= budget["golden_ratio_pct"]:
+    if load_pct >= budget["golden_ratio_pct"] or backpack["backpack_state"] == "HEAVY":
         claude_turns = rolling_5h["pools"][POOL_AGY_CLAUDE]["turns"]
         steps_advice = [
             "Coding Guarantee: Keep 100% of code generation on Gemini 4 Argon (never Flash)"
         ]
+        if backpack["backpack_state"] == "HEAVY":
+            steps_advice.append(
+                f"Backpack Guard ({backpack['uncompacted_steps']} steps, ~{backpack['backpack_tokens']:,} tok/turn): Use 'skillsdb ast-map <files>' for signatures and delegate isolated module/test coding to fresh invoke_subagent(TypeName='self', Model='pro')"
+            )
         if active_effort == EFFORT_HIGH and EFFORT_MEDIUM in state["supported_efforts"]:
             steps_advice.append(
                 f"Step 1 (Golden Ratio >= 62%): Switch {state['model_family']} Effort High (3.5x) -> Medium (2.2x) for standard coding (-37% burn, same Argon quality)"
@@ -1563,6 +2100,7 @@ def compute_routing_decision(
         "subagent_research_model": subagent_research_model,
         "subagent_general_model": subagent_general_model,
         "rolling_5h": rolling_5h,
+        "backpack": backpack,
         "load_pct_5h": load_pct,
         "soft_limit_5h_units": soft_limit,
         "pool_5h_units": pool_5h_units,
@@ -1578,6 +2116,7 @@ def format_hook_routing_banner(decision: Dict[str, Any]) -> str:
     """Formats a compact, high-signal routing directive banner for PreInvocation hook injection."""
     st = decision["state"]
     r5 = decision["rolling_5h"]
+    bp = decision["backpack"]
     l24 = decision["ledger_24h"]
     ext = decision["external_pools"]
 
@@ -1587,8 +2126,9 @@ def format_hook_routing_banner(decision: Dict[str, Any]) -> str:
     lines = [
         f"[SKILLSDB MULTI-POOL QUOTA ROUTER: Account={decision['account_tier'].upper()} | Mode={decision['effective_mode'].upper()} | Active={st['model_name']} (Pool={st['pool']}, Weight={st['quota_weight']}x)]",
         f"  * 5h Antigravity Window: {r5['total_turns']} turns ({r5['total_weighted_units']:.1f}/{decision['soft_limit_5h_units']:.0f} weighted units, {decision['load_pct_5h']:.0f}%) | Pool 1A Argon: {r5['pools'][POOL_AGY_GEMINI_HIGH]['turns']}t | Pool 1B Flash: {r5['pools'][POOL_AGY_GEMINI_FAST]['turns']}t | Pool 1C Claude: {r5['pools'][POOL_AGY_CLAUDE]['turns']}t | Pool 1D GPT-OSS: {r5['pools'][POOL_AGY_OPEN_WEIGHT]['turns']}t",
+        f"  * Session Context Backpack: {bp['backpack_state']} (~{bp['backpack_tokens']:,} tok/turn, {bp['uncompacted_steps']} uncompacted steps) -> Strategy: {bp['coding_split_strategy']}",
         f"  * External Gemini Pools (24h): Pool 2 CLI-OAuth={cli_state} ({l24['cli_24h_requests']}/{decision['cli_daily_limit']} RPD) | Pool 3 AIStudio-API={api_state} ({l24['aistudio_24h_requests']}/{decision['aistudio_daily_limit']} RPD) | Saved: ~{l24['saved_agy_tokens_total']:,} AGY tokens ({l24['saved_agy_turns_total']} turns)",
-        f"  * Golden Ratio Policy: 100% Argon/Claude for Coding (TypeName='self' -> '{decision['subagent_general_model']}'). Read-only 'research' subagents -> Model='{decision['subagent_research_model']}' (max {decision['max_workers']} workers). Offload read-only files > {decision['digest_line_threshold']} lines via 'skillsdb gemini-digest'.",
+        f"  * Golden Ratio Policy: 100% Argon/Claude for Coding (TypeName='self' -> '{decision['subagent_general_model']}'). Read-only 'research' subagents -> Model='{decision['subagent_research_model']}' (max {decision['max_workers']} workers). Offload read-only files > {decision['digest_line_threshold']} lines via 'skillsdb gemini-digest' or 'skillsdb ast-map <files>'.",
     ]
     if decision["degradation_advice"]:
         lines.append(f"  * Quota Optimization Advice: {decision['degradation_advice']}")
@@ -2053,6 +2593,58 @@ def ingest_web_response(
     }
 
 
+def execute_ast_map(
+    files: List[str],
+    symbol_filter: Optional[str] = None,
+    include_private: bool = True,
+    save_fact_key: Optional[str] = None,
+    project_root: Optional[Path] = None,
+    db_path: Path = DB_PATH,
+) -> Dict[str, Any]:
+    """
+    Executes multi-file AST Contract & Line-Offset extraction, records token savings in
+    quota_ledger (pool='local_ast_map'), and optionally persists the contract map in .agents/memory.db.
+    """
+    res = extract_ast_contract_map(
+        files=files,
+        symbol_filter=symbol_filter,
+        include_private=include_private,
+    )
+    if not res.get("success"):
+        return res
+
+    record_quota_ledger_entry(
+        pool="local_ast_map",
+        execution_tier="pro",
+        model_used="python-ast-contract-mapper",
+        effort_level="medium",
+        input_tokens=res["raw_tokens"],
+        output_tokens=res["map_tokens"],
+        saved_agy_tokens=res["saved_agy_tokens"],
+        saved_agy_turns=res["saved_agy_turns"],
+        latency_ms=res["latency_ms"],
+        status="ok",
+        task_summary=f"ast-map ({res['file_count']} files): {', '.join(res['files_mapped'][:5])}",
+        db_path=db_path,
+    )
+
+    if save_fact_key:
+        try:
+            from ..memory.project_memory import get_project_connection, find_project_root, mem_save_fact
+            target_root = Path(project_root) if project_root else find_project_root()
+            pconn = get_project_connection(target_root)
+            try:
+                compact_fact = re.sub(r"\s+", " ", res["contract_map"]).strip()[:700]
+                mem_save_fact(pconn, save_fact_key, compact_fact, reason="Auto-saved via skillsdb ast-map")
+            finally:
+                pconn.close()
+        except Exception:
+            pass
+
+    res["saved_fact_key"] = save_fact_key
+    return res
+
+
 def print_quota_status(as_json: bool = False, cid: str = None, db_path: Path = DB_PATH):
     """Displays the comprehensive 4-Pool & 13-Model/Effort Quota Router Dashboard."""
     decision = compute_routing_decision(cid=cid, db_path=db_path)
@@ -2062,6 +2654,7 @@ def print_quota_status(as_json: bool = False, cid: str = None, db_path: Path = D
 
     st = decision["state"]
     r5 = decision["rolling_5h"]
+    bp = decision["backpack"]
     l24 = decision["ledger_24h"]
     ext = decision["external_pools"]
 
@@ -2072,6 +2665,10 @@ def print_quota_status(as_json: bool = False, cid: str = None, db_path: Path = D
     eff_list = " / ".join(e.capitalize() for e in st["supported_efforts"])
     print(f"Reasoning Effort:     {st['effort_level'].upper()} (Supported: {eff_list} | Quota Weight: {st['quota_weight']}x)")
     print(f"Detection Source:     {st['source']}")
+
+    print("\n--- Session Context Backpack & Contract-First Coding Split ---")
+    print(f"  Backpack State:     {bp['backpack_state']} (~{bp['backpack_tokens']:,} tokens/turn | {bp['uncompacted_steps']} uncompacted steps, {bp['uncompacted_turns']} turns)")
+    print(f"  Coding Split Rule:  {bp['coding_split_strategy']}")
 
     print("\n--- Pool 1: Antigravity Internal 5-Hour Rolling Window ---")
     print(f"  Total 5h Activity:  {r5['total_turns']} turns ({r5['total_weighted_units']:.1f} / {decision['soft_limit_5h_units']:.0f} weighted units -> {decision['load_pct_5h']:.1f}%)")
@@ -2091,7 +2688,8 @@ def print_quota_status(as_json: bool = False, cid: str = None, db_path: Path = D
 
     print("\n--- Active Routing Thresholds & Measured Offload Savings ---")
     print(f"  * Context-Shield Digest Threshold: > {decision['digest_line_threshold']} lines -> 'skillsdb gemini-digest --files <paths> --query \"...\"'")
-    print(f"  * Subagent PreToolUse Overwrite:   research -> Model='{decision['subagent_research_model']}' | general -> Model='{decision['subagent_general_model']}'")
+    print(f"  * AST Contract Mapper:             'skillsdb ast-map <files>' ({l24.get('ast_map_24h_calls', 0)} maps in 24h)")
+    print(f"  * Subagent PreToolUse Overwrite:   research -> Model='{decision['subagent_research_model']}' | coding (self) -> Model='{decision['subagent_general_model']}'")
     print(f"  * 24h Antigravity Quota Saved:     ~{l24['saved_agy_tokens_24h']:,} tokens ({l24['saved_agy_turns_24h']} turns avoided, {l24['subagent_24h_rewrites']} subagent rewrites)")
     print(f"  * All-Time Offload Quota Saved:    ~{l24['saved_agy_tokens_total']:,} tokens ({l24['saved_agy_turns_total']} turns avoided)")
     if decision["degradation_advice"]:
@@ -3256,119 +3854,6 @@ def handle_pre_tool_guardrail_hook():
 
 
 # =====================================================================
-# SECTION: skillsdb.core.fim
-# =====================================================================
-def slice_fim(
-    file_path: Path,
-    target_line: int,
-    prefix_lines: int = 25,
-    suffix_lines: int = 25
-) -> Dict[str, Any]:
-    """
-    Extracts a surgical Fill-in-the-Middle window around a target line.
-    Returns prefix lines, suffix lines, full file token count, and sliced token count.
-    """
-    fpath = Path(file_path)
-    if not fpath.exists() or not fpath.is_file():
-        raise FileNotFoundError(f"File not found: {file_path}")
-
-    content = fpath.read_text(encoding="utf-8", errors="replace")
-    all_lines = content.splitlines(keepends=True)
-    total_lines = len(all_lines)
-
-    # 1-indexed target line adjusted to 0-index
-    prefix_lines = max(0, prefix_lines)
-    suffix_lines = max(0, suffix_lines)
-    t_idx = max(0, min(total_lines - 1 if total_lines else 0, target_line - 1))
-
-    prefix_start = max(0, t_idx - prefix_lines)
-    suffix_end = min(total_lines, t_idx + suffix_lines + 1)
-
-    prefix_chunk = "".join(all_lines[prefix_start:t_idx])
-    target_line_content = all_lines[t_idx] if total_lines > 0 else ""
-    suffix_chunk = "".join(all_lines[t_idx + 1:suffix_end])
-
-    full_tokens = estimate_tokens(content)
-    sliced_tokens = estimate_tokens(prefix_chunk + target_line_content + suffix_chunk)
-    tokens_saved = max(0, full_tokens - sliced_tokens)
-
-    return {
-        "file": str(fpath),
-        "target_line": (t_idx + 1) if total_lines > 0 else 0,
-        "prefix_start_line": (prefix_start + 1) if total_lines > 0 else 0,
-        "prefix_end_line": max(prefix_start + 1, t_idx) if total_lines > 0 else 0,
-        "suffix_start_line": min(suffix_end, t_idx + 2) if total_lines > 0 else 0,
-        "suffix_end_line": suffix_end,
-        "total_file_lines": total_lines,
-        "prefix": prefix_chunk,
-        "middle": target_line_content,
-        "target_line_content": target_line_content,
-        "suffix": suffix_chunk,
-        "full_file_tokens": full_tokens,
-        "sliced_tokens": sliced_tokens,
-        "tokens_saved": tokens_saved,
-    }
-
-
-def slice_fim_symbol(
-    file_path: Path,
-    symbol_name: str,
-    prefix_lines: int = 20,
-    suffix_lines: int = 20
-) -> Dict[str, Any]:
-    """
-    Finds the definition line of a symbol (function, class, variable) and slices the FIM window.
-    """
-    fpath = Path(file_path)
-    if not fpath.exists() or not fpath.is_file():
-        raise FileNotFoundError(f"File not found: {file_path}")
-
-    content = fpath.read_text(encoding="utf-8", errors="replace")
-    all_lines = content.splitlines()
-
-    # Search for def, async def, class, func, fn, struct, enum, const, let, var symbol patterns
-    pat = re.compile(rf"\b(?:(?:async\s+)?def|class|function|func|fn|struct|enum|var|let|const|val|interface|type)\s+{re.escape(symbol_name)}\b")
-    match_line = None
-
-    for idx, line in enumerate(all_lines, 1):
-        if pat.search(line):
-            match_line = idx
-            break
-
-    if match_line is None:
-        # Fallback to direct symbol substring search
-        for idx, line in enumerate(all_lines, 1):
-            if symbol_name in line:
-                match_line = idx
-                break
-
-    if match_line is None:
-        raise ValueError(f"Symbol '{symbol_name}' not found in {file_path}")
-
-    res = slice_fim(fpath, match_line, prefix_lines=prefix_lines, suffix_lines=suffix_lines)
-    res["symbol"] = symbol_name
-    return res
-
-
-def format_fim_block(fim_dict: Dict[str, Any]) -> str:
-    """Formats FIM slices into standard Codestral-style <fim_prefix>, <fim_suffix> blocks."""
-    lines = [
-        f"=== CODESTRAL FIM SLICE: {fim_dict['file']} ===",
-        f"Target Line: {fim_dict['target_line']} | Lines {fim_dict['prefix_start_line']}-{fim_dict['suffix_end_line']} of {fim_dict['total_file_lines']}",
-        f"Token Compression: {fim_dict['sliced_tokens']} tokens (~{fim_dict['tokens_saved']} tokens saved, -{(fim_dict['tokens_saved'] / max(1, fim_dict['full_file_tokens']) * 100):.1f}%)",
-        "",
-        "<fim_prefix>",
-        fim_dict["prefix"].rstrip(),
-        "<fim_suffix>",
-        fim_dict["suffix"].rstrip(),
-        "<fim_middle>",
-        f"# Target line to refactor/replace: {fim_dict['target_line_content'].strip()}",
-        "===============================================",
-    ]
-    return "\n".join(lines)
-
-
-# =====================================================================
 # SECTION: skillsdb.memory.writer_queue
 # =====================================================================
 # Map of db_path -> WriterQueue instance
@@ -3902,9 +4387,22 @@ TOOLS_REGISTRY = [
             "properties": {
                 "files": {"type": "array", "items": {"type": "string"}, "description": "File paths or globs to digest"},
                 "query": {"type": "string", "description": "Analysis question or extraction instruction"},
-                "tier": {"type": "string", "description": "Execution tier: auto, ultra, pro, or lite"}
+                "tier": {"type": "string", "description": "Execution tier: auto, ultra, or pro"}
             },
             "required": ["query"]
+        }
+    },
+    {
+        "name": "skillsdb_ast_map",
+        "description": "Extract a multi-file AST Contract & Line-Offset Map (classes, functions, signatures, and exact Lstart-Lend ranges) at ~95% token compression before editing.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "files": {"type": "array", "items": {"type": "string"}, "description": "File paths or globs to map"},
+                "symbol_filter": {"type": "string", "description": "Optional substring filter for class/function names"},
+                "save_fact_key": {"type": "string", "description": "Optional fact key to persist in .agents/memory.db"}
+            },
+            "required": ["files"]
         }
     }
 ]
@@ -4015,6 +4513,14 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> str:
                 files=args.get("files") or [],
                 query=args.get("query") or "Summarize key findings and line numbers.",
                 execution_tier=args.get("tier") or "auto",
+            )
+            return json.dumps(res, indent=2)
+
+        elif name == "skillsdb_ast_map":
+            res = execute_ast_map(
+                files=args.get("files") or [],
+                symbol_filter=args.get("symbol_filter"),
+                save_fact_key=args.get("save_fact_key"),
             )
             return json.dumps(res, indent=2)
 
@@ -10524,16 +11030,25 @@ def build_parser() -> argparse.ArgumentParser:
     mem_prune_parser.add_argument("--project", default=None, help="Project root directory (optional)")
 
     # Model Profile & Multi-Pool Quota Router Commands
-    profile_parser = subparsers.add_parser("profile", help="View or configure model tier, account quota tier (ultra/pro/lite), effort level (fast/medium/high), and routing mode")
+    profile_parser = subparsers.add_parser("profile", help="View or configure model tier, account quota tier (ultra/pro), effort level (fast/medium/high), and routing mode")
     profile_parser.add_argument("action", nargs="?", default="get", choices=["get", "set", "auto"], help="Profile action (default: get)")
     profile_parser.add_argument("tier", nargs="?", default=None, help="Model tier when action is 'set' (ultra, pro, lite, standard, lean, local, offline, auto)")
-    profile_parser.add_argument("--account-tier", default=None, choices=["ultra", "pro", "lite", "auto"], help="Set subscription account quota tier (ultra, pro, lite, auto)")
+    profile_parser.add_argument("--account-tier", default=None, choices=["ultra", "pro", "lite", "auto"], help="Set subscription account quota tier (ultra, pro, auto)")
     profile_parser.add_argument("--effort", default=None, choices=["fast", "medium", "high", "auto"], help="Set reasoning effort override (fast, medium, high, auto)")
-    profile_parser.add_argument("--mode", default=None, choices=["auto", "balanced", "shield", "conserve", "turbo", "direct"], help="Set quota router operating mode")
+    profile_parser.add_argument("--mode", default=None, choices=["auto", "balanced", "golden_ratio", "shield", "conserve", "turbo", "direct"], help="Set quota router operating mode")
     profile_parser.add_argument("--api-key", default=None, help="Configure Google AI Studio GEMINI_API_KEY in runtime_config (or 'clear' to remove)")
 
-    quota_parser = subparsers.add_parser("quota-status", aliases=["quota"], help="Display 4-pool quota router status, 13-model effort matrix, 5h/24h usage, and offload savings")
+    quota_parser = subparsers.add_parser("quota-status", aliases=["quota"], help="Display 4-pool quota router status, 13-model effort matrix, Context Backpack, and offload savings")
     quota_parser.add_argument("--json", action="store_true", help="Output full routing telemetry as JSON")
+
+    ast_map_parser = subparsers.add_parser("ast-map", help="Extract multi-file AST Contract & Line-Offset Map (Lstart-Lend) at ~95%% token compression before coding")
+    ast_map_parser.add_argument("files", nargs="*", default=None, help="File paths or glob patterns to map")
+    ast_map_parser.add_argument("--files", "-f", dest="opt_files", nargs="+", default=None, help="File paths or glob patterns (flag alias)")
+    ast_map_parser.add_argument("--filter", "-s", default=None, help="Optional symbol/class/function substring filter")
+    ast_map_parser.add_argument("--public-only", action="store_true", help="Exclude private (_prefixed) functions and methods")
+    ast_map_parser.add_argument("--save-fact", default=None, help="Optional fact key to persist the contract map directly into .agents/memory.db")
+    ast_map_parser.add_argument("--project", default=None, help="Project root directory (optional)")
+    ast_map_parser.add_argument("--json", action="store_true", help="Output contract map as JSON")
 
     digest_parser = subparsers.add_parser("gemini-digest", help="Offload large file, log, or git diff analysis to external Gemini pools (Context Shield)")
     digest_parser.add_argument("--files", "-f", nargs="+", default=None, help="File paths or glob patterns to digest")
@@ -11033,6 +11548,27 @@ def main(argv: list[str] = None):
                 get_profile(db_path=DB_PATH)
         elif args.command in ("quota-status", "quota"):
             print_quota_status(as_json=getattr(args, "json", False), db_path=DB_PATH)
+        elif args.command == "ast-map":
+            proj_p = Path(args.project) if getattr(args, "project", None) else None
+            target_files = list(getattr(args, "files", None) or []) + list(getattr(args, "opt_files", None) or [])
+            res = execute_ast_map(
+                files=target_files,
+                symbol_filter=getattr(args, "filter", None),
+                include_private=not getattr(args, "public_only", False),
+                save_fact_key=getattr(args, "save_fact", None),
+                project_root=proj_p,
+                db_path=DB_PATH,
+            )
+            if getattr(args, "json", False):
+                print(json.dumps(res, indent=2))
+            elif not res.get("success"):
+                print(f"Error: {res.get('error', 'ast-map failed')}")
+                sys.exit(1)
+            else:
+                print(f"\n=== AST CONTRACT & LINE-OFFSET MAP ({res['file_count']} files, {res['total_lines']} lines) ===")
+                print(f"Token Compression: ~{res['raw_tokens']:,} raw tokens -> ~{res['map_tokens']:,} tokens (-{res['compression_pct']}%, saved ~{res['saved_agy_tokens']:,} AGY tokens in {res['latency_ms']} ms)\n")
+                print(res["contract_map"])
+                print("\n===========================================================================\n")
         elif args.command == "gemini-digest":
             proj_p = Path(args.project) if getattr(args, "project", None) else None
             res = execute_gemini_digest(
