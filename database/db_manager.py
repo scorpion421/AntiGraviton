@@ -1894,20 +1894,24 @@ def measure_session_backpack(cid: str = None, brain_dir: Path = None) -> Dict[st
     uncompacted_steps = 0
     uncompacted_turns = 0
     active_chars = 0
+    cutoff_iso = (datetime.now(timezone.utc) - timedelta(hours=5.0)).strftime("%Y-%m-%dT%H:%M:%S")
 
     try:
         with open(t_file, "r", encoding="utf-8", errors="ignore") as f:
             for line in f:
                 total_steps += 1
-                if "<CONTEXT_SUMMARY>" in line and '"USER_INPUT"' in line:
+                if "<CONTEXT_SUMMARY>" in line:
                     uncompacted_steps = 1
                     uncompacted_turns = 0
                     active_chars = min(len(line), 24000)
-                else:
-                    uncompacted_steps += 1
-                    active_chars += min(len(line), 16000)
-                    if '"PLANNER_RESPONSE"' in line or '"source": "MODEL"' in line or '"source":"MODEL"' in line:
-                        uncompacted_turns += 1
+                    continue
+                m_ts = re.search(r'"created_at"\s*:\s*"([^"]+)"', line)
+                if m_ts and m_ts.group(1) < cutoff_iso:
+                    continue
+                uncompacted_steps += 1
+                active_chars += min(len(line), 8000)
+                if '"PLANNER_RESPONSE"' in line or '"source": "MODEL"' in line or '"source":"MODEL"' in line:
+                    uncompacted_turns += 1
     except Exception:
         return default_res
 
