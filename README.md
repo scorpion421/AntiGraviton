@@ -34,10 +34,10 @@
 It bundles two tightly integrated systems into a single repository and installer:
 
 1. **SkillsDB context and memory engine (`v4.0.1`)**:
-   - **Multi-pool Golden-Ratio (`61.8%` / `85.0%`) agent control plane**: Governs `Ultra` (16 parallel reader threads) and `Pro` (8 parallel reader threads) coding subscriptions across all 4 quota pools (`Pool 1A: Gemini 4 Argon [Fast|Med|High]`, `Pool 1B: Gemini 3.8 Flash [Fast|Med|High]`, `Pool 1C: Claude Opus/Sonnet 5.5 [Fast|Med|High]`, `Pool 1D: GPT-OSS 120B [Medium]`, `Pool 2: @google/gemini-cli`, `Pool 3: AI Studio REST`, `Pool 4: gemini.google.com`), keeping 100% of code generation on `Gemini 4 Argon` (or `Claude 5.5`) while routing `research` subagents to `Flash` at zero extra turns via `PreToolUse` overwrite.
-   - **Multi-file AST contract mapper (`skillsdb ast-map`) and Context-Shield (`skillsdb gemini-digest`)**: Extracts exact class, method, and function signatures with `[Lstart-Lend]` line boundaries at ~95-98% token compression in ~50-70ms before editing, and offloads large log/diff digests so raw search noise never bloats the main conversation window.
-   - **On-demand micro-skill routing**: Replaces static plugin prompt bloat (~35,000 tokens/turn) with a compact (~450 token) routing directive, Antigravity `v2.28.0+` Turn-1 prompt pre-routing, and surgical SQLite FTS5 micro-skill retrieval (`--summary`, `--section`).
-   - **Persistent episodic project memory (`.agents/memory.db`)**: Automatically records structural file/offset facts (`mem-save-fact`), multi-step work items (`mem-task-add`), architectural decisions, and milestone snapshots (`mem-save-snapshot`), and re-hydrates them every 50 steps so mid-session IDE `<CONTEXT_SUMMARY>` compactions never cause the model to re-read files repeatedly.
+   - **Multi-pool Golden-Ratio (`61.8%` / `85.0%`) agent control plane**: Governs `Ultra` (16 parallel reader threads) and `Pro` (8 parallel reader threads) coding subscriptions across all 4 quota pools (`Pool 1A: Gemini 4 Argon [Fast|Med|High]`, `Pool 1B: Gemini 3.8 Flash [Fast|Med|High]`, `Pool 1C: Claude Opus/Sonnet 5.5 [Fast|Med|High]`, `Pool 1D: GPT-OSS 120B [Medium]`, `Pool 2: @google/gemini-cli`, `Pool 3: AI Studio REST`, `Pool 4: gemini.google.com`), keeping 100% of code generation on `Gemini 4 Argon` (or `Claude 5.5`) while routing `research` subagents to `Flash` at zero extra turns via `PreToolUse` overwrite. Includes live 5-hour server-percentage calibration (`--calibrate-pct` / `--reset-calibration`), context-size turn weighting (`1.0x..1.35x`), and cross-workstation heartbeat sync (`quota_workstation_heartbeats`).
+   - **Decorator-aware AST contract mapper (`skillsdb ast-map`), surgical FIM slicer (`skillsdb fim slice`), and Context-Shield (`skillsdb gemini-digest`)**: Extracts exact class, method, and function signatures with `[Lstart-Lend]` line boundaries across Python (including `@decorator` spans, conditional `if`/`try`/`with` top-level blocks, and `ClassName.method_name` resolution) and 9 additional languages (TypeScript/JavaScript, PowerShell, Go, Rust, C#, Java, Kotlin, Dart, and SQL via `_find_block_end_line`) at ~95-98% token compression in ~50-70ms before editing, offloads large log/diff digests, and keeps hook latency `< 5-30 ms` on multi-megabyte transcripts via `O(1)` binary `SEEK_END` tail-seeks (`read_jsonl_tail_lines`).
+   - **On-demand micro-skill routing and 15-tool `stdio` MCP server (`skillsdb mcp-serve`)**: Replaces static plugin prompt bloat (~35,000 tokens/turn) with a compact (~450 token) routing directive, Antigravity `v2.28.0+` Turn-1 prompt pre-routing, surgical SQLite FTS5 micro-skill retrieval (`--summary`, `--section`), and a zero-dependency 15-tool `stdio` MCP server.
+   - **Persistent episodic project memory (`.agents/memory.db`)**: Automatically records structural file/offset facts (`mem-save-fact`), returned `[SUBAGENT REPORT]` findings, multi-step work items (`mem-task-add`), architectural decisions, and milestone snapshots (`mem-save-snapshot`), and re-hydrates them every 50 steps so mid-session IDE `<CONTEXT_SUMMARY>` compactions never cause the model to re-read files repeatedly.
    - **Organic on-demand workspace learning and transcript inference**: Ships with zero hardcoded paths or credentials. Automatically learns project paths as you work (`mem-init`, `mem-save-fact`, `mem-save-snapshot`, `gitea-init`), discovers Antigravity IDE workspaces from `~/.gemini/config/projects/*.json` and `~/.gemini/antigravity/scratch`, and infers the active project root directly from `transcript.jsonl` file paths when no formal IDE folder is open (`workspacePaths: []`).
 2. **Antigravity Gitea local Windows service (`v1.1.2`)**:
    - **Standalone developer default (zero Active Directory dependency)**: Works out of the box on any Windows developer machine using your local Windows username (`$env:USERNAME`), automatically generating cryptographic config secrets, provisioning your local Gitea admin account, and binding a scoped API token into SkillsDB. Optional Active Directory (LDAP) and `User` vs. `User.adm` role separation can be enabled on demand at any time.
@@ -52,7 +52,10 @@ It bundles two tightly integrated systems into a single repository and installer
 | :--- | :--- | :--- | :--- |
 | **System and plugin context load** | ~35,000 tokens / turn | **~1,500 tokens / turn** | **~95% lower base overhead** |
 | **Token consumption (60-turn session, benchmarked on Gemini 4 Argon High)** | ~3.39M input tokens | **~0.83M input tokens** | **~75.5% total token savings (4x session capacity)** |
-| **Marathon deep-analysis sessions (9h / 1,249 turns / 3,175 steps)** | ~99% weekly quota (raw IDE) / 33% (`v1.4.2`) | **~12-14% weekly quota (`v1.5.5`)** | **~60% additional token savings via 800-line read budget, subagent firewall & 50-step `memory.db` re-hydration** |
+| **Marathon deep-analysis sessions (9h / 1,249 turns / 3,175 steps)** | ~99% weekly quota (raw IDE) / 33% (`v1.4.2`) | **~10-12% weekly quota (`v2.0.1`)** | **Golden-Ratio 4-pool control plane, 800-line read budget, subagent firewall & 50-step `memory.db` re-hydration** |
+| **Pre-edit symbol and signature discovery (`skillsdb ast-map` & `fim slice`)** | Full-file reads (`500-2,000` lines / call) | **~95-98% token compression in ~50 ms** | **Exact `[Lstart-Lend]` spans across Python (decorator-aware) & 9 languages without full-file reads** |
+| **Subagent routing and 5-hour rolling quota control (`quota_router.py`)** | `Model="inherit"` burns `Pool 1A` (`Argon High`, `3.5x`) on research | **0-turn `PreToolUse` `research -> flash` rewrite (`Pool 1B`, `0.35x`)** | **100% `Argon` / `Claude 5.5` for coding, `-90%` subagent quota weight, live `--calibrate-pct` & cross-PC heartbeat sync** |
+| **Hook latency on multi-MB transcripts (`> 2.4 MB` / `2,000+` steps)** | Sequential full-file JSONL scan (`200-500 ms` / step) | **`< 5-30 ms` via `O(1)` binary `SEEK_END` + stat cache** | **Zero hook slowdown in marathon sessions (`read_jsonl_tail_lines`, `_BACKPACK_CACHE`, `_TRANSCRIPT_5H_CACHE`)** |
 | **Context retention after `/compact` or mid-session `<CONTEXT_SUMMARY>`** | 0% (repeated file re-reading) | **100% automatic (`memory.db` + 50-step re-hydration)** | **Zero architectural or mid-session amnesia** |
 | **Backup and rollback granularity** | Manual commits only | **Every milestone automatically pushed (`< 0.5s`)** | **Zero code loss and instant Git history forensics** |
 | **Fileserver and network drop resilience** | Silent push failure | **3-tier SCM + agent auto-restart and catch-up sync** | **100% self-healing synchronization** |
@@ -105,6 +108,17 @@ Beyond providing persistent project memory and automated Gitea backups, **AntiGr
   - **Transcript-based workspace inference (`inferred_workspace`)**: When `workspacePaths` is empty, `handle_pre_invocation_hook()` inspects recent file paths in `transcript.jsonl` and automatically binds to the active project root (prioritizing directories containing `.agents/memory.db` or `.git`).
   - **50-step re-hydration and repeat-read circuit breaker**: Automatically re-injects `=== PROJECT MEMORY CONTEXT (Auto-Hydrated from .agents/memory.db) ===` every 50 steps and immediately triggers a `[PROJECT MEMORY ALERT]` whenever the same file is read `>= 3` times within 30 steps or fewer than 5 structural facts are indexed by step 25, enforcing immediate `skillsdb mem-save-fact` and `skillsdb mem-task-add` persistence.
 
+### H. Unmanaged 5-hour quota burn, blind full-file reads, and multi-megabyte transcript hook lag (`v2.0.0+` / `v2.0.1+`)
+* **The IDE behavior**:
+  1. By default, Antigravity's `invoke_subagent` tool sets `Model` to `"inherit"`. When the main coding agent runs on `Gemini 4 Argon High` (`3.5x` quota weight in `Pool 1A`), every read-only `research` subagent inherits `Argon High` unless explicitly overridden, rapidly draining the 5-hour rolling quota window on file searches.
+  2. Before editing a class or function in a large file (`> 250` lines), models frequently read hundreds of unrelated lines just to locate method signatures and line numbers, and when switching between Home and Enterprise workstations, local transcript counters have no awareness of server-side quota consumed on the other machine.
+  3. As a session grows past 1,500-2,500 steps (`> 2.4 MB` `transcript.jsonl`), scanning the full JSONL transcript on every `PreToolUse` and `PreInvocation` hook call introduces cumulative I/O latency.
+* **How AntiGraviton `v2.0.1` (`SkillsDB v4.0.1`) fixes it**:
+  - **Golden-Ratio (`61.8%` / `85.0%`) 4-pool control plane & 0-turn `PreToolUse` subagent router**: Automatically intercepts `invoke_subagent(TypeName="research")` in `PreToolUse` and rewrites `Model="inherit"` to `Model="flash"` (`Pool 1B`, `0.35x` weight) at zero extra turns while keeping 100% of code generation (`write_file`, `edit_file`, `TypeName="self"`) on `Gemini 4 Argon` (or `Claude 5.5`). Returned `[SUBAGENT REPORT]` file paths and line offsets are automatically persisted into `.agents/memory.db` on `PreInvocation`.
+  - **Live 5-hour quota calibration & cross-workstation heartbeat sync**: Combines context-size turn weighting (`1.0x..1.35x`), manual server-percentage anchoring (`skillsdb quota-status --calibrate-pct <0..100>` with linear 5-hour decay), and cross-workstation heartbeat merging (`runtime_config.quota_workstation_heartbeats` via `skillsdb sync`).
+  - **Decorator-aware AST contract mapper (`ast-map`), surgical FIM (`fim slice`), and Context-Shield (`gemini-digest`)**: Extracts `[Lstart-Lend]` symbol contracts across Python (including `@decorator` lines, `if`/`try`/`with` top-level blocks, and `ClassName.method_name` resolution) and 9 additional languages (`_find_block_end_line` for TS/JS, PowerShell, Go, Rust, C#, Java, Kotlin, Dart, and SQL) at `95-98%` token compression in `~50 ms`, enforced by an AST-first `PreToolUse` check on files `> 250` lines.
+  - **`O(1)` binary `SEEK_END` tail-seek (`read_jsonl_tail_lines`) & `(mtime_ns, size)` stat caching**: Replaces full-file JSONL scans with binary tail seeks and in-memory stat caches (`_BACKPACK_CACHE`, `_TRANSCRIPT_5H_CACHE`), keeping hook latency under `5-30 ms` regardless of transcript size.
+
 ---
 
 ## 4. One-prompt and one-command installation
@@ -153,12 +167,29 @@ AntiGraviton/
 |       `-- install-antigraviton/
 |           `-- SKILL.md           # Antigravity IDE 1-prompt onboarding skill
 |-- skillsdb/                      # Modular Python package source (v4.0.1)
-|   |-- config.py
-|   |-- schema.py
-|   |-- guardrails.py
-|   |-- cli.py
-|   |-- core/                      # Rules, micro-skills, FTS5 search, DPAPI credentials
-|   `-- memory/                    # Episodic project memory + self-healing Gitea sync
+|   |-- config.py                  # Paths, constants, and O(1) JSONL binary tail-seek
+|   |-- schema.py                  # SQLite WAL + FTS5 schema & migrations
+|   |-- guardrails.py              # Backwards-compatible guardrail shim
+|   |-- cli.py                     # Unified CLI entrypoint & subcommands
+|   |-- core/                      # Control plane, AST/FIM, quota router, guardrails, rules & skills
+|   |   |-- detector.py            # Subscription tier, model family & 4-pool quota detection
+|   |   |-- quota_router.py        # Golden-Ratio 5h router, calibration & cross-PC heartbeats
+|   |   |-- fim.py                 # Decorator-aware Python AST & 10-language [Lstart-Lend] mapper
+|   |   |-- gemini_offload.py      # Context-Shield (gemini-digest) external offload engine
+|   |   |-- guardrails.py          # PreInvocation & PreToolUse hooks (subagent rewrite & AST check)
+|   |   |-- rules.py               # Active rules, formatting checks & learned rule persistence
+|   |   |-- skills.py              # Micro-skill FTS5 search, prompt pre-routing & cluster loader
+|   |   |-- credentials.py         # DPAPI admin credentials & vault management
+|   |   |-- sync.py                # Cross-workstation database & heartbeat synchronization
+|   |   `-- doctor.py              # 9-point end-to-end control-plane & environment diagnostics
+|   |-- memory/                    # Episodic project memory + self-healing Gitea/GitHub sync
+|   |   |-- project_memory.py      # .agents/memory.db facts, tasks, snapshots & 50-step hydration
+|   |   `-- gitea_sync.py          # Automated Git/Gitea/GitHub sync & Keep a Changelog releases
+|   `-- platform/                  # IDE integration, 15-tool MCP server, plugins & UTF-8 manifests
+|       |-- mcp_server.py          # Native 15-tool stdio JSON-RPC MCP server
+|       |-- plugins.py             # Plugin bloat archiver & builtin skill synchronizer
+|       |-- utf8.py                # Windows UTF-8 manifest verification & auto-repair
+|       `-- workflows.py           # Legacy workflow-to-skill migration utilities
 |-- database/
 |   |-- customizations.db          # Sanitized central SQLite database (zero hardcoded paths)
 |   `-- db_manager.py              # Standalone compiled CLI manager
@@ -180,9 +211,10 @@ AntiGraviton/
 Once installed, `skillsdb` is globally available in your PATH and inside every Antigravity terminal:
 
 ```powershell
-# View database telemetry, 4-pool quota router status, and active runtime profile
+# View database telemetry, 4-pool quota router status, and live 5h calibration
 skillsdb stats
 skillsdb quota-status --calibrate-pct 50
+skillsdb quota-status --reset-calibration
 skillsdb profile
 
 # Extract multi-file AST contract map (Lstart-Lend) or FIM slice before coding
@@ -192,7 +224,8 @@ skillsdb fim slice "skillsdb/core/guardrails.py" --symbol "handle_pre_tool_guard
 # Offload large log, file, or git diff analysis (Context Shield)
 skillsdb gemini-digest --files "logs/*.log" --query "Summarize root cause and line numbers"
 
-# Run full 9-point system diagnostics & restore UTF-8 manifests after IDE updates
+# Start the native 15-tool stdio MCP server or run 9-point system diagnostics
+skillsdb mcp-serve
 skillsdb doctor
 skillsdb fix-utf8
 
@@ -236,7 +269,7 @@ Published release tags are immutable and never overwritten in place; every updat
 
 ## 8. License
 
-Copyright (C) 2026 `scorpion421` (`MickyFoley`).
+Copyright (C) 2026 `scorpion421`.
 
 **AntiGraviton** and **SkillsDB** are licensed under the **[GNU Affero General Public License v3.0 (AGPL-3.0-only) with Commons Clause License Condition v1.0](LICENSE)** (`AGPL-3.0-only WITH Commons-Clause-1.0`).
 - **Free & Open Source with Mandatory Attribution**: You are free to use, study, share, and modify this software for personal, educational, and internal non-commercial use with full attribution to the original author (`scorpion421`).
