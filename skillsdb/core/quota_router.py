@@ -1,6 +1,7 @@
 """
-SkillsDB v4.0.0 (AntiGraviton Suite v2.0.0) Multi-Pool Quota Router, Golden-Ratio (61.8% / 85.0%) Ultra/Pro Control Plane,
-Effort-Weighted 5h/24h Telemetry, Context-Backpack Detector, and External Gemini Context-Shield Offload Engine.
+SkillsDB v4.0.1 (AntiGraviton Suite v2.0.1) Multi-Pool Quota Router, Golden-Ratio (61.8% / 85.0%) Ultra/Pro Control Plane,
+Effort-Weighted 5h/24h Telemetry, Cross-Workstation Heartbeat Sync, Live Calibration Anchor, Context-Backpack Detector,
+and External Gemini Context-Shield Offload Engine.
 """
 
 import os
@@ -10,6 +11,7 @@ import glob
 import json
 import time
 import shutil
+import socket
 import sqlite3
 import subprocess
 import urllib.request
@@ -49,6 +51,10 @@ from .detector import (
     tier_to_display_label,
 )
 from .fim import extract_ast_contract_map
+
+# In-memory O(1) stat caches keyed by file path -> (mtime_ns, size, ...)
+_BACKPACK_CACHE: Dict[str, Tuple[int, int, Dict[str, Any]]] = {}
+_TRANSCRIPT_5H_CACHE: Dict[str, Tuple[int, int, int, Dict[str, Any]]] = {}
 
 
 ACCOUNT_TIER_BUDGETS = {
@@ -90,6 +96,20 @@ EXTERNAL_GEMINI_MODELS = {
         "api": "gemini-2.5-flash",
     },
 }
+
+
+def _resolve_workstation_id() -> str:
+    """Resolves the live runtime workstation hostname (never hardcoded)."""
+    env_ws = (os.environ.get("SKILLSDB_WORKSTATION_ID") or "").strip()
+    if env_ws:
+        return env_ws.upper()
+    try:
+        host = socket.gethostname().split(".")[0].strip()
+        if host:
+            return host.upper()
+    except Exception:
+        pass
+    return (os.environ.get("COMPUTERNAME") or "LOCAL").strip().upper()
 
 
 def _find_gemini_cli_binary() -> Optional[str]:
@@ -157,20 +177,363 @@ def detect_external_pools(db_path: Path = DB_PATH) -> Dict[str, Any]:
     }
 
 
-def scan_rolling_5h_antigravity_usage(brain_dir: Path = None, window_hours: float = 5.0) -> Dict[str, Any]:
+def _scan_single_transcript_5h(
+    t_file: Path,
+    cutoff_iso: str,
+    cutoff_minute_bucket: int,
+    settings_re: re.Pattern,
+    max_tail_bytes: int = 3145728,
+) -> Dict[str, Any]:
+    """
+    Scans a single transcript.jsonl for 5-hour model turns using O(1) binary tail-seek
+    and an in-memory (mtime_ns, size, cutoff_minute_bucket) cache.
+    """
+    key = str(t_file)
+    try:
+        st = t_file.stat()
+        mtime_ns = st.st_mtime_ns
+        fsize = st.st_size
+    except OSError:
+        return {"turns": 0, "weighted_units": 0.0, "subagent_spawns": 0, "pools": {}}
+
+    cached = _TRANSCRIPT_5H_CACHE.get(key)
+    if cached and cached[0] == mtime_ns and cached[1] == fsize and cached[2] == cutoff_minute_bucket:
+        return cached[3]
+
+    file_pools = {
+        POOL_AGY_GEMINI_HIGH: {"turns": 0, "weighted_units": 0.0, "models": {}},
+        POOL_AGY_GEMINI_FAST: {"turns": 0, "weighted_units": 0.0, "models": {}},
+        POOL_AGY_CLAUDE: {"turns": 0, "weighted_units": 0.0, "models": {}},
+        POOL_AGY_OPEN_WEIGHT: {"turns": 0, "weighted_units": 0.0, "models": {}},
+    }
+    f_turns = 0
+    f_weighted = 0.0
+    f_subagents = 0
+    active_spec = parse_antigravity_model_spec("Gemini 4 Argon (High)")
+
+    try:
+        with open(t_file, "rb") as bf:
+            if fsize > max_tail_bytes:
+                bf.seek(fsize - max_tail_bytes, os.SEEK_SET)
+                raw = bf.read(max_tail_bytes)
+                lines = raw.decode("utf-8", errors="ignore").splitlines()[1:]
+            else:
+                raw = bf.read()
+                lines = raw.decode("utf-8", errors="ignore").splitlines()
+
+        for line in lines:
+            if "<USER_SETTINGS_CHANGE>" in line and "Model Selection" in line:
+                for m_target in settings_re.findall(line):
+                    parsed = parse_antigravity_model_spec(m_target)
+                    if parsed:
+                        active_spec = parsed
+            if '"PLANNER_RESPONSE"' not in line and '"MODEL"' not in line:
+                continue
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            ts_str = str(d.get("created_at") or "")
+            if not ts_str or ts_str < cutoff_iso:
+                continue
+            src = d.get("source")
+            stype = d.get("type")
+            if src != "MODEL" and stype != "PLANNER_RESPONSE":
+                continue
+
+            pool_key = active_spec["pool"]
+            base_weight = float(active_spec["quota_weight"])
+            # Context-size multiplier: heavy turns with large tool/thinking payloads burn up to 1.35x base weight
+            ctx_mult = min(1.35, 1.0 + max(0, len(line) - 4000) / 80000.0)
+            weight = round(base_weight * ctx_mult, 2)
+            model_lbl = active_spec["model_name"]
+
+            if pool_key not in file_pools:
+                pool_key = POOL_AGY_GEMINI_HIGH
+            file_pools[pool_key]["turns"] += 1
+            file_pools[pool_key]["weighted_units"] = round(file_pools[pool_key]["weighted_units"] + weight, 2)
+            file_pools[pool_key]["models"][model_lbl] = file_pools[pool_key]["models"].get(model_lbl, 0) + 1
+
+            f_turns += 1
+            f_weighted = round(f_weighted + weight, 2)
+
+            for tc in (d.get("tool_calls") or []):
+                fn = (tc.get("name") or (tc.get("function") or {}).get("name") or "").lower()
+                if fn == "invoke_subagent":
+                    f_subagents += 1
+    except Exception:
+        pass
+
+    res = {
+        "turns": f_turns,
+        "weighted_units": f_weighted,
+        "subagent_spawns": f_subagents,
+        "pools": file_pools,
+    }
+    if len(_TRANSCRIPT_5H_CACHE) > 64:
+        _TRANSCRIPT_5H_CACHE.clear()
+    _TRANSCRIPT_5H_CACHE[key] = (mtime_ns, fsize, cutoff_minute_bucket, res)
+    return res
+
+
+def record_remote_workstation_heartbeat(
+    workstation_id: str,
+    turns: int,
+    weighted_units: float,
+    pool: str = POOL_AGY_GEMINI_HIGH,
+    subagent_spawns: int = 0,
+    updated_at: Optional[str] = None,
+    db_path: Path = DB_PATH,
+) -> None:
+    """
+    Persists or updates a workstation's 5-hour quota usage heartbeat in runtime_config
+    ('quota_workstation_heartbeats') so multi-workstation users (Home vs. Enterprise PC)
+    sharing or syncing customizations.db see unified 5-hour quota consumption.
+    """
+    if not db_path:
+        return
+    ws_clean = (workstation_id or "").strip().upper() or _resolve_workstation_id()
+    now_iso = updated_at or datetime.now(timezone.utc).isoformat()
+    try:
+        with managed_connection(Path(db_path), init_schema=True) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT value FROM runtime_config WHERE key = 'quota_workstation_heartbeats';")
+            row = cur.fetchone()
+            hb_map: Dict[str, Any] = {}
+            if row and row[0]:
+                try:
+                    loaded = json.loads(row[0])
+                    if isinstance(loaded, dict):
+                        hb_map = loaded
+                except Exception:
+                    hb_map = {}
+            hb_map[ws_clean] = {
+                "workstation_id": ws_clean,
+                "updated_at": now_iso,
+                "turns": int(turns),
+                "weighted_units": round(float(weighted_units), 2),
+                "pool": pool,
+                "subagent_spawns": int(subagent_spawns),
+            }
+            cur.execute(
+                "INSERT OR REPLACE INTO runtime_config (key, value, updated_at) VALUES ('quota_workstation_heartbeats', ?, ?);",
+                (json.dumps(hb_map), now_iso),
+            )
+    except Exception:
+        pass
+
+
+def _merge_and_sync_workstation_heartbeats(
+    local_summary: Dict[str, Any],
+    db_path: Optional[Path],
+    window_hours: float = 5.0,
+    persist_local: bool = True,
+) -> List[str]:
+    """
+    Merges active 5-hour usage heartbeats from other workstations stored in runtime_config
+    and optionally persists the current workstation's live 5h summary.
+    """
+    if not db_path or not Path(db_path).exists():
+        return []
+    current_ws = _resolve_workstation_id()
+    now_utc = datetime.now(timezone.utc)
+    now_iso = now_utc.isoformat()
+    remote_active: List[str] = []
+
+    try:
+        conn = get_connection(Path(db_path))
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT value FROM runtime_config WHERE key = 'quota_workstation_heartbeats';")
+            row = cur.fetchone()
+            hb_map: Dict[str, Any] = {}
+            if row and row[0]:
+                try:
+                    loaded = json.loads(row[0])
+                    if isinstance(loaded, dict):
+                        hb_map = loaded
+                except Exception:
+                    hb_map = {}
+
+            # 1. Merge remote workstations active within the rolling 5-hour window
+            for ws_key, entry in list(hb_map.items()):
+                if not isinstance(entry, dict):
+                    continue
+                ws_id = str(entry.get("workstation_id") or ws_key).strip().upper()
+                ts_raw = str(entry.get("updated_at") or "").strip()
+                if not ts_raw:
+                    continue
+                try:
+                    dt = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+                    age_hours = max(0.0, (now_utc - dt).total_seconds() / 3600.0)
+                except Exception:
+                    continue
+                if age_hours >= window_hours:
+                    continue
+                if ws_id == current_ws:
+                    continue
+
+                decay = max(0.0, (window_hours - age_hours) / window_hours)
+                rem_turns = max(0, int(round(int(entry.get("turns") or 0) * decay)))
+                rem_units = round(float(entry.get("weighted_units") or 0.0) * decay, 2)
+                rem_subs = max(0, int(round(int(entry.get("subagent_spawns") or 0) * decay)))
+                rem_pool = str(entry.get("pool") or POOL_AGY_GEMINI_HIGH)
+                if rem_pool not in local_summary["pools"]:
+                    rem_pool = POOL_AGY_GEMINI_HIGH
+
+                if rem_units > 0 or rem_turns > 0:
+                    local_summary["total_turns"] += rem_turns
+                    local_summary["total_weighted_units"] = round(local_summary["total_weighted_units"] + rem_units, 2)
+                    local_summary["subagent_spawns"] += rem_subs
+                    local_summary["pools"][rem_pool]["turns"] += rem_turns
+                    local_summary["pools"][rem_pool]["weighted_units"] = round(
+                        local_summary["pools"][rem_pool]["weighted_units"] + rem_units, 2
+                    )
+                    remote_active.append(f"{ws_id} (+{rem_units:.1f}u)")
+
+            # 2. Persist current workstation heartbeat when local turns change
+            if persist_local:
+                prev_local = hb_map.get(current_ws) or {}
+                prev_turns = int(prev_local.get("turns") or -1)
+                prev_units = float(prev_local.get("weighted_units") or -1.0)
+                cur_local_turns = int(local_summary.get("local_turns", local_summary["total_turns"]))
+                cur_local_units = float(local_summary.get("local_weighted_units", local_summary["total_weighted_units"]))
+                if cur_local_turns != prev_turns or abs(cur_local_units - prev_units) >= 0.5:
+                    hb_map[current_ws] = {
+                        "workstation_id": current_ws,
+                        "updated_at": now_iso,
+                        "turns": cur_local_turns,
+                        "weighted_units": round(cur_local_units, 2),
+                        "pool": POOL_AGY_GEMINI_HIGH,
+                        "subagent_spawns": int(local_summary.get("subagent_spawns") or 0),
+                    }
+                    cur.execute(
+                        "INSERT OR REPLACE INTO runtime_config (key, value, updated_at) VALUES ('quota_workstation_heartbeats', ?, ?);",
+                        (json.dumps(hb_map), now_iso),
+                    )
+                    conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    return remote_active
+
+
+def calibrate_quota_load(
+    calibrated_pct: Optional[float],
+    db_path: Path = DB_PATH,
+    cid: str = None,
+    brain_dir: Path = None,
+) -> Dict[str, Any]:
+    """
+    Sets or clears a live 5-hour quota percentage calibration anchor in runtime_config.
+    Allows immediate alignment with the Antigravity UI quota gauge or cross-device usage:
+      - calibrated_pct in [0.0..100.0]: anchors current 5h usage to calibrated_pct%, decaying
+        linearly over the next 5 hours while adding any new turns executed after calibration.
+      - calibrated_pct is None or < 0: clears the calibration anchor and returns to pure telemetry.
+    """
+    target_db = Path(db_path) if db_path else DB_PATH
+    now_iso = datetime.now(timezone.utc).isoformat()
+    if calibrated_pct is None or float(calibrated_pct) < 0:
+        with managed_connection(target_db, init_schema=True) as conn:
+            conn.execute("DELETE FROM runtime_config WHERE key = 'quota_calibration_anchor';")
+        return {"calibrated": False, "cleared": True}
+
+    pct_clamped = max(0.0, min(100.0, round(float(calibrated_pct), 1)))
+    state = detect_model_and_pool(cid=cid, db_path=target_db)
+    account_tier = "ultra" if state["account_tier"] == "ultra" else "pro"
+    rolling = scan_rolling_5h_antigravity_usage(brain_dir=brain_dir, db_path=target_db)
+    baseline_units = float(rolling["total_weighted_units"])
+
+    anchor = {
+        "calibrated_pct": pct_clamped,
+        "calibrated_at": now_iso,
+        "baseline_units": baseline_units,
+        "account_tier": account_tier,
+        "workstation_id": _resolve_workstation_id(),
+    }
+    with managed_connection(target_db, init_schema=True) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO runtime_config (key, value, updated_at) VALUES ('quota_calibration_anchor', ?, ?);",
+            (json.dumps(anchor), now_iso),
+        )
+    return {"calibrated": True, "anchor": anchor}
+
+
+def _resolve_active_calibration(
+    raw_total_5h_units: float,
+    soft_limit: float,
+    db_path: Optional[Path] = DB_PATH,
+    window_hours: float = 5.0,
+) -> Dict[str, Any]:
+    """Evaluates whether an active 5-hour calibration anchor exists and computes effective 5h units."""
+    default_cal = {
+        "active": False,
+        "calibrated_pct": None,
+        "age_minutes": 0,
+        "raw_5h_units": raw_total_5h_units,
+        "effective_5h_units": raw_total_5h_units,
+    }
+    if not db_path or not Path(db_path).exists() or soft_limit <= 0:
+        return default_cal
+
+    try:
+        conn = get_connection(Path(db_path))
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT value FROM runtime_config WHERE key = 'quota_calibration_anchor';")
+            row = cur.fetchone()
+            if not row or not row[0]:
+                return default_cal
+            anchor = json.loads(row[0])
+            if not isinstance(anchor, dict):
+                return default_cal
+            ts_str = str(anchor.get("calibrated_at") or "").strip()
+            cal_pct = float(anchor.get("calibrated_pct", -1.0))
+            base_u = float(anchor.get("baseline_units", 0.0))
+            if not ts_str or cal_pct < 0:
+                return default_cal
+
+            dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            age_sec = max(0.0, (datetime.now(timezone.utc) - dt).total_seconds())
+            age_hours = age_sec / 3600.0
+            if age_hours >= window_hours:
+                return default_cal
+
+            decay = max(0.0, (window_hours - age_hours) / window_hours)
+            anchored_units = (cal_pct / 100.0) * soft_limit * decay
+            delta_units = max(0.0, raw_total_5h_units - (base_u * decay))
+            effective_units = round(anchored_units + delta_units, 2)
+            return {
+                "active": True,
+                "calibrated_pct": round(cal_pct, 1),
+                "calibrated_at": ts_str,
+                "age_minutes": int(round(age_sec / 60.0)),
+                "raw_5h_units": raw_total_5h_units,
+                "effective_5h_units": effective_units,
+            }
+        finally:
+            conn.close()
+    except Exception:
+        return default_cal
+
+
+def scan_rolling_5h_antigravity_usage(
+    brain_dir: Path = None,
+    window_hours: float = 5.0,
+    db_path: Optional[Path] = None,
+) -> Dict[str, Any]:
     """
     Scans Antigravity transcript.jsonl files modified within the rolling 5-hour window.
-    Tracks both raw model turns and effort-weighted quota units across all 4 internal sub-pools:
-      - Pool 1A (agy_gemini_high): Gemini 4 Argon (Fast / Medium / High)
-      - Pool 1B (agy_gemini_fast): Gemini 3.8 Flash (Fast / Medium / High) + subagents
-      - Pool 1C (agy_claude): Claude Opus 5.5 & Claude Sonnet 5.5 (Fast / Medium / High)
-      - Pool 1D (agy_open_weight): GPT-OSS 120B (Medium)
+    Uses O(1) tail-seek and per-file mtime/size caching for sub-millisecond hook execution,
+    and merges cross-workstation heartbeats when db_path is provided.
     """
     b_dir = Path(brain_dir) if brain_dir else (GEMINI_DIR / "antigravity" / "brain")
     now_utc = datetime.now(timezone.utc)
     cutoff_dt = now_utc - timedelta(hours=window_hours)
     cutoff_ts = cutoff_dt.timestamp()
     cutoff_iso = cutoff_dt.strftime("%Y-%m-%dT%H:%M:%S")
+    cutoff_minute_bucket = int(cutoff_ts // 60)
 
     pools = {
         POOL_AGY_GEMINI_HIGH: {"turns": 0, "weighted_units": 0.0, "models": {}},
@@ -182,81 +545,53 @@ def scan_rolling_5h_antigravity_usage(brain_dir: Path = None, window_hours: floa
     total_weighted = 0.0
     subagent_spawns = 0
 
-    if not b_dir.exists():
-        return {
-            "window_hours": window_hours,
-            "total_turns": 0,
-            "total_weighted_units": 0.0,
-            "subagent_spawns": 0,
-            "pools": pools,
-        }
-
-    settings_re = re.compile(
-        r"<USER_SETTINGS_CHANGE>(?:\\n|\s)*The user changed (?:the )?setting (?:\\[\"'`]|[\"'`])?Model Selection(?:\\[\"'`]|[\"'`])? from [^<]+? to ([^\n<\\]+?)\.(?=\s|\\n|<|\"|$)"
-    )
-
-    for folder in b_dir.iterdir():
-        if not folder.is_dir() or folder.name == "tempmediaStorage":
-            continue
-        t_file = folder / ".system_generated" / "logs" / "transcript.jsonl"
-        if not t_file.exists():
-            continue
-        try:
-            if t_file.stat().st_mtime < cutoff_ts:
+    if b_dir.exists():
+        settings_re = re.compile(
+            r"<USER_SETTINGS_CHANGE>(?:\\n|\s)*The user changed (?:the )?setting (?:\\[\"'`]|[\"'`])?Model Selection(?:\\[\"'`]|[\"'`])? from [^<]+? to ([^\n<\\]+?)\.(?=\s|\\n|<|\"|$)"
+        )
+        for folder in b_dir.iterdir():
+            if not folder.is_dir() or folder.name == "tempmediaStorage":
                 continue
-        except OSError:
-            continue
+            t_file = folder / ".system_generated" / "logs" / "transcript.jsonl"
+            if not t_file.exists():
+                continue
+            try:
+                if t_file.stat().st_mtime < cutoff_ts:
+                    continue
+            except OSError:
+                continue
 
-        active_spec = parse_antigravity_model_spec("Gemini 4 Argon (High)")
-        try:
-            with open(t_file, "r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    if "<USER_SETTINGS_CHANGE>" in line and "Model Selection" in line:
-                        for m_target in settings_re.findall(line):
-                            parsed = parse_antigravity_model_spec(m_target)
-                            if parsed:
-                                active_spec = parsed
-                    if '"PLANNER_RESPONSE"' not in line and '"MODEL"' not in line:
-                        continue
-                    try:
-                        d = json.loads(line)
-                    except Exception:
-                        continue
-                    ts_str = str(d.get("created_at") or "")
-                    if not ts_str or ts_str < cutoff_iso:
-                        continue
-                    src = d.get("source")
-                    stype = d.get("type")
-                    if src != "MODEL" and stype != "PLANNER_RESPONSE":
-                        continue
+            f_res = _scan_single_transcript_5h(t_file, cutoff_iso, cutoff_minute_bucket, settings_re)
+            total_turns += f_res["turns"]
+            total_weighted = round(total_weighted + f_res["weighted_units"], 2)
+            subagent_spawns += f_res["subagent_spawns"]
+            for pk, pdata in f_res["pools"].items():
+                if pk in pools:
+                    pools[pk]["turns"] += pdata["turns"]
+                    pools[pk]["weighted_units"] = round(pools[pk]["weighted_units"] + pdata["weighted_units"], 2)
+                    for m_lbl, cnt in pdata["models"].items():
+                        pools[pk]["models"][m_lbl] = pools[pk]["models"].get(m_lbl, 0) + cnt
 
-                    pool_key = active_spec["pool"]
-                    weight = float(active_spec["quota_weight"])
-                    model_lbl = active_spec["model_name"]
-
-                    if pool_key not in pools:
-                        pool_key = POOL_AGY_GEMINI_HIGH
-                    pools[pool_key]["turns"] += 1
-                    pools[pool_key]["weighted_units"] = round(pools[pool_key]["weighted_units"] + weight, 2)
-                    pools[pool_key]["models"][model_lbl] = pools[pool_key]["models"].get(model_lbl, 0) + 1
-
-                    total_turns += 1
-                    total_weighted = round(total_weighted + weight, 2)
-
-                    for tc in (d.get("tool_calls") or []):
-                        fn = (tc.get("name") or (tc.get("function") or {}).get("name") or "").lower()
-                        if fn == "invoke_subagent":
-                            subagent_spawns += 1
-        except Exception:
-            pass
-
-    return {
+    summary = {
         "window_hours": window_hours,
+        "local_turns": total_turns,
+        "local_weighted_units": total_weighted,
         "total_turns": total_turns,
         "total_weighted_units": total_weighted,
         "subagent_spawns": subagent_spawns,
         "pools": pools,
+        "workstation_id": _resolve_workstation_id(),
+        "remote_workstations_active": [],
     }
+    if db_path is not None:
+        persist_local = (brain_dir is None)
+        summary["remote_workstations_active"] = _merge_and_sync_workstation_heartbeats(
+            summary,
+            db_path=db_path,
+            window_hours=window_hours,
+            persist_local=persist_local,
+        )
+    return summary
 
 
 def record_quota_ledger_entry(
@@ -307,7 +642,8 @@ def record_quota_ledger_entry(
 
 def measure_session_backpack(cid: str = None, brain_dir: Path = None) -> Dict[str, Any]:
     """
-    Measures the active conversation's Context Backpack ('Rucksack-Gewicht'):
+    Measures the active conversation's Context Backpack ('Rucksack-Gewicht') in O(1) time:
+      - Uses binary tail-seek (up to 2 MB) + in-memory (mtime_ns, size) caching
       - Uncompacted steps and model turns since the last <CONTEXT_SUMMARY> compaction boundary
       - Estimated backpack token weight carried on every main-chat turn
       - Backpack classification ('LIGHT', 'MODERATE', 'HEAVY') and Contract-First Coding Split directive
@@ -352,24 +688,50 @@ def measure_session_backpack(cid: str = None, brain_dir: Path = None) -> Dict[st
     if t_file is None or not t_file.exists():
         return default_res
 
+    cache_key = str(t_file)
+    try:
+        st = t_file.stat()
+        mtime_ns = st.st_mtime_ns
+        fsize = st.st_size
+    except OSError:
+        return default_res
+
+    cached = _BACKPACK_CACHE.get(cache_key)
+    if cached and cached[0] == mtime_ns and cached[1] == fsize:
+        res_copy = dict(cached[2])
+        res_copy["conversation_id"] = resolved_cid
+        return res_copy
+
+    max_tail_bytes = 2097152  # 2 MB tail window (> 500 uncompacted steps)
     total_steps = 0
     uncompacted_steps = 0
     uncompacted_turns = 0
     active_chars = 0
 
     try:
-        with open(t_file, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                total_steps += 1
-                if "<CONTEXT_SUMMARY>" in line:
-                    uncompacted_steps = 1
-                    uncompacted_turns = 0
-                    active_chars = min(len(line), 24000)
-                    continue
-                uncompacted_steps += 1
-                active_chars += min(len(line), 8000)
-                if '"PLANNER_RESPONSE"' in line or '"source": "MODEL"' in line or '"source":"MODEL"' in line:
-                    uncompacted_turns += 1
+        with open(t_file, "rb") as bf:
+            if fsize > max_tail_bytes:
+                offset = fsize - max_tail_bytes
+                bf.seek(offset, os.SEEK_SET)
+                raw = bf.read(max_tail_bytes)
+                lines = raw.decode("utf-8", errors="ignore").splitlines()[1:]
+                avg_line_bytes = max(250, max_tail_bytes // max(1, len(lines)))
+                total_steps = max(0, offset // avg_line_bytes)
+            else:
+                raw = bf.read()
+                lines = raw.decode("utf-8", errors="ignore").splitlines()
+
+        for line in lines:
+            total_steps += 1
+            if "<CONTEXT_SUMMARY>" in line:
+                uncompacted_steps = 1
+                uncompacted_turns = 0
+                active_chars = min(len(line), 24000)
+                continue
+            uncompacted_steps += 1
+            active_chars += min(len(line), 8000)
+            if '"PLANNER_RESPONSE"' in line or '"source": "MODEL"' in line or '"source":"MODEL"' in line:
+                uncompacted_turns += 1
     except Exception:
         return default_res
 
@@ -394,7 +756,7 @@ def measure_session_backpack(cid: str = None, brain_dir: Path = None) -> Dict[st
             "Execute coupled and single-file edits directly in main chat on Gemini 4 Argon)"
         )
 
-    return {
+    res = {
         "conversation_id": resolved_cid,
         "total_steps": total_steps,
         "uncompacted_steps": uncompacted_steps,
@@ -403,6 +765,10 @@ def measure_session_backpack(cid: str = None, brain_dir: Path = None) -> Dict[st
         "backpack_state": b_state,
         "coding_split_strategy": strategy,
     }
+    if len(_BACKPACK_CACHE) > 64:
+        _BACKPACK_CACHE.clear()
+    _BACKPACK_CACHE[cache_key] = (mtime_ns, fsize, res)
+    return res
 
 
 def get_ledger_24h_summary(db_path: Path = DB_PATH) -> Dict[str, Any]:
@@ -476,13 +842,14 @@ def compute_routing_decision(
       1. Account quota tier ('ultra' or 'pro' exclusively)
       2. Active Antigravity model family & internal pool (1A, 1B, 1C, 1D)
       3. Active reasoning effort level ('fast', 'medium', 'high')
-      4. Rolling 5-hour Antigravity load, Context Backpack weight, and 24-hour external pool budgets
+      4. Rolling 5-hour Antigravity load (with cross-workstation sync + optional calibration anchor),
+         Context Backpack weight, and 24-hour external pool budgets
     """
     state = detect_model_and_pool(cid=cid, db_path=db_path, model_name_hint=model_name_hint)
     account_tier = "ultra" if state["account_tier"] == "ultra" else "pro"
     budget = ACCOUNT_TIER_BUDGETS[account_tier]
 
-    rolling_5h = scan_rolling_5h_antigravity_usage(brain_dir=brain_dir)
+    rolling_5h = scan_rolling_5h_antigravity_usage(brain_dir=brain_dir, db_path=db_path)
     backpack = measure_session_backpack(cid=cid, brain_dir=brain_dir)
     ledger_24h = get_ledger_24h_summary(db_path=db_path)
     ext_pools = detect_external_pools(db_path=db_path)
@@ -492,9 +859,13 @@ def compute_routing_decision(
     configured_mode = state["quota_mode"]
 
     pool_5h_units = rolling_5h["pools"].get(active_pool, {}).get("weighted_units", 0.0)
-    total_5h_units = rolling_5h["total_weighted_units"]
+    raw_total_5h_units = rolling_5h["total_weighted_units"]
     soft_limit = budget["agy_5h_soft_limit_units"]
-    load_pct = round((total_5h_units / soft_limit) * 100.0, 1) if soft_limit > 0 else 100.0
+
+    calibration = _resolve_active_calibration(raw_total_5h_units, soft_limit, db_path=db_path)
+    total_5h_units = calibration["effective_5h_units"]
+    rolling_5h["effective_weighted_units"] = total_5h_units
+    load_pct = round(min(100.0, (total_5h_units / soft_limit) * 100.0), 1) if soft_limit > 0 else 100.0
 
     # Golden Ratio ('Goldener Schnitt': 61.8% / 85.0%) Operating Mode Cascade:
     # - < 61.8%: 'balanced' (Full Argon High power for coding & architecture)
@@ -562,6 +933,7 @@ def compute_routing_decision(
         "subagent_research_model": subagent_research_model,
         "subagent_general_model": subagent_general_model,
         "rolling_5h": rolling_5h,
+        "calibration": calibration,
         "backpack": backpack,
         "load_pct_5h": load_pct,
         "soft_limit_5h_units": soft_limit,
@@ -578,16 +950,21 @@ def format_hook_routing_banner(decision: Dict[str, Any]) -> str:
     """Formats a compact, high-signal routing directive banner for PreInvocation hook injection."""
     st = decision["state"]
     r5 = decision["rolling_5h"]
+    cal = decision.get("calibration") or {}
     bp = decision["backpack"]
     l24 = decision["ledger_24h"]
     ext = decision["external_pools"]
 
     cli_state = "READY" if ext[POOL_EXT_CLI_OAUTH]["authenticated"] else ("INSTALLED" if ext[POOL_EXT_CLI_OAUTH]["available"] else "OFF")
     api_state = "READY" if ext[POOL_EXT_AISTUDIO_API]["available"] else "OFF"
+    eff_units = r5.get("effective_weighted_units", r5["total_weighted_units"])
+    cal_tag = f" [Calibrated {cal['calibrated_pct']}%]" if cal.get("active") else ""
+    rem_ws = r5.get("remote_workstations_active") or []
+    ws_tag = f" [Synced: {', '.join(rem_ws)}]" if rem_ws else ""
 
     lines = [
         f"[SKILLSDB MULTI-POOL QUOTA ROUTER: Account={decision['account_tier'].upper()} | Mode={decision['effective_mode'].upper()} | Active={st['model_name']} (Pool={st['pool']}, Weight={st['quota_weight']}x)]",
-        f"  * 5h Antigravity Window: {r5['total_turns']} turns ({r5['total_weighted_units']:.1f}/{decision['soft_limit_5h_units']:.0f} weighted units, {decision['load_pct_5h']:.0f}%) | Pool 1A Argon: {r5['pools'][POOL_AGY_GEMINI_HIGH]['turns']}t | Pool 1B Flash: {r5['pools'][POOL_AGY_GEMINI_FAST]['turns']}t | Pool 1C Claude: {r5['pools'][POOL_AGY_CLAUDE]['turns']}t | Pool 1D GPT-OSS: {r5['pools'][POOL_AGY_OPEN_WEIGHT]['turns']}t",
+        f"  * 5h Antigravity Window: {r5['total_turns']} turns ({eff_units:.1f}/{decision['soft_limit_5h_units']:.0f} weighted units, {decision['load_pct_5h']:.0f}%{cal_tag}{ws_tag}) | Pool 1A Argon: {r5['pools'][POOL_AGY_GEMINI_HIGH]['turns']}t | Pool 1B Flash: {r5['pools'][POOL_AGY_GEMINI_FAST]['turns']}t | Pool 1C Claude: {r5['pools'][POOL_AGY_CLAUDE]['turns']}t | Pool 1D GPT-OSS: {r5['pools'][POOL_AGY_OPEN_WEIGHT]['turns']}t",
         f"  * Session Context Backpack: {bp['backpack_state']} (~{bp['backpack_tokens']:,} tok/turn, {bp['uncompacted_steps']} uncompacted steps) -> Strategy: {bp['coding_split_strategy']}",
         f"  * External Gemini Pools (24h): Pool 2 CLI-OAuth={cli_state} ({l24['cli_24h_requests']}/{decision['cli_daily_limit']} RPD) | Pool 3 AIStudio-API={api_state} ({l24['aistudio_24h_requests']}/{decision['aistudio_daily_limit']} RPD) | Saved: ~{l24['saved_agy_tokens_total']:,} AGY tokens ({l24['saved_agy_turns_total']} turns)",
         f"  * Golden Ratio Policy: 100% Argon/Claude for Coding (TypeName='self' -> '{decision['subagent_general_model']}'). Read-only 'research' subagents -> Model='{decision['subagent_research_model']}' (max {decision['max_workers']} workers). Offload read-only files > {decision['digest_line_threshold']} lines via 'skillsdb gemini-digest' or 'skillsdb ast-map <files>'.",
@@ -1120,8 +1497,24 @@ def execute_ast_map(
     return res
 
 
-def print_quota_status(as_json: bool = False, cid: str = None, db_path: Path = DB_PATH):
-    """Displays the comprehensive 4-Pool & 13-Model/Effort Quota Router Dashboard."""
+def print_quota_status(
+    as_json: bool = False,
+    cid: str = None,
+    db_path: Path = DB_PATH,
+    calibrate_pct: Optional[float] = None,
+    reset_calibration: bool = False,
+):
+    """Displays the comprehensive 4-Pool & 13-Model/Effort Quota Router Dashboard (with optional 5h calibration)."""
+    if reset_calibration:
+        calibrate_quota_load(None, db_path=db_path, cid=cid)
+        if not as_json:
+            print("[OK] Cleared 5-hour quota calibration anchor (restored to pure transcript & workstation telemetry).")
+    elif calibrate_pct is not None:
+        cal_res = calibrate_quota_load(calibrate_pct, db_path=db_path, cid=cid)
+        if not as_json and cal_res.get("calibrated"):
+            anc = cal_res["anchor"]
+            print(f"[OK] Anchored 5-hour quota window to {anc['calibrated_pct']}% on workstation {anc['workstation_id']}.")
+
     decision = compute_routing_decision(cid=cid, db_path=db_path)
     if as_json:
         print(json.dumps(decision, indent=2))
@@ -1129,6 +1522,7 @@ def print_quota_status(as_json: bool = False, cid: str = None, db_path: Path = D
 
     st = decision["state"]
     r5 = decision["rolling_5h"]
+    cal = decision.get("calibration") or {}
     bp = decision["backpack"]
     l24 = decision["ledger_24h"]
     ext = decision["external_pools"]
@@ -1145,8 +1539,13 @@ def print_quota_status(as_json: bool = False, cid: str = None, db_path: Path = D
     print(f"  Backpack State:     {bp['backpack_state']} (~{bp['backpack_tokens']:,} tokens/turn | {bp['uncompacted_steps']} uncompacted steps, {bp['uncompacted_turns']} turns)")
     print(f"  Coding Split Rule:  {bp['coding_split_strategy']}")
 
+    eff_units = r5.get("effective_weighted_units", r5["total_weighted_units"])
     print("\n--- Pool 1: Antigravity Internal 5-Hour Rolling Window ---")
-    print(f"  Total 5h Activity:  {r5['total_turns']} turns ({r5['total_weighted_units']:.1f} / {decision['soft_limit_5h_units']:.0f} weighted units -> {decision['load_pct_5h']:.1f}%)")
+    print(f"  Total 5h Activity:  {r5['total_turns']} turns ({eff_units:.1f} / {decision['soft_limit_5h_units']:.0f} weighted units -> {decision['load_pct_5h']:.1f}%)")
+    if cal.get("active"):
+        print(f"  Calibration Anchor: ACTIVE ({cal['calibrated_pct']}% set {cal['age_minutes']}m ago | Raw telemetry: {cal['raw_5h_units']:.1f}u)")
+    if r5.get("remote_workstations_active"):
+        print(f"  Synced Workstations: {', '.join(r5['remote_workstations_active'])} (Local host: {r5.get('workstation_id', 'LOCAL')})")
     print(f"  * Pool 1A (Gemini 4 Argon [Fast|Med|High]):      {r5['pools'][POOL_AGY_GEMINI_HIGH]['turns']:>3} turns ({r5['pools'][POOL_AGY_GEMINI_HIGH]['weighted_units']:.1f} units)")
     print(f"  * Pool 1B (Gemini 3.8 Flash [Fast|Med|High]):    {r5['pools'][POOL_AGY_GEMINI_FAST]['turns']:>3} turns ({r5['pools'][POOL_AGY_GEMINI_FAST]['weighted_units']:.1f} units, {r5['subagent_spawns']} subagents)")
     print(f"  * Pool 1C (Claude Opus/Sonnet 5.5 [Fast|Med|High]): {r5['pools'][POOL_AGY_CLAUDE]['turns']:>3} turns ({r5['pools'][POOL_AGY_CLAUDE]['weighted_units']:.1f} units)")

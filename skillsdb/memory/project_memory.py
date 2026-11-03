@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from ..config import TIER_ULTRA, DB_PATH, GEMINI_DIR, resolve_user_home, __version__
 from ..core.db import get_connection, managed_connection
-from ..core.detector import detect_model_tier
+from ..core.detector import detect_model_tier, detect_model_and_pool
 from ..core.quota_router import compute_routing_decision, format_hook_routing_banner, get_ledger_24h_summary
 from .writer_queue import get_writer_queue, flush_journals
 from ..platform.windows_utf8 import ensure_windows_utf8_manifests

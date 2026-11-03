@@ -9,8 +9,52 @@ import glob
 import re
 import time
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Iterator
 from ..config import estimate_tokens
+
+
+def _node_start_lineno(node: ast.AST) -> int:
+    """Returns the 1-indexed start line of an AST node including any leading @decorators."""
+    base_line = int(getattr(node, "lineno", 1) or 1)
+    decs = getattr(node, "decorator_list", None) or []
+    if not decs:
+        return base_line
+    return min([base_line] + [int(getattr(d, "lineno", base_line) or base_line) for d in decs])
+
+
+def _format_decorator_prefix(node: ast.AST) -> str:
+    """Returns compact @decorator tags for key Python decorators (@staticmethod, @classmethod, @property, @dataclass)."""
+    decs = getattr(node, "decorator_list", None) or []
+    tags: List[str] = []
+    for d in decs[:2]:
+        raw = _format_ast_expr(d)
+        if not raw or raw == "...":
+            continue
+        short = raw.split("(")[0].strip()
+        if short:
+            tags.append(f"@{short}")
+    return (" ".join(tags) + " ") if tags else ""
+
+
+def _iter_module_top_nodes(stmts: List[ast.stmt]) -> Iterator[ast.stmt]:
+    """
+    Yields top-level module statements, descending into top-level conditional/try/with
+    blocks (e.g. 'if sys.platform == \"win32\":' or 'try: ... except ImportError:') so
+    platform-specific functions and classes are never missed by AST contract mapping.
+    """
+    for node in stmts:
+        yield node
+        if isinstance(node, ast.If):
+            yield from _iter_module_top_nodes(node.body)
+            yield from _iter_module_top_nodes(node.orelse)
+        elif isinstance(node, ast.Try):
+            yield from _iter_module_top_nodes(node.body)
+            for handler in node.handlers:
+                yield from _iter_module_top_nodes(handler.body)
+            yield from _iter_module_top_nodes(node.orelse)
+            yield from _iter_module_top_nodes(node.finalbody)
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            yield from _iter_module_top_nodes(node.body)
 
 
 def slice_fim(
@@ -72,7 +116,8 @@ def slice_fim_symbol(
     suffix_lines: int = 20
 ) -> Dict[str, Any]:
     """
-    Finds the definition line of a symbol (function, class, variable) and slices the FIM window.
+    Finds the definition line of a symbol (function, class, Class.method, or variable) and slices the FIM window.
+    Uses Python's native ast module as an exact fast-path for .py files before falling back to regex.
     """
     fpath = Path(file_path)
     if not fpath.exists() or not fpath.is_file():
@@ -80,15 +125,55 @@ def slice_fim_symbol(
 
     content = fpath.read_text(encoding="utf-8", errors="replace")
     all_lines = content.splitlines()
-
-    # Search for def, async def, class, func, fn, struct, enum, const, let, var symbol patterns
-    pat = re.compile(rf"\b(?:(?:async\s+)?def|class|function|func|fn|struct|enum|var|let|const|val|interface|type)\s+{re.escape(symbol_name)}\b")
     match_line = None
+    symbol_start_line = None
+    symbol_end_line = None
 
-    for idx, line in enumerate(all_lines, 1):
-        if pat.search(line):
-            match_line = idx
-            break
+    if fpath.suffix.lower() == ".py":
+        try:
+            tree = ast.parse(content)
+            target_cls, target_member = (symbol_name.split(".", 1) if "." in symbol_name else (None, symbol_name))
+            for node in _iter_module_top_nodes(tree.body):
+                if isinstance(node, ast.ClassDef):
+                    if target_cls is None and node.name == target_member:
+                        symbol_start_line = _node_start_lineno(node)
+                        symbol_end_line = getattr(node, "end_lineno", node.lineno)
+                        match_line = node.lineno
+                        break
+                    if target_cls is None or node.name == target_cls:
+                        for item in node.body:
+                            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == target_member:
+                                symbol_start_line = _node_start_lineno(item)
+                                symbol_end_line = getattr(item, "end_lineno", item.lineno)
+                                match_line = item.lineno
+                                break
+                        if match_line is not None:
+                            break
+                elif target_cls is None and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == target_member:
+                    symbol_start_line = _node_start_lineno(node)
+                    symbol_end_line = getattr(node, "end_lineno", node.lineno)
+                    match_line = node.lineno
+                    break
+                elif target_cls is None and isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                    for t in targets:
+                        if isinstance(t, ast.Name) and t.id == target_member:
+                            symbol_start_line = node.lineno
+                            symbol_end_line = getattr(node, "end_lineno", node.lineno)
+                            match_line = node.lineno
+                            break
+                    if match_line is not None:
+                        break
+        except Exception:
+            pass
+
+    if match_line is None:
+        # Search for def, async def, class, func, fn, fun, struct, enum, const, let, var symbol patterns
+        pat = re.compile(rf"\b(?:(?:async\s+)?def|class|function|func|fn|fun|struct|enum|var|let|const|val|interface|type)\s+{re.escape(symbol_name)}\b")
+        for idx, line in enumerate(all_lines, 1):
+            if pat.search(line):
+                match_line = idx
+                break
 
     if match_line is None:
         # Fallback to direct symbol substring search
@@ -102,6 +187,10 @@ def slice_fim_symbol(
 
     res = slice_fim(fpath, match_line, prefix_lines=prefix_lines, suffix_lines=suffix_lines)
     res["symbol"] = symbol_name
+    if symbol_start_line is not None:
+        res["symbol_start_line"] = symbol_start_line
+    if symbol_end_line is not None:
+        res["symbol_end_line"] = symbol_end_line
     return res
 
 
@@ -201,39 +290,53 @@ def _extract_python_ast_contracts(
     symbol_filter: Optional[str] = None,
     include_private: bool = True,
 ) -> Dict[str, Any]:
-    """Parses Python source into a compact interface & line-offset contract map."""
+    """Parses Python source into a compact interface & decorator-aware [Lstart-Lend] contract map."""
     tree = ast.parse(content)
     filt = (symbol_filter or "").strip().lower()
 
     imports: List[str] = []
     constants: List[str] = []
     classes: List[Dict[str, Any]] = []
-    functions: List[Dict[str, Any]] = []
+    functions: List[str] = []
+    seen_Imports = set()
+    seen_consts = set()
 
-    for node in tree.body:
+    for node in _iter_module_top_nodes(tree.body):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                imports.append(alias.name)
+                if alias.name not in seen_Imports:
+                    seen_Imports.add(alias.name)
+                    imports.append(alias.name)
         elif isinstance(node, ast.ImportFrom):
             mod = node.module or ""
             names = ", ".join(a.name for a in node.names[:6])
             if len(node.names) > 6:
                 names += ", ..."
-            imports.append(f"{mod}: {{{names}}}" if mod else names)
+            imp_s = f"{mod}: {{{names}}}" if mod else names
+            if imp_s not in seen_Imports:
+                seen_Imports.add(imp_s)
+                imports.append(imp_s)
         elif isinstance(node, (ast.Assign, ast.AnnAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             for t in targets:
                 if isinstance(t, ast.Name):
                     name = t.id
+                    if name in seen_consts:
+                        continue
                     if not include_private and name.startswith("_") and not name.startswith("__"):
                         continue
                     if filt and filt not in name.lower():
                         continue
                     if name.isupper() or name.startswith("__"):
-                        constants.append(f"{name} [L{node.lineno}]")
+                        seen_consts.add(name)
+                        end_c = getattr(node, "end_lineno", node.lineno)
+                        loc_s = f"[L{node.lineno}-L{end_c}]" if end_c > node.lineno else f"[L{node.lineno}]"
+                        constants.append(f"{name} {loc_s}")
         elif isinstance(node, ast.ClassDef):
             cname = node.name
+            start_l = _node_start_lineno(node)
             end_l = getattr(node, "end_lineno", node.lineno)
+            dec_prefix = _format_decorator_prefix(node)
             bases = [_format_ast_expr(b) for b in node.bases]
             base_str = f"({', '.join(bases)})" if bases else ""
             methods: List[str] = []
@@ -244,16 +347,18 @@ def _extract_python_ast_contracts(
                         continue
                     if filt and (filt not in cname.lower() and filt not in mname.lower()):
                         continue
+                    m_start = _node_start_lineno(item)
                     m_end = getattr(item, "end_lineno", item.lineno)
+                    m_dec = _format_decorator_prefix(item)
                     prefix = "async def" if isinstance(item, ast.AsyncFunctionDef) else "def"
                     sig = _format_ast_signature(item)
                     doc_s = _first_doc_line(item)
                     doc_tag = f"  # {doc_s}" if doc_s else ""
-                    methods.append(f"{prefix} {mname}{sig} [L{item.lineno}-L{m_end}]{doc_tag}")
+                    methods.append(f"{m_dec}{prefix} {mname}{sig} [L{m_start}-L{m_end}]{doc_tag}")
             if filt and filt not in cname.lower() and not methods:
                 continue
             classes.append({
-                "header": f"class {cname}{base_str} [L{node.lineno}-L{end_l}]",
+                "header": f"{dec_prefix}class {cname}{base_str} [L{start_l}-L{end_l}]",
                 "doc": _first_doc_line(node),
                 "methods": methods,
             })
@@ -263,12 +368,14 @@ def _extract_python_ast_contracts(
                 continue
             if filt and filt not in fname.lower():
                 continue
+            start_l = _node_start_lineno(node)
             end_l = getattr(node, "end_lineno", node.lineno)
+            dec_prefix = _format_decorator_prefix(node)
             prefix = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
             sig = _format_ast_signature(node)
             doc_s = _first_doc_line(node)
             doc_tag = f"  # {doc_s}" if doc_s else ""
-            functions.append(f"{prefix} {fname}{sig} [L{node.lineno}-L{end_l}]{doc_tag}")
+            functions.append(f"{dec_prefix}{prefix} {fname}{sig} [L{start_l}-L{end_l}]{doc_tag}")
 
     return {
         "imports": imports[:16],
@@ -278,37 +385,180 @@ def _extract_python_ast_contracts(
     }
 
 
+def _strip_strings_and_comments_for_braces(line: str) -> str:
+    """Strips string literals and single-line comments so brace counting is never skewed by quoted '{' or '}'."""
+    out: List[str] = []
+    in_str: Optional[str] = None
+    escape = False
+    i = 0
+    n = len(line)
+    while i < n:
+        ch = line[i]
+        if escape:
+            escape = False
+            i += 1
+            continue
+        if ch == "\\":
+            escape = True
+            i += 1
+            continue
+        if in_str:
+            if ch == in_str:
+                in_str = None
+            i += 1
+            continue
+        if ch in ('"', "'", "`"):
+            in_str = ch
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n and line[i + 1] == "/":
+            break
+        if ch == "#" and (i == 0 or line[i - 1].isspace()):
+            break
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _find_block_end_line(lines: List[str], start_idx: int, is_sql: bool = False) -> int:
+    """
+    Deterministically computes the 1-indexed closing line [Lend] of a brace-delimited
+    or SQL statement block starting at 0-indexed start_idx.
+    """
+    total = len(lines)
+    if start_idx >= total:
+        return start_idx + 1
+
+    if is_sql:
+        in_begin = False
+        for i in range(start_idx, min(total, start_idx + 800)):
+            up = lines[i].strip().upper()
+            if re.search(r"\bBEGIN\b", up):
+                in_begin = True
+            if up == "GO" and i > start_idx:
+                return i
+            if in_begin and re.search(r"\bEND\s*;?\s*$", up):
+                return i + 1
+            if not in_begin and up.endswith(";"):
+                return i + 1
+        return start_idx + 1
+
+    depth = 0
+    saw_open = False
+    for i in range(start_idx, min(total, start_idx + 2500)):
+        cleaned = _strip_strings_and_comments_for_braces(lines[i])
+        opens = cleaned.count("{")
+        closes = cleaned.count("}")
+        if opens > 0:
+            saw_open = True
+        depth += opens - closes
+        if saw_open and depth <= 0:
+            return i + 1
+        if not saw_open and i > start_idx + 4 and cleaned.strip().endswith(";"):
+            return i + 1
+    return start_idx + 1
+
+
 def _extract_generic_regex_contracts(
     content: str,
     symbol_filter: Optional[str] = None,
+    suffix: str = "",
 ) -> Dict[str, Any]:
-    """Fallback structure & line-offset extractor for PowerShell, TS/JS, Go, Rust, C#, Java, Kotlin, Dart."""
+    """
+    Structure & [Lstart-Lend] block-boundary extractor for PowerShell, TypeScript/JavaScript,
+    Go, Rust, C#, Java, Kotlin, Dart, and SQL.
+    """
     filt = (symbol_filter or "").strip().lower()
     lines = content.splitlines()
     functions: List[str] = []
     classes: List[Dict[str, Any]] = []
+    is_sql = suffix.lower() == ".sql"
 
-    cls_re = re.compile(r"^\s*(?:export\s+)?(?:public\s+|private\s+|abstract\s+)?(?:class|interface|struct|enum)\s+([A-Za-z_][A-Za-z0-9_]*)")
+    cls_re = re.compile(
+        r"^\s*(?:export\s+)?(?:public\s+|private\s+|protected\s+|internal\s+|abstract\s+|sealed\s+|final\s+|data\s+)*"
+        r"(?:(?:class|interface|struct|enum|trait|record)\s+([A-Za-z_][A-Za-z0-9_]*)"
+        r"|type\s+([A-Za-z_][A-Za-z0-9_]*)\s+(?:struct|interface)\b"
+        r"|impl(?:\s*<[^>]*>)?\s+(?:[A-Za-z0-9_:<>]+\s+for\s+)?([A-Za-z_][A-Za-z0-9_]*))"
+    )
     fn_re = re.compile(
-        r"^\s*(?:export\s+)?(?:public\s+|private\s+|internal\s+)?(?:suspend\s+|async\s+)?(?:function|def|func|fn|fun)\s+([A-Za-z_][A-Za-z0-9_-]*)\s*(\([^)]*\))?"
+        r"^\s*(?:export\s+)?(?:default\s+)?(?:pub(?:\([^)]*\))?\s+|public\s+|private\s+|protected\s+|internal\s+|static\s+|virtual\s+|override\s+| inline\s+)*"
+        r"(?:suspend\s+|async\s+)*"
+        r"(?:function|filter|workflow|def|func|fn|fun)\s+"
+        r"(?:\([^)]+\)\s*)?"  # Optional Go receiver e.g. (s *Server)
+        r"([A-Za-z_][A-Za-z0-9_:-]*)\s*(\([^)]*\))?"
+    )
+    ts_arrow_re = re.compile(
+        r"^\s*(?:export\s+)?(?:const|let)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_][A-Za-z0-9_]*)\s*=>"
+    )
+    typed_method_re = re.compile(
+        r"^\s*(?:(?:public|private|protected|internal|static|virtual|override|abstract|async|synchronized|final|readonly|get|set)\s+)+"
+        r"(?:[A-Za-z_][A-Za-z0-9_<>,.\[\]?]*\s+)*([A-Za-z_][A-Za-z0-9_]*)\s*\(([^;{}]*)\)\s*(?::\s*[^{;]+|throws\s+[^{;]+)?\{"
+    )
+    sql_re = re.compile(
+        r"^\s*CREATE\s+(?:OR\s+(?:ALTER|REPLACE)\s+)?(?:TEMP|TEMPORARY\s+)?"
+        r"(TABLE|VIEW|PROCEDURE|PROC|FUNCTION|TRIGGER)\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_.\[\]\"]+)",
+        re.IGNORECASE,
     )
 
-    for idx, raw_line in enumerate(lines, 1):
-        cm = cls_re.match(raw_line)
-        if cm:
-            cname = cm.group(1)
-            if not filt or filt in cname.lower():
-                classes.append({
-                    "header": f"{raw_line.strip().rstrip('{').strip()} [L{idx}]",
-                    "doc": "",
-                    "methods": [],
-                })
+    active_cls: Optional[Dict[str, Any]] = None
+    active_cls_end = 0
+    active_cls_name = ""
+
+    for idx_0, raw_line in enumerate(lines):
+        idx = idx_0 + 1
+        if active_cls is not None and idx > active_cls_end:
+            if not filt or filt in active_cls_name.lower() or active_cls["methods"]:
+                classes.append(active_cls)
+            active_cls = None
+            active_cls_end = 0
+            active_cls_name = ""
+
+        if is_sql:
+            sm = sql_re.match(raw_line)
+            if sm:
+                kind = sm.group(1).upper()
+                sname = sm.group(2)
+                end_l = _find_block_end_line(lines, idx_0, is_sql=True)
+                loc = f"[L{idx}-L{end_l}]" if end_l > idx else f"[L{idx}]"
+                if not filt or filt in sname.lower() or filt in kind.lower():
+                    functions.append(f"CREATE {kind} {sname} {loc}")
             continue
-        fm = fn_re.match(raw_line)
+
+        cm = cls_re.match(raw_line)
+        if cm and active_cls is None:
+            cname = cm.group(1) or cm.group(2) or cm.group(3) or ""
+            end_l = _find_block_end_line(lines, idx_0)
+            loc = f"[L{idx}-L{end_l}]" if end_l > idx else f"[L{idx}]"
+            hdr_clean = raw_line.strip().rstrip("{").strip()
+            active_cls = {
+                "header": f"{hdr_clean} {loc}",
+                "doc": "",
+                "methods": [],
+            }
+            active_cls_end = end_l
+            active_cls_name = cname
+            continue
+
+        fm = fn_re.match(raw_line) or ts_arrow_re.match(raw_line)
+        if not fm and active_cls is not None:
+            fm = typed_method_re.match(raw_line)
         if fm:
             fname = fm.group(1)
-            if not filt or filt in fname.lower():
-                functions.append(f"{raw_line.strip().rstrip('{').strip()} [L{idx}]")
+            if fname in ("if", "for", "while", "switch", "catch", "using", "lock", "synchronized"):
+                continue
+            end_l = _find_block_end_line(lines, idx_0)
+            loc = f"[L{idx}-L{end_l}]" if end_l > idx else f"[L{idx}]"
+            sig_clean = raw_line.strip().rstrip("{").strip()
+            if active_cls is not None and idx <= active_cls_end:
+                if not filt or filt in active_cls_name.lower() or filt in fname.lower():
+                    active_cls["methods"].append(f"{sig_clean} {loc}")
+            else:
+                if not filt or filt in fname.lower():
+                    functions.append(f"{sig_clean} {loc}")
+
+    if active_cls is not None:
+        if not filt or filt in active_cls_name.lower() or active_cls["methods"]:
+            classes.append(active_cls)
 
     return {
         "imports": [],
@@ -388,7 +638,11 @@ def extract_ast_contract_map(
             except Exception:
                 parsed_map = None
         if parsed_map is None:
-            parsed_map = _extract_generic_regex_contracts(content, symbol_filter=symbol_filter)
+            parsed_map = _extract_generic_regex_contracts(
+                content,
+                symbol_filter=symbol_filter,
+                suffix=fpath.suffix,
+            )
 
         file_maps.append({
             "file": fpath.name,

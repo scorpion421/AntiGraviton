@@ -350,6 +350,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     quota_parser = subparsers.add_parser("quota-status", aliases=["quota"], help="Display 4-pool quota router status, 13-model effort matrix, Context Backpack, and offload savings")
     quota_parser.add_argument("--json", action="store_true", help="Output full routing telemetry as JSON")
+    quota_parser.add_argument("--calibrate-pct", type=float, default=None, help="Anchor the 5-hour rolling quota window to an explicit percentage (0..100)")
+    quota_parser.add_argument("--reset-calibration", action="store_true", help="Clear any active 5-hour quota calibration anchor")
 
     ast_map_parser = subparsers.add_parser("ast-map", help="Extract multi-file AST Contract & Line-Offset Map (Lstart-Lend) at ~95%% token compression before coding")
     ast_map_parser.add_argument("files", nargs="*", default=None, help="File paths or glob patterns to map")
@@ -857,7 +859,12 @@ def main(argv: list[str] = None):
             else:
                 get_profile(db_path=DB_PATH)
         elif args.command in ("quota-status", "quota"):
-            print_quota_status(as_json=getattr(args, "json", False), db_path=DB_PATH)
+            print_quota_status(
+                as_json=getattr(args, "json", False),
+                db_path=DB_PATH,
+                calibrate_pct=getattr(args, "calibrate_pct", None),
+                reset_calibration=getattr(args, "reset_calibration", False),
+            )
         elif args.command == "ast-map":
             proj_p = Path(args.project) if getattr(args, "project", None) else None
             target_files = list(getattr(args, "files", None) or []) + list(getattr(args, "opt_files", None) or [])

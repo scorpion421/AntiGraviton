@@ -14,8 +14,8 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-__version__ = "4.0.0"
-__suite_version__ = "2.0.0"
+__version__ = "4.0.1"
+__suite_version__ = "2.0.1"
 
 # Model capability & subscription tiers
 TIER_LEAN = "lean"          # Lite / Gemini 3.8 Flash (Fast/Medium) / Flash-Lite, minimal token footprint
@@ -99,3 +99,37 @@ def estimate_tokens(text: str) -> int:
     if not text:
         return 0
     return max(1, len(text) // 4)
+
+
+def read_jsonl_tail_lines(
+    file_path: Path,
+    max_bytes: int = 262144,
+    max_lines: int = 120,
+) -> list[str]:
+    """
+    O(1) binary tail-seek reader for large JSONL transcripts.
+    Reads at most the final max_bytes from file_path, discards any partial leading line
+    when seeking mid-file, and returns up to the last max_lines lines in < 1 ms.
+    """
+    try:
+        fpath = Path(file_path)
+        if not fpath.exists() or not fpath.is_file():
+            return []
+        with open(fpath, "rb") as bf:
+            bf.seek(0, os.SEEK_END)
+            file_size = bf.tell()
+            if file_size <= 0:
+                return []
+            read_len = min(file_size, max(4096, int(max_bytes)))
+            offset = file_size - read_len
+            bf.seek(offset, os.SEEK_SET)
+            raw_chunk = bf.read(read_len)
+        text = raw_chunk.decode("utf-8", errors="ignore")
+        lines = text.splitlines()
+        if offset > 0 and lines:
+            lines = lines[1:]
+        if max_lines and max_lines > 0 and len(lines) > max_lines:
+            return lines[-max_lines:]
+        return lines
+    except Exception:
+        return []

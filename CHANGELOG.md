@@ -5,6 +5,26 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.1] - 2026-11-03
+
+### Added
+- **Live 5-hour quota calibration anchor and cross-workstation heartbeat synchronization (`skillsdb/core/quota_router.py`, `skillsdb/cli.py`, `v4.0.1`)**:
+  - Added `calibrate_quota_load()` and CLI flags `skillsdb quota-status --calibrate-pct <0..100>` and `--reset-calibration` to anchor the 5-hour rolling window to the exact server-side percentage shown in the Antigravity UI or after switching devices, decaying linearly over the remaining 5-hour window while accumulating new turns on top.
+  - Added `record_remote_workstation_heartbeat()` and `_merge_and_sync_workstation_heartbeats()` (`runtime_config.quota_workstation_heartbeats`) so developers working across Home and Enterprise workstations (`skillsdb sync` / shared `customizations.db`) automatically merge active 5-hour quota usage across hosts.
+  - Added context-size turn weighting (`1.0x..1.35x`) in `_scan_single_transcript_5h()` so massive tool/thinking turns reflect their higher server-side token burn compared to lightweight turns.
+
+### Changed
+- **Decorator-aware Python AST contracts, conditional top-level discovery, and multi-language `[Lstart-Lend]` block-end mapping (`skillsdb/core/fim.py`, `v4.0.1`)**:
+  - Upgraded `_extract_python_ast_contracts()` and `slice_fim_symbol()` to include `@decorator` lines in `[Lstart-Lend]` boundaries (`_node_start_lineno()`), surface `@staticmethod` / `@classmethod` / `@property` / `@dataclass` tags, traverse top-level `if` / `try` / `with` blocks (`_iter_module_top_nodes()`), and resolve `ClassName.method_name` symbols directly via Python's `ast` module.
+  - Upgraded `_extract_generic_regex_contracts()` with a string/comment-safe brace and SQL block-end tracker (`_find_block_end_line()`) that outputs full `[Lstart-Lend]` line spans and groups class/struct/`impl` methods under their enclosing type across TypeScript/JavaScript, PowerShell, Go, Rust, C#, Java, Kotlin, Dart, and SQL (`CREATE [OR ALTER] TABLE/VIEW/PROCEDURE/FUNCTION/TRIGGER`).
+- **O(1) binary tail-seek and in-memory stat caching for sub-30ms hook latency (`skillsdb/config.py`, `skillsdb/core/guardrails.py`, `skillsdb/core/quota_router.py`, `v4.0.1`)**:
+  - Added `read_jsonl_tail_lines()` in `skillsdb/config.py` using binary `SEEK_END` tail reads instead of full-file iteration.
+  - Wired `_was_file_region_read_in_current_epoch()` and the Subagent Firewall streak check in `guardrails.py`, plus `measure_session_backpack()` (`_BACKPACK_CACHE`) and `scan_rolling_5h_antigravity_usage()` (`_TRANSCRIPT_5H_CACHE`) in `quota_router.py`, to use O(1) tail seeks and `(mtime_ns, size)` caching so multi-megabyte transcripts never add latency to `PreToolUse` or `PreInvocation` hooks.
+
+### Fixed
+- **Explicit module-level import of `detect_model_and_pool` in `project_memory.py` (`skillsdb/memory/project_memory.py`, `v4.0.1`)**:
+  - Imported `detect_model_and_pool` directly in `skillsdb/memory/project_memory.py` so `stats()` resolves active model and pool telemetry identically in both modular `python -m skillsdb` and compiled `db_manager.py` execution modes.
+
 ## [2.0.0] - 2026-11-03
 
 ### Added

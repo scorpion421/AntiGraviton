@@ -1495,5 +1495,186 @@ class TestGiteaSync(unittest.TestCase):
             self.assertIn("Ledger:", doc_txt)
 
 
+    def test_v2_0_1_control_plane_hardening_ast_blocks_calibration_and_o1_tail_seek(self):
+        """Verifies v2.0.1 (SkillsDB v4.0.1) O(1) binary tail-seek, multi-language [Lstart-Lend] AST mapper, 5h quota calibration, and cross-workstation sync."""
+        import json, time
+        from unittest.mock import patch
+        from skillsdb.config import read_jsonl_tail_lines
+        from skillsdb.cli import build_parser
+        from skillsdb.core.fim import extract_ast_contract_map, slice_fim_symbol
+        from skillsdb.core.quota_router import (
+            measure_session_backpack,
+            scan_rolling_5h_antigravity_usage,
+            record_remote_workstation_heartbeat,
+            calibrate_quota_load,
+            compute_routing_decision,
+            format_hook_routing_banner,
+        )
+        from skillsdb.core.detector import set_profile
+
+        # 1. Verify O(1) binary tail-seek (read_jsonl_tail_lines) & fast measure_session_backpack on a >2.4 MB transcript
+        fake_brain = self.test_dir / "brain_v201"
+        cid = "conv-v201-large"
+        log_dir = fake_brain / cid / ".system_generated" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        t_path = log_dir / "transcript.jsonl"
+
+        bulk_line = json.dumps({
+            "step_index": 1,
+            "type": "PLANNER_RESPONSE",
+            "source": "MODEL",
+            "created_at": "2026-11-01T10:00:00Z",
+            "content": "A" * 900,
+        }) + "\n"
+        compaction_line = json.dumps({
+            "step_index": 3000,
+            "type": "USER_INPUT",
+            "source": "USER_EXPLICIT",
+            "created_at": "2026-11-03T14:00:00Z",
+            "content": "<CONTEXT_SUMMARY>Compacted 3000 historical steps</CONTEXT_SUMMARY>",
+        }) + "\n"
+        post_lines = [
+            json.dumps({
+                "step_index": 3000 + i,
+                "type": "PLANNER_RESPONSE",
+                "source": "MODEL",
+                "created_at": "2026-11-03T15:00:00Z",
+                "content": f"Post-compaction turn {i}",
+            }) + "\n"
+            for i in range(1, 9)
+        ]
+        with open(t_path, "w", encoding="utf-8") as wf:
+            for _ in range(2600):
+                wf.write(bulk_line)
+            wf.write(compaction_line)
+            for pl in post_lines:
+                wf.write(pl)
+
+        self.assertGreater(t_path.stat().st_size, 2_400_000)
+        t0 = time.perf_counter()
+        tail = read_jsonl_tail_lines(t_path, max_bytes=65536, max_lines=15)
+        elapsed_tail_ms = (time.perf_counter() - t0) * 1000.0
+        self.assertEqual(len(tail), 15)
+        self.assertIn("Post-compaction turn 8", tail[-1])
+        self.assertLess(elapsed_tail_ms, 50.0)
+
+        bp = measure_session_backpack(cid=cid, brain_dir=fake_brain)
+        self.assertEqual(bp["backpack_state"], "LIGHT")
+        self.assertEqual(bp["uncompacted_steps"], 9)
+        self.assertEqual(bp["uncompacted_turns"], 8)
+        self.assertGreater(bp["total_steps"], 2000)
+
+        # Second call must hit _BACKPACK_CACHE in < 5 ms
+        t1 = time.perf_counter()
+        bp_cached = measure_session_backpack(cid=cid, brain_dir=fake_brain)
+        self.assertLess((time.perf_counter() - t1) * 1000.0, 10.0)
+        self.assertEqual(bp_cached["uncompacted_steps"], 9)
+
+        # 2. Verify Python decorator-aware [Lstart-Lend], conditional top-level AST discovery, and Class.method FIM slicing
+        py_sample = self.test_dir / "sample_service.py"
+        py_sample.write_text(
+            "import sys\n"
+            "from dataclasses import dataclass\n\n"
+            "@dataclass\n"
+            "class TokenConfig:\n"
+            "    limit: int = 100\n\n"
+            "    @staticmethod\n"
+            "    def compute_ratio(used: int, total: int) -> float:\n"
+            "        \"\"\"Computes usage ratio.\"\"\"\n"
+            "        return round(used / max(1, total), 3)\n\n"
+            "if sys.platform == 'win32':\n"
+            "    def win32_helper(path: str) -> bool:\n"
+            "        return True\n",
+            encoding="utf-8",
+        )
+        py_map = extract_ast_contract_map([str(py_sample)])
+        self.assertTrue(py_map["success"])
+        cmap_txt = py_map["contract_map"]
+        # @dataclass is on L4, class TokenConfig ends on L11 -> [L4-L11]
+        self.assertIn("@dataclass class TokenConfig [L4-L11]", cmap_txt)
+        # @staticmethod is on L8, def compute_ratio ends on L11 -> [L8-L11]
+        self.assertIn("@staticmethod def compute_ratio(used: int, total: int) -> float [L8-L11]", cmap_txt)
+        # Function inside top-level 'if sys.platform == ...' must be discovered
+        self.assertIn("def win32_helper(path: str) -> bool [L14-L15]", cmap_txt)
+
+        fim_dotted = slice_fim_symbol(py_sample, "TokenConfig.compute_ratio", prefix_lines=2, suffix_lines=2)
+        self.assertEqual(fim_dotted["target_line"], 9)
+        self.assertEqual(fim_dotted["symbol_start_line"], 8)
+        self.assertEqual(fim_dotted["symbol_end_line"], 11)
+
+        # 3. Verify multi-language [Lstart-Lend] block-end tracking & class method grouping (TypeScript, C#, SQL)
+        ts_sample = self.test_dir / "router.ts"
+        ts_sample.write_text(
+            "export class QuotaController {\n"
+            "    public async evaluatePool(poolId: string): Promise<boolean> {\n"
+            "        const msg = \"{not a block}\";\n"
+            "        return poolId.length > 0;\n"
+            "    }\n"
+            "}\n"
+            "export const formatLabel = (name: string) => {\n"
+            "    return name.toUpperCase();\n"
+            "};\n",
+            encoding="utf-8",
+        )
+        sql_sample = self.test_dir / "schema.sql"
+        sql_sample.write_text(
+            "CREATE OR ALTER PROCEDURE dbo.SyncQuotaLedger\n"
+            "AS\n"
+            "BEGIN\n"
+            "    SELECT 1;\n"
+            "END;\n",
+            encoding="utf-8",
+        )
+        multi_map = extract_ast_contract_map([str(ts_sample), str(sql_sample)])
+        self.assertTrue(multi_map["success"])
+        m_txt = multi_map["contract_map"]
+        self.assertIn("export class QuotaController [L1-L6]", m_txt)
+        self.assertIn("public async evaluatePool(poolId: string): Promise<boolean> [L2-L5]", m_txt)
+        self.assertIn("[L7-L9]", m_txt)
+        self.assertIn("CREATE PROCEDURE dbo.SyncQuotaLedger [L1-L5]", m_txt)
+
+        # 4. Verify Cross-Workstation 5h Heartbeat Sync & Live Quota Calibration (--calibrate-pct / --reset-calibration)
+        temp_db = self.test_dir / "central_v201.db"
+        set_profile(tier_name="ultra", account_tier="ultra", effort_level="high", quota_mode="auto", db_path=temp_db)
+
+        # Simulate remote office workstation ('WS-OFFICE') having consumed 120.0 weighted units (35 turns) in the current 5h window
+        with patch("skillsdb.core.quota_router._resolve_workstation_id", return_value="WS-HOME"):
+            record_remote_workstation_heartbeat(
+                workstation_id="WS-OFFICE",
+                turns=35,
+                weighted_units=120.0,
+                subagent_spawns=4,
+                db_path=temp_db,
+            )
+            r5_merged = scan_rolling_5h_antigravity_usage(brain_dir=fake_brain, db_path=temp_db)
+            self.assertGreaterEqual(r5_merged["total_turns"], 35)
+            self.assertGreaterEqual(r5_merged["total_weighted_units"], 115.0)
+            self.assertTrue(any("WS-OFFICE" in w for w in r5_merged["remote_workstations_active"]))
+
+            # Calibrate 5h quota window to 68.5% (crosses Golden Ratio 61.8% -> effective_mode must switch to 'golden_ratio')
+            cal_res = calibrate_quota_load(68.5, db_path=temp_db, cid=cid, brain_dir=fake_brain)
+            self.assertTrue(cal_res["calibrated"])
+            dec_cal = compute_routing_decision(cid=cid, db_path=temp_db, model_name_hint="Gemini 4 Argon (High)", brain_dir=fake_brain)
+            self.assertTrue(dec_cal["calibration"]["active"])
+            self.assertAlmostEqual(dec_cal["load_pct_5h"], 68.5, delta=1.0)
+            self.assertEqual(dec_cal["effective_mode"], "golden_ratio")
+            banner = format_hook_routing_banner(dec_cal)
+            self.assertIn("[Calibrated 68.5%]", banner)
+            self.assertIn("WS-OFFICE", banner)
+
+            # Reset calibration anchor
+            clr_res = calibrate_quota_load(None, db_path=temp_db, cid=cid, brain_dir=fake_brain)
+            self.assertTrue(clr_res["cleared"])
+            dec_uncal = compute_routing_decision(cid=cid, db_path=temp_db, model_name_hint="Gemini 4 Argon (High)", brain_dir=fake_brain)
+            self.assertFalse(dec_uncal["calibration"]["active"])
+
+        # Verify CLI parser flags for --calibrate-pct and --reset-calibration
+        parser = build_parser()
+        p_args = parser.parse_args(["quota-status", "--calibrate-pct", "55.5"])
+        self.assertAlmostEqual(p_args.calibrate_pct, 55.5)
+        p_reset = parser.parse_args(["quota", "--reset-calibration"])
+        self.assertTrue(p_reset.reset_calibration)
+
+
 if __name__ == "__main__":
     unittest.main()

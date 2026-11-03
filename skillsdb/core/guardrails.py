@@ -14,7 +14,7 @@ import subprocess
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Tuple, Optional
-from ..config import resolve_user_home, DB_PATH
+from ..config import resolve_user_home, DB_PATH, read_jsonl_tail_lines
 from .quota_router import compute_routing_decision, record_quota_ledger_entry
 
 # Invariant characters
@@ -582,7 +582,7 @@ def _was_file_region_read_in_current_epoch(
     """
     Returns True if fpath (or the 650-line region around s_line..e_line for files > 800 lines)
     was already read in the current uncompacted conversation window (since the last <CONTEXT_SUMMARY>).
-    Prevents duplicate 650-800 line overwrite expansions on follow-up reads after edit_file.
+    Uses O(1) binary tail-seek (read_jsonl_tail_lines) so multi-megabyte transcripts never add hook latency.
     """
     try:
         t_path_str = payload.get("transcriptPath") or ""
@@ -594,13 +594,7 @@ def _was_file_region_read_in_current_epoch(
         if not t_path or not t_path.exists():
             return False
 
-        tail_lines: List[str] = []
-        with open(t_path, "r", encoding="utf-8", errors="ignore") as tf:
-            for line in tf:
-                tail_lines.append(line)
-                if len(tail_lines) > 120:
-                    tail_lines.pop(0)
-
+        tail_lines = read_jsonl_tail_lines(t_path, max_bytes=393216, max_lines=120)
         fname_low = fpath.name.lower()
         req_mid = (s_line + e_line) // 2
 
@@ -829,12 +823,7 @@ def handle_pre_tool_guardrail_hook():
                         if cid else None
                     )
                     if t_path and t_path.exists():
-                        tail_lines = []
-                        with open(t_path, "r", encoding="utf-8", errors="ignore") as tf:
-                            for line in tf:
-                                tail_lines.append(line)
-                                if len(tail_lines) > 30:
-                                    tail_lines.pop(0)
+                        tail_lines = read_jsonl_tail_lines(t_path, max_bytes=131072, max_lines=30)
                         search_streak = 0
                         for rline in reversed(tail_lines):
                             if (
