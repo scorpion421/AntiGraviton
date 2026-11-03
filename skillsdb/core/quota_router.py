@@ -1,6 +1,6 @@
 """
-Multi-Pool Quota Router, 3x3 Account/Execution Tier Matrix, Effort-Weighted 5h/24h Telemetry,
-and External Gemini Context-Shield Offload Engine (Pool 2 CLI OAuth, Pool 3 AI Studio REST API, Pool 4 Web Bridge).
+SkillsDB v4.0.0 (AntiGraviton Suite v2.0.0) Multi-Pool Quota Router, Golden-Ratio (61.8% / 85.0%) Ultra/Pro Control Plane,
+Effort-Weighted 5h/24h Telemetry, Context-Backpack Detector, and External Gemini Context-Shield Offload Engine.
 """
 
 import os

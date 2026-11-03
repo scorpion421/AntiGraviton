@@ -2,7 +2,7 @@
 
 - **Developer**: `scorpion421` (`MickyFoley`)
 - **License**: [GNU AGPL v3.0 + Commons Clause v1.0](../LICENSE) (`AGPL-3.0-only WITH Commons-Clause-1.0` - Non-Commercial / No Marketplace Resale)
-- **Suite Version**: AntiGraviton `v1.5.15-beta.3` (`SkillsDB v3.8.15-beta.3`)
+- **Suite Version**: AntiGraviton `v2.0.0-beta.3` (`SkillsDB v4.0.0-beta.3`)
 - **GitHub Repository**: [https://github.com/scorpion421/AntiGraviton](https://github.com/scorpion421/AntiGraviton)
 - **Local Gitea Service**: [http://localhost:3000](http://localhost:3000) (`skillsdb gitea-status`)
 

@@ -5,46 +5,54 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.5.15-beta.3] - 2026-11-03
+## [2.0.0-beta.3] - 2026-11-03
 
 ### Added
-- **Multi-file AST contract and line-offset mapper (`skillsdb/core/fim.py`, `skillsdb/core/quota_router.py`, `skillsdb/cli.py`, `skillsdb/platform/mcp_server.py`, `v3.8.15-beta.3`)**:
+- **Multi-file AST contract and line-offset mapper (`skillsdb/core/fim.py`, `skillsdb/core/quota_router.py`, `skillsdb/cli.py`, `skillsdb/platform/mcp_server.py`, `v4.0.0-beta.3`)**:
   - Added `extract_ast_contract_map()`, `format_ast_contract_map()`, `execute_ast_map()`, CLI command `skillsdb ast-map <files> [--query "<filter>"] [--project "<dir>"]`, and MCP tool `skillsdb_ast_map`.
   - Extracts 100% deterministic class, method, and function signatures with exact `[Lstart-Lend]` line boundaries and type contracts across Python, PowerShell, TypeScript/JavaScript, Go, Rust, C#/Java/Kotlin, and SQL at zero LLM API calls (~93-95% token compression in ~70ms), persisting discovered line offsets into `.agents/memory.db` (`ast_contract_<file>`) and recording token savings in `quota_ledger` (`local_ast_fim`).
-- **Context-backpack detector (`measure_session_backpack()` in `skillsdb/core/quota_router.py`, `v3.8.15-beta.3`)**:
+- **Context-backpack detector (`measure_session_backpack()` in `skillsdb/core/quota_router.py`, `v4.0.0-beta.3`)**:
   - Added post-compaction active context window weight measurement (`LIGHT < 20k tokens`, `MODERATE 20k-45k tokens`, `HEAVY >= 45k tokens`) scoped to the active 5-hour rolling window and resetting on `<CONTEXT_SUMMARY>` compaction boundaries.
   - Integrated backpack status into `skillsdb quota-status` and the `PreInvocation` routing directive so `HEAVY` context backpacks automatically trigger surgical `[Lstart-Lend]` reading and `/compact` milestone guidance.
-- **SemVer 2.0.0 pre-release (`-beta.N`) publishing support (`skillsdb/memory/gitea_releases.py`, `skillsdb/memory/gitea_sync.py`, `build.py`, `v3.8.15-beta.3`)**:
+- **SemVer 2.0.0 pre-release (`-beta.N`) publishing support (`skillsdb/memory/gitea_releases.py`, `skillsdb/memory/gitea_sync.py`, `build.py`, `v4.0.0-beta.3`)**:
   - Updated `sync_changelog_releases()` and `publish_gitea_release()` to automatically detect SemVer pre-release versions (`-` in version string), set `"prerelease": True` and `"target_commitish"` to the active branch (`beta`) on Gitea, and pass `--prerelease` to `gh release create` / `gh release edit` on GitHub.
 
-## [1.5.15-beta.2] - 2026-11-03
+## [2.0.0-beta.2] - 2026-11-03
 
 ### Changed
-- **Golden-Ratio (`61.8%` / `85.0%`) `Ultra / Pro`-only coding control plane (`skillsdb/core/quota_router.py`, `skillsdb/core/detector.py`, `skillsdb/core/guardrails.py`, `plugin/rules/AGENTS.md`, `v3.8.15-beta.2`)**:
-  - Restricted subscription quota governance strictly to professional coding tiers (`ultra`: Google AI Ultra, and `pro`: Google AI Pro), removing non-coding `lite`/`free` subscription tiers and normalizing any legacy `lite` input to `pro`.
+- **Golden-Ratio (`61.8%` / `85.0%`) `Ultra / Pro`-only coding control plane (`skillsdb/core/quota_router.py`, `skillsdb/core/detector.py`, `skillsdb/core/guardrails.py`, `plugin/rules/AGENTS.md`, `v4.0.0-beta.2`)**:
+  - Restricted subscription quota governance strictly to professional coding tiers (`ultra`: Google AI Ultra, and `pro`: Google AI Pro), normalizing any legacy `lite` input to `pro`.
   - Calibrated Golden-Ratio Pool 1A 5-hour rolling window thresholds (`0-61.8%` optimal zone on `Argon High`, `61.8%-85.0%` Golden-Ratio step-down to `Argon Medium` saving `-37%` pool burn at 100% Argon code quality, and `> 85.0%` failover to `Pool 1C: Claude Opus 5.5 / Sonnet 5.5`).
   - Enforced the **Strict Argon/Claude Coding Guarantee** in `handle_pre_tool_guardrail_hook()`: `TypeName="self"` coding subagents are never downgraded to `Gemini 3.8 Flash`; only read-only `TypeName="research"` subagents are rewritten to `Model="flash"` (`Pool 1B`).
-- **Live mid-session model/effort switch detection (`skillsdb/memory/project_memory.py`, `v3.8.15-beta.2`)**:
+- **Live mid-session model/effort switch detection (`skillsdb/memory/project_memory.py`, `v4.0.0-beta.2`)**:
   - Enhanced `handle_pre_invocation_hook()` to compare the live transcript model and effort signature against `.agents/memory.db` (`last_active_model_sig`) on every turn and immediately inject the updated `format_hook_routing_banner()` whenever the user switches models or effort levels mid-session (as well as on every 50-step drift-guard rehydration).
 
-## [1.5.15-beta.1] - 2026-11-03
+### Removed
+- **Breaking: Dropped non-coding `Lite` / `Free` subscription tiers (`skillsdb/core/detector.py`, `skillsdb/core/quota_router.py`, `v4.0.0-beta.2`)**:
+  - Removed `lite` / `free` subscription tier budgets and routing rules so AntiGraviton v2.0.0 focuses exclusively on `Ultra` and `Pro` coding subscriptions.
+
+## [2.0.0-beta.1] - 2026-11-03
 
 ### Added
-- **Multi-pool quota router and 4-pool governance engine (`skillsdb/core/quota_router.py`, `v3.8.15-beta.1`)**:
+- **Multi-pool quota router and 4-pool governance engine (`skillsdb/core/quota_router.py`, `v4.0.0-beta.1`)**:
   - Implemented unified quota routing across all 4 quota pools: Pool 1 (internal Antigravity 5-hour rolling window across Pool 1A `Gemini 4 Argon`, Pool 1B `Gemini 3.8 Flash`, Pool 1C `Claude Opus 5.5` / `Claude Sonnet 5.5`, and Pool 1D `GPT-OSS 120B`), Pool 2 (standalone `@google/gemini-cli` 24-hour OAuth developer quota), Pool 3 (`Google AI Studio` low-latency REST API), and Pool 4 (`gemini.google.com` Deep Research clipboard handover bridge).
-- **13-combination model and reasoning effort catalog (`skillsdb/core/detector.py`, `v3.8.15-beta.1`)**:
+- **13-combination model and reasoning effort catalog (`skillsdb/core/detector.py`, `v4.0.0-beta.1`)**:
   - Added `parse_antigravity_model_spec()` and `detect_model_and_pool()` supporting `Fast`, `Medium`, and `High` reasoning effort levels (and effort-weighted quota multipliers) on `Gemini 4 Argon`, `Gemini 3.8 Flash`, `Claude Opus 5.5`, and `Claude Sonnet 5.5`, while pinning `GPT-OSS 120B` to `Medium`.
-- **Zero-turn `PreToolUse` subagent model overwrite (`plugin/hooks.json`, `skillsdb/core/guardrails.py`, `v3.8.15-beta.1`)**:
+- **Zero-turn `PreToolUse` subagent model overwrite (`plugin/hooks.json`, `skillsdb/core/guardrails.py`, `v4.0.0-beta.1`)**:
   - Added `invoke_subagent` to the `PreToolUse` matcher so `handle_pre_tool_guardrail_hook()` automatically rewrites `Model="inherit"` to `"flash"` for exploratory `research` subagents at zero extra turns.
-- **Context-shield CLI & MCP tools (`skillsdb/cli.py`, `skillsdb/platform/mcp_server.py`, `skillsdb/core/db.py`, `v3.8.15-beta.1`)**:
+- **Context-shield CLI & MCP tools (`skillsdb/cli.py`, `skillsdb/platform/mcp_server.py`, `skillsdb/core/db.py`, `v4.0.0-beta.1`)**:
   - Added `skillsdb quota-status` (alias `quota`), `skillsdb gemini-digest`, `skillsdb gemini-handover`, `skillsdb gemini-ingest`, and the `quota_ledger` SQLite table tracking offloaded requests and saved Antigravity tokens/turns.
 
 ### Changed
-- **Updated Rule 7 and removed legacy `Gemini 3.1 Pro` references (`plugin/rules/AGENTS.md`, `skillsdb/core/detector.py`, `v3.8.15-beta.1`)**:
-  - Replaced obsolete `Gemini 3.1 Pro` references with the 5 active Antigravity models and their effort levels (`Fast`, `Medium`, `High`).
+- **Updated Rule 7 to Multi-Pool Quota Routing (`plugin/rules/AGENTS.md`, `skillsdb/core/detector.py`, `v4.0.0-beta.1`)**:
+  - Upgraded Rule 7 to govern the 5 active Antigravity models and their effort levels (`Fast`, `Medium`, `High`).
+
+### Removed
+- **Breaking: Removed legacy `Gemini 3.1 Pro` model definitions (`skillsdb/core/detector.py`, `plugin/rules/AGENTS.md`, `v4.0.0-beta.1`)**:
+  - Removed obsolete `Gemini 3.1 Pro` identifiers and mappings from the active model catalog.
 
 ### Fixed
-- **Enterprise Active Directory transcript path resolution in `detector.py` (`v3.8.15-beta.1`)**:
+- **Enterprise Active Directory transcript path resolution in `detector.py` (`v4.0.0-beta.1`)**:
   - Replaced `Path.home() / ".gemini"` with `GEMINI_DIR` (`resolve_user_home()`) in `detect_model_and_pool()` so live transcript model detection resolves `%USERPROFILE%\.gemini` reliably when `HOME=Q:\`.
 
 ## [1.5.14] - 2026-11-02
