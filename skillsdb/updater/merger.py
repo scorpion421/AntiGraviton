@@ -23,8 +23,8 @@ from ..config import (
     estimate_tokens,
 )
 from ..core.db import get_connection, init_db, managed_connection
-from ..core.detector import detect_model_tier, detect_model_and_pool
-from ..core.quota_router import detect_external_pools, detect_model_and_pool
+from ..core.detector import detect_model_tier, detect_model_and_pool, parse_antigravity_model_spec
+from ..core.fim import extract_ast_contract_map
 from ..core.quota_router import detect_external_pools
 from ..core.concurrency import fetch_single_skill
 from ..memory.project_memory import find_project_root, _is_protected_non_workspace
@@ -582,7 +582,9 @@ def doctor(conn: sqlite3.Connection):
         rcnt = cursor.fetchone()[0]
         cursor.execute("SELECT COUNT(*) FROM skills;")
         scnt = cursor.fetchone()[0]
-        print(f"[OK] Central Database: Healthy (Integrity: {res}, Journal: {jmode}, Rules: {rcnt}, Skills: {scnt})")
+        cursor.execute("SELECT COUNT(*) FROM quota_ledger;")
+        lcnt = cursor.fetchone()[0]
+        print(f"[OK] Central Database: Healthy (Integrity: {res}, Journal: {jmode}, Rules: {rcnt}, Skills: {scnt}, Ledger: {lcnt})")
     except Exception as e:
         print(f"[FAIL] Central Database error: {e}")
 
@@ -597,6 +599,10 @@ def doctor(conn: sqlite3.Connection):
         cli_s = "READY" if ext_p["ext_cli_oauth"]["authenticated"] else ("INSTALLED" if ext_p["ext_cli_oauth"]["available"] else "OPTIONAL")
         api_s = "READY" if ext_p["ext_aistudio_api"]["available"] else "OPTIONAL"
         print(f"[OK] Multi-Pool Quota Router: Pool 2 CLI-OAuth={cli_s}, Pool 3 AIStudio-API={api_s}, Pool 4 Web-Bridge=READY")
+        spec_argon = parse_antigravity_model_spec("Gemini 4 Argon (High)")
+        spec_gpt = parse_antigravity_model_spec("GPT-OSS 120B (High)")
+        if spec_argon and spec_argon["effort_level"] == "high" and spec_gpt and spec_gpt["effort_level"] == "medium":
+            print("[OK] Agent Control Plane Catalog: 13-model & effort matrix verified (Argon/Flash/Opus/Sonnet/GPT-OSS)")
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
             futures = [ex.submit(fetch_single_skill, "customizations-db", DB_PATH, True) for _ in range(8)]
@@ -618,8 +624,19 @@ def doctor(conn: sqlite3.Connection):
     # 4. Active Plugin check
     active_plugin = GLOBAL_PLUGINS_PATH / "customizations-db"
     if active_plugin.exists() and (active_plugin / "plugin.json").exists():
-        has_hooks = (active_plugin / "hooks.json").exists()
-        hook_str = "with lifecycle hooks" if has_hooks else "without hooks"
+        hooks_file = active_plugin / "hooks.json"
+        has_hooks = hooks_file.exists()
+        has_subagent_hook = False
+        if has_hooks:
+            try:
+                has_subagent_hook = "invoke_subagent" in hooks_file.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                has_subagent_hook = False
+        hook_str = (
+            "with lifecycle & PreToolUse subagent hooks"
+            if has_subagent_hook
+            else ("with lifecycle hooks" if has_hooks else "without hooks")
+        )
         print(f"[OK] Antigravity Plugin: Deployed at {active_plugin} ({hook_str})")
     else:
         print(f"[WARN] Antigravity Plugin: Not found in {GLOBAL_PLUGINS_PATH}/customizations-db")

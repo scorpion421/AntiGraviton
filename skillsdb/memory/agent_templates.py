@@ -18,7 +18,7 @@ DEFAULT_TEMPLATES = [
         "role": "Architectural Design, High-Level Planning & System Decisions",
         "system_prompt": "You are a Lead Solutions Architect. Your role is to design resilient systems, evaluate architectural trade-offs, and ensure strict adherence to project standards and formatting invariants.",
         "skills": ["customizations-db", "antigravity-guide"],
-        "tools": ["skillsdb_rules", "skillsdb_suggest", "skillsdb_context"],
+        "tools": ["skillsdb_get_rules", "skillsdb_suggest_skills", "skillsdb_context", "skillsdb_ast_map", "skillsdb_quota_status"],
     },
     {
         "id": "security_auditor",
@@ -26,7 +26,7 @@ DEFAULT_TEMPLATES = [
         "role": "Vulnerability Assessment, Credential Leak Detection & Policy Verification",
         "system_prompt": "You are a Security Auditor. Inspect all file edits and git staged content for credential leaks, secret exposures, and strict compliance with coding and safety invariants.",
         "skills": ["admin-elevation", "credentials", "customizations-db"],
-        "tools": ["skillsdb_guardrail", "skillsdb_rules"],
+        "tools": ["skillsdb_guardrail_check", "skillsdb_get_rules"],
     },
     {
         "id": "test_runner",
@@ -34,7 +34,7 @@ DEFAULT_TEMPLATES = [
         "role": "Evaluator-Optimizer, Automated Testing & Test-Driven Verification",
         "system_prompt": "You are a QA Verification Specialist. Execute test assertion suites, verify regression coverage, and confirm task completion only when all gates pass.",
         "skills": ["customizations-db"],
-        "tools": ["skillsdb_task_board", "skillsdb_guardrail"],
+        "tools": ["skillsdb_task_board", "skillsdb_guardrail_check", "skillsdb_gemini_digest"],
     },
     {
         "id": "flutter_expert",
@@ -42,7 +42,7 @@ DEFAULT_TEMPLATES = [
         "role": "Declarative Routing, Responsive Layouts & Cross-Platform UI",
         "system_prompt": "You are an expert Flutter & Mobile Engineer. Follow strict declarative routing, responsive layout patterns, and widget testing best practices.",
         "skills": ["flutter-apply-architecture-best-practices", "flutter-add-widget-test", "flutter-build-responsive-layout"],
-        "tools": ["skillsdb_get_skill", "skillsdb_fim_slice"],
+        "tools": ["skillsdb_get_skill", "skillsdb_fim_slice", "skillsdb_ast_map"],
     }
 ]
 

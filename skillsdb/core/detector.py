@@ -87,6 +87,11 @@ def tier_to_display_label(tier: str) -> str:
     return t.upper() or "PRO"
 
 
+def _has_explicit_effort_level(text: str) -> bool:
+    """Returns True if the model selection string explicitly names a reasoning effort level (Fast/Medium/High)."""
+    return bool(re.search(r"\b(?:high|medium|med|fast|low|lite)\b", (text or "").lower()))
+
+
 def _extract_effort_level(text: str, supported: list[str], default_effort: str) -> str:
     """Extracts Fast, Medium, or High reasoning effort from a model selection string."""
     if len(supported) == 1:
@@ -133,10 +138,12 @@ def parse_antigravity_model_spec(text: str, effort_override: str = None) -> dict
     supported = list(spec["supported_efforts"])
     if family_key == "gpt-oss-120b":
         effort = EFFORT_MEDIUM
+    elif _has_explicit_effort_level(low):
+        effort = _extract_effort_level(low, supported, spec["default_effort"])
     elif effort_override and effort_override.lower() in supported:
         effort = effort_override.lower()
     else:
-        effort = _extract_effort_level(low, supported, spec["default_effort"])
+        effort = spec["default_effort"]
 
     tier = spec["tiers"].get(effort, TIER_STANDARD)
     weight = spec["weights"].get(effort, 1.0)
@@ -420,7 +427,16 @@ def detect_model_and_pool(cid: str = None, db_path: Path = None, model_name_hint
             pass
 
     # Stage 4: Default baseline fallback (Gemini 4 Argon High on Ultra account, or Pro baseline)
-    base_spec = parse_antigravity_model_spec("Gemini 4 Argon (High)", effort_override=cfg_effort or None)
+    base_spec = parse_antigravity_model_spec("Gemini 4 Argon", effort_override=cfg_effort or EFFORT_HIGH)
+    if account_tier == "ultra":
+        base_spec.update({
+            "account_tier": account_tier,
+            "account_tier_source": account_src,
+            "quota_mode": cfg_quota_mode,
+            "source": "Default baseline (Ultra / Gemini 4 Argon)",
+        })
+        return base_spec
+
     base_spec["model_tier"] = TIER_STANDARD
     base_spec["tier_label"] = "PRO"
     base_spec.update({
@@ -556,12 +572,8 @@ def get_profile(cid: str = None, db_path: Path = None):
     print(f"Detected Tier:       {tier.upper()} ({info['tier_label']})")
     print(f"Detection Source:    {info['source']}")
     print(f"Quota Router Mode:   {info['quota_mode'].upper()}")
-    if tier == TIER_ULTRA:
-        print("Concurrency Mode:    HIGH (Multi-threaded batching enabled)")
-        print("Max Reader Workers:  16 parallel threads")
-        print("Batch Retrieval:     Active (skillsdb get-skills / search-multi)")
-        print("Skill Clusters:      Active (skillsdb get-cluster <domain>)")
-    elif tier in [TIER_LOCAL, TIER_OFFLINE]:
+    acc_tier = info.get("account_tier", "ultra")
+    if tier in [TIER_LOCAL, TIER_OFFLINE]:
         print("Concurrency Mode:    SOVEREIGN / LOCAL (Air-gapped offline mode)")
         print("Cloud Data Egress:   BLOCKED (Zero external network calls)")
         print("Inference Engine:    Local Codestral / Mistral / Ollama endpoint")
@@ -571,11 +583,18 @@ def get_profile(cid: str = None, db_path: Path = None):
             print(f"Local Server:        Online at {local_status['url']} ({models_str})")
         else:
             print(f"Local Server:        Offline ({local_status['url']} unreachable)")
-    elif tier == TIER_LEAN:
-        print("Concurrency Mode:    LEAN / LITE (Token-conserving sequential mode)")
-        print("Max Reader Workers:  1 thread")
-        print("Micro-Skills:        Active (Use --section to preserve quota)")
+    elif acc_tier == "ultra" or tier == TIER_ULTRA:
+        print("Concurrency Mode:    HIGH / ULTRA (Multi-threaded batching enabled)")
+        print("Max Reader Workers:  16 parallel threads")
+        print("Batch Retrieval:     Active (skillsdb get-skills / search-multi)")
+        print("Skill Clusters:      Active (skillsdb get-cluster <domain>)")
+    elif acc_tier == "pro" or tier == TIER_STANDARD:
+        print("Concurrency Mode:    STANDARD / PRO (Balanced 8-thread Pro mode)")
+        print("Max Reader Workers:  8 parallel threads")
+        print("Batch Retrieval:     Active (skillsdb get-skills / search-multi)")
+        print("Skill Clusters:      Active (skillsdb get-cluster <domain>)")
     else:
-        print("Concurrency Mode:    STANDARD / PRO (Balanced Pro mode)")
+        print("Concurrency Mode:    LEAN / LITE (Token-conserving sequential mode)")
         print("Max Reader Workers:  4 parallel threads")
+        print("Micro-Skills:        Active (Use --section to preserve quota)")
     print("=================================================================\n")

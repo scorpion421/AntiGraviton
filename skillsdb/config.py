@@ -14,8 +14,8 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-__version__ = "4.0.0-beta.3"
-__suite_version__ = "2.0.0-beta.3"
+__version__ = "4.0.0-beta.4"
+__suite_version__ = "2.0.0-beta.4"
 
 # Model capability & subscription tiers
 TIER_LEAN = "lean"          # Lite / Gemini 3.8 Flash (Fast/Medium) / Flash-Lite, minimal token footprint

@@ -15,7 +15,13 @@ from ..config import DB_PATH, __version__
 from ..core.db import get_connection, init_db
 from ..core.guardrails import check_text, fix_text
 from ..core.fim import slice_fim, slice_fim_symbol, format_fim_block
-from ..core.quota_router import compute_routing_decision, execute_gemini_digest, execute_ast_map
+from ..core.quota_router import (
+    compute_routing_decision,
+    execute_gemini_digest,
+    execute_ast_map,
+    create_web_handover,
+    ingest_web_response,
+)
 from ..search.fts import suggest_skills, get_skill, get_active_rules
 from ..memory.agent_templates import list_agent_templates, get_agent_template, format_agent_prompt
 from ..memory.gitea_sync import gitea_status_summary, save_code_commit
@@ -146,6 +152,57 @@ TOOLS_REGISTRY = [
             },
             "required": ["files"]
         }
+    },
+    {
+        "name": "skillsdb_context",
+        "description": "Retrieve active project episodic memory context (facts, architectural decisions, open tasks, and latest snapshot) from .agents/memory.db.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_path": {"type": "string", "description": "Optional project root directory"}
+            }
+        }
+    },
+    {
+        "name": "skillsdb_task_board",
+        "description": "List, add, or update deterministic tasks in the project task board (.agents/memory.db).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "description": "Action: list, add, or update (default: list)"},
+                "title": {"type": "string", "description": "Task title (when action is add or update)"},
+                "task_id": {"type": "integer", "description": "Task ID (when action is update)"},
+                "status": {"type": "string", "description": "Status filter or new status: pending, in_progress, completed, blocked"},
+                "priority": {"type": "string", "description": "Priority: low, med, high, critical"},
+                "project_path": {"type": "string", "description": "Optional project root directory"}
+            }
+        }
+    },
+    {
+        "name": "skillsdb_gemini_handover",
+        "description": "Create a Pool 4 (gemini.google.com Deep Research) prompt bundle and copy to clipboard.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "topic": {"type": "string", "description": "Research or architectural analysis topic"},
+                "files": {"type": "array", "items": {"type": "string"}, "description": "Optional workspace files to attach"},
+                "project_path": {"type": "string", "description": "Optional project root directory"},
+                "copy_clipboard": {"type": "boolean", "description": "Copy bundle to clipboard (default: true)"}
+            },
+            "required": ["topic"]
+        }
+    },
+    {
+        "name": "skillsdb_gemini_ingest",
+        "description": "Ingest a Pool 4 (gemini.google.com) research response into .agents/memory.db.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "Response text to ingest (defaults to reading clipboard)"},
+                "fact_key": {"type": "string", "description": "Fact key to save under (default: gemini_web_research_finding)"},
+                "project_path": {"type": "string", "description": "Optional project root directory"}
+            }
+        }
     }
 ]
 
@@ -259,10 +316,83 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> str:
             return json.dumps(res, indent=2)
 
         elif name == "skillsdb_ast_map":
+            proj_p = Path(args["project_path"]) if args.get("project_path") else None
             res = execute_ast_map(
                 files=args.get("files") or [],
                 symbol_filter=args.get("symbol_filter"),
                 save_fact_key=args.get("save_fact_key"),
+                project_root=proj_p,
+            )
+            return json.dumps(res, indent=2)
+
+        elif name in ("skillsdb_context", "skillsdb_mem_context"):
+            import io
+            from contextlib import redirect_stdout
+            from ..memory.project_memory import find_project_root, get_project_connection, mem_get_context
+            proj_p = Path(args["project_path"]) if args.get("project_path") else find_project_root()
+            pconn = get_project_connection(proj_p)
+            try:
+                f = io.StringIO()
+                with redirect_stdout(f):
+                    mem_get_context(pconn, project_root=proj_p)
+                return f.getvalue()
+            finally:
+                pconn.close()
+
+        elif name == "skillsdb_task_board":
+            import io
+            from contextlib import redirect_stdout
+            from ..memory.project_memory import (
+                find_project_root,
+                get_project_connection,
+                mem_task_add,
+                mem_task_update,
+                mem_task_list,
+            )
+            proj_p = Path(args["project_path"]) if args.get("project_path") else find_project_root()
+            action = (args.get("action") or "list").strip().lower()
+            pconn = get_project_connection(proj_p)
+            try:
+                f = io.StringIO()
+                with redirect_stdout(f):
+                    if action == "add" and args.get("title"):
+                        mem_task_add(
+                            pconn,
+                            args["title"],
+                            description=args.get("description", ""),
+                            priority=args.get("priority", "med"),
+                            status=args.get("status", "pending"),
+                        )
+                    elif action == "update" and args.get("task_id") is not None:
+                        mem_task_update(
+                            pconn,
+                            int(args["task_id"]),
+                            status=args.get("status"),
+                            priority=args.get("priority"),
+                            title=args.get("title"),
+                        )
+                    else:
+                        mem_task_list(pconn, status=args.get("status"), as_json=True)
+                return f.getvalue()
+            finally:
+                pconn.close()
+
+        elif name == "skillsdb_gemini_handover":
+            proj_p = Path(args["project_path"]) if args.get("project_path") else None
+            res = create_web_handover(
+                topic=args.get("topic") or "Architectural research",
+                files=args.get("files"),
+                project_root=proj_p,
+                copy_clipboard=bool(args.get("copy_clipboard", True)),
+            )
+            return json.dumps(res, indent=2)
+
+        elif name == "skillsdb_gemini_ingest":
+            proj_p = Path(args["project_path"]) if args.get("project_path") else None
+            res = ingest_web_response(
+                raw_text=args.get("text"),
+                fact_key=args.get("fact_key") or "gemini_web_research_finding",
+                project_root=proj_p,
             )
             return json.dumps(res, indent=2)
 

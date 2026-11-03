@@ -1308,5 +1308,192 @@ class TestGiteaSync(unittest.TestCase):
         self.assertGreater(l24["saved_agy_tokens_total"], 0)
 
 
+    def test_v2_0_0_beta_4_full_core_and_control_plane_wiring_e2e(self):
+        """Verifies v2.0.0-beta.4 (SkillsDB v4.0.0-beta.4) end-to-end wiring between SkillsDB Core and Agent Control Plane."""
+        import io
+        import json
+        from unittest.mock import patch
+        from skillsdb.core.concurrency import resolve_optimal_workers
+        from skillsdb.core.detector import (
+            parse_antigravity_model_spec,
+            detect_model_and_pool,
+            set_profile,
+            get_profile,
+        )
+        from skillsdb.core.quota_router import (
+            measure_session_backpack,
+            execute_gemini_digest,
+            execute_ast_map,
+            evaluate_quota_route,
+            prepare_web_handover,
+            ingest_web_handover,
+        )
+        from skillsdb.core.guardrails import handle_pre_tool_guardrail_hook
+        from skillsdb.platform.mcp_server import TOOLS_REGISTRY, handle_tool_call
+        from skillsdb.memory.agent_templates import DEFAULT_TEMPLATES, init_agent_templates
+        from skillsdb.updater.merger import doctor
+        from skillsdb.search.fts import suggest_skills
+
+        temp_db = self.test_dir / "central_v200b4.db"
+        fake_brain = self.test_dir / "brain_v200b4"
+        fake_brain.mkdir(parents=True, exist_ok=True)
+
+        # 1. Explicit effort in raw string must not be clobbered by effort_override; unlabelled model uses effort_override
+        spec_explicit = parse_antigravity_model_spec("Gemini 4 Argon (High)", effort_override="fast")
+        self.assertEqual(spec_explicit["effort_level"], "high")
+        spec_fallback = parse_antigravity_model_spec("Gemini 4 Argon", effort_override="medium")
+        self.assertEqual(spec_fallback["effort_level"], "medium")
+
+        # 2. Stage 4 fallback and dynamic concurrency workers (16 on Ultra, 8 on Pro, 1 on Local)
+        set_profile(tier_name="auto", account_tier="ultra", effort_level="auto", quota_mode="golden_ratio", db_path=temp_db)
+        with patch("skillsdb.core.detector.GEMINI_DIR", self.test_dir / "empty_gemini"):
+            info_ultra = detect_model_and_pool(cid="nonexistent-cid", db_path=temp_db)
+            self.assertEqual(info_ultra["account_tier"], "ultra")
+            self.assertEqual(info_ultra["model_tier"], "ultra")
+            self.assertEqual(resolve_optimal_workers(db_path=temp_db), 16)
+
+        set_profile(tier_name="auto", account_tier="pro", effort_level="medium", quota_mode="golden_ratio", db_path=temp_db)
+        with patch("skillsdb.core.detector.GEMINI_DIR", self.test_dir / "empty_gemini"):
+            info_pro = detect_model_and_pool(cid="nonexistent-cid", db_path=temp_db)
+            self.assertEqual(info_pro["account_tier"], "pro")
+            self.assertEqual(info_pro["model_tier"], "standard")
+            self.assertEqual(resolve_optimal_workers(db_path=temp_db), 8)
+            prof_out = io.StringIO()
+            with patch("sys.stdout", prof_out):
+                get_profile(cid="nonexistent-cid", db_path=temp_db)
+            self.assertIn("Max Reader Workers:  8 parallel threads", prof_out.getvalue())
+
+        set_profile(tier_name="local", db_path=temp_db)
+        self.assertEqual(resolve_optimal_workers(db_path=temp_db), 1)
+        set_profile(tier_name="auto", account_tier="ultra", effort_level="high", db_path=temp_db)
+
+        # 3. PreToolUse Strict Argon/Claude Coding Guarantee: TypeName='self' must NEVER downgrade to Flash
+        # Case A: TypeName='self' with Role containing 'Researcher' and Model='inherit' -> stays on Argon (no overwrite to flash)
+        p_self_res = json.dumps({
+            "dbPath": str(temp_db),
+            "brainDir": str(fake_brain),
+            "modelName": "Gemini 4 Argon (High)",
+            "toolCall": {
+                "name": "invoke_subagent",
+                "args": {"TypeName": "self", "Role": "Architecture Researcher & Refactorer", "Prompt": "Refactor module", "Model": "inherit"},
+            },
+        })
+        out_sr = io.StringIO()
+        with patch("sys.stdin", io.StringIO(p_self_res)), patch("sys.stdout", out_sr):
+            handle_pre_tool_guardrail_hook()
+        res_sr = json.loads(out_sr.getvalue())
+        self.assertEqual(res_sr["decision"], "allow")
+        self.assertNotIn("overwrite", res_sr)
+
+        # Case B: TypeName='self' with explicit Model='flash' -> automatically upgraded to 'inherit' (Argon)
+        p_self_flash = json.dumps({
+            "dbPath": str(temp_db),
+            "brainDir": str(fake_brain),
+            "modelName": "Gemini 4 Argon (High)",
+            "toolCall": {
+                "name": "invoke_subagent",
+                "args": {"TypeName": "self", "Role": "Code Implementer", "Prompt": "Write parser", "Model": "flash"},
+            },
+        })
+        out_sf = io.StringIO()
+        with patch("sys.stdin", io.StringIO(p_self_flash)), patch("sys.stdout", out_sf):
+            handle_pre_tool_guardrail_hook()
+        res_sf = json.loads(out_sf.getvalue())
+        self.assertEqual(res_sf["decision"], "allow")
+        self.assertEqual(res_sf.get("overwrite"), {"Model": "inherit"})
+
+        # 4. Context-Backpack isolation for new conversation ID & uncompacted steps older than 5h
+        old_conv_dir = fake_brain / "old-heavy-conv" / ".system_generated" / "logs"
+        old_conv_dir.mkdir(parents=True, exist_ok=True)
+        old_steps = [
+            json.dumps({"step_index": i, "type": "PLANNER_RESPONSE", "source": "MODEL", "created_at": "2026-10-01T08:00:00Z", "content": "x" * 1200})
+            for i in range(1, 85)
+        ]
+        (old_conv_dir / "transcript.jsonl").write_text("\n".join(old_steps) + "\n", encoding="utf-8")
+
+        bp_new = measure_session_backpack(cid="brand-new-cid", brain_dir=fake_brain)
+        self.assertEqual(bp_new["backpack_state"], "LIGHT")
+        self.assertEqual(bp_new["uncompacted_steps"], 0)
+
+        bp_old = measure_session_backpack(cid="old-heavy-conv", brain_dir=fake_brain)
+        self.assertEqual(bp_old["backpack_state"], "HEAVY")
+        self.assertEqual(bp_old["uncompacted_steps"], 84)
+
+        # 5. Relative path resolution in execute_ast_map + Kotlin 'fun' support + duplicate basename disambiguation in execute_gemini_digest
+        pkg_a = self.test_dir / "pkg_a"
+        pkg_b = self.test_dir / "pkg_b"
+        pkg_a.mkdir(parents=True, exist_ok=True)
+        pkg_b.mkdir(parents=True, exist_ok=True)
+        (pkg_a / "handler.kt").write_text("class AuthController {\n}\nfun validateToken(tok: String): Boolean {\n    return true\n}\n", encoding="utf-8")
+        (pkg_b / "handler.kt").write_text("fun refreshSession(id: Int): String {\n    return \"ok\"\n}\n", encoding="utf-8")
+
+        ast_kt = execute_ast_map(
+            files=["pkg_a/handler.kt"],
+            project_root=self.test_dir,
+            db_path=temp_db,
+        )
+        self.assertTrue(ast_kt["success"])
+        self.assertIn("validateToken", ast_kt["contract_map"])
+
+        dig_dup = execute_gemini_digest(
+            files=["pkg_a/handler.kt", "pkg_b/handler.kt"],
+            query="List Kotlin functions",
+            preferred_pool="local",
+            project_root=self.test_dir,
+            db_path=temp_db,
+        )
+        self.assertTrue(dig_dup["success"])
+        self.assertIn("pkg_a/handler.kt", dig_dup["files_digested"])
+        self.assertIn("pkg_b/handler.kt", dig_dup["files_digested"])
+
+        # 6. Canonical aliases, 15-tool MCP server registry, and agent template 1:1 tool alignment
+        self.assertIs(evaluate_quota_route, evaluate_quota_route)
+        ho_bundle = prepare_web_handover("Test Pool 4 Handover", project_root=self.test_dir, copy_clipboard=False, db_path=temp_db)
+        self.assertIn("prompt_bundle", ho_bundle)
+        ing_res = ingest_web_handover(raw_text="Distilled Pool 4 architecture notes", fact_key="pool4_test", project_root=self.test_dir)
+        self.assertTrue(ing_res["success"])
+
+        mcp_tool_names = {t["name"] for t in TOOLS_REGISTRY}
+        for expected_tool in (
+            "skillsdb_get_rules",
+            "skillsdb_suggest_skills",
+            "skillsdb_get_skill",
+            "skillsdb_guardrail_check",
+            "skillsdb_fim_slice",
+            "skillsdb_agent_template",
+            "skillsdb_gitea_status",
+            "skillsdb_gitea_sync",
+            "skillsdb_quota_status",
+            "skillsdb_gemini_digest",
+            "skillsdb_ast_map",
+            "skillsdb_context",
+            "skillsdb_task_board",
+            "skillsdb_gemini_handover",
+            "skillsdb_gemini_ingest",
+        ):
+            self.assertIn(expected_tool, mcp_tool_names)
+
+        for tmpl in DEFAULT_TEMPLATES:
+            for t_name in tmpl["tools"]:
+                self.assertIn(t_name, mcp_tool_names, f"Template {tmpl['id']} references unregistered MCP tool {t_name}")
+
+        ctx_out = handle_tool_call("skillsdb_context", {"project_path": str(self.test_dir)})
+        self.assertIn("pool4_test", ctx_out)
+        tb_out = handle_tool_call("skillsdb_task_board", {"action": "add", "title": "Verify MCP task board", "project_path": str(self.test_dir)})
+        self.assertIn("Verify MCP task board", tb_out)
+
+        # 7. Verify doctor() and suggest_skills()
+        from skillsdb.core.db import get_connection, init_db
+        with get_connection(temp_db) as dconn:
+            init_db(dconn)
+            init_agent_templates(dconn)
+            doc_out = io.StringIO()
+            with patch("sys.stdout", doc_out):
+                doctor(dconn)
+            doc_txt = doc_out.getvalue()
+            self.assertIn("Agent Control Plane Catalog: 13-model & effort matrix verified", doc_txt)
+            self.assertIn("Ledger:", doc_txt)
+
+
 if __name__ == "__main__":
     unittest.main()

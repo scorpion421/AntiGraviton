@@ -259,10 +259,13 @@ def bundle():
                     continue
                 docstring_done = True
 
-            # Skip package-relative imports (from . or from ..)
-            if line == stripped and re.match(r"^from\s+\.+[A-Za-z0-9_.]*\s+import\b", stripped):
+            # Skip package-relative imports (from . or from ..); replace indented ones with pass
+            if re.match(r"^from\s+\.+[A-Za-z0-9_.]*\s+import\b", stripped):
                 if "(" in stripped and ")" not in stripped:
                     in_multiline_skip = True
+                if line != stripped:
+                    indent_ws = line[: len(line) - len(stripped)]
+                    filtered_lines.append(f"{indent_ws}pass")
                 continue
 
             # Skip top-level standard library imports already in header

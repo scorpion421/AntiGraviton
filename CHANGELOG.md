@@ -5,6 +5,31 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0-beta.4] - 2026-11-03
+
+### Added
+- **End-to-end core and agent control plane integration suite (`tests/test_gitea_sync.py`, `v4.0.0-beta.4`)**:
+  - Added `test_v2_0_0_beta_4_full_core_and_control_plane_wiring_e2e` verifying all 15 MCP server tools, all 4 agent templates, dynamic `Ultra (16)` / `Pro (8)` / `Local (1)` concurrency scaling, `PreToolUse` coding subagent protection (`TypeName="self"` never downgraded to `Flash`), AST contract mapping with `project_root` and Kotlin `fun` support, and `doctor()` control plane health checks.
+- **Complete 15-tool MCP server and agent template alignment (`skillsdb/platform/mcp_server.py`, `skillsdb/memory/agent_templates.py`, `v4.0.0-beta.4`)**:
+  - Added `skillsdb_context`, `skillsdb_task_board`, `skillsdb_gemini_handover`, and `skillsdb_gemini_ingest` to `TOOLS_REGISTRY` and `handle_tool_call()`, aligning all `DEFAULT_TEMPLATES` tool bindings 1:1 with the MCP server.
+- **Canonical quota router public API aliases (`skillsdb/core/quota_router.py`, `v4.0.0-beta.4`)**:
+  - Exported `evaluate_quota_route`, `prepare_web_handover`, and `ingest_web_handover` alongside `compute_routing_decision`, `create_web_handover`, and `ingest_web_response`.
+
+### Changed
+- **Dynamic tier-aware concurrency worker scaling (`skillsdb/core/concurrency.py`, `skillsdb/cli.py`, `skillsdb/search/fts.py`, `v4.0.0-beta.4`)**:
+  - Added `resolve_optimal_workers()` (`16` threads on `Ultra`, `8` threads on `Pro`, `1` thread on `Local`/`Offline`) and wired `get_skills_parallel()`, `search_multi_parallel()`, `get_cluster()`, `benchmark_concurrency()`, and `suggest_skills()` to scale automatically with the active subscription and model tier.
+- **Enhanced `doctor()`, `stats()`, and `SKILL.md` control plane diagnostics (`skillsdb/updater/merger.py`, `skillsdb/memory/project_memory.py`, `plugin/skills/customizations-db/SKILL.md`, `v4.0.0-beta.4`)**:
+  - Expanded `skillsdb doctor` to verify `quota_ledger` health, the 13-model & effort catalog, and `invoke_subagent` `PreToolUse` hook presence; updated `skillsdb stats` to report active `ULTRA` and `PRO` profile details; updated `SKILL.md` Section 7 with all v4.0.0 CLI commands.
+
+### Fixed
+- **Strict Argon/Claude coding subagent guarantee in `PreToolUse` hook (`skillsdb/core/guardrails.py`, `v4.0.0-beta.4`)**:
+  - Hardened `handle_pre_tool_guardrail_hook()` so `invoke_subagent(TypeName="self")` is never classified as exploratory even if `Role` contains `"research"` or `"auditor"`, and automatically upgrades explicit `Model="flash"` / `"flash_lite"` on `TypeName="self"` to `"inherit"` (`Gemini 4 Argon`) or `"pro"` (`Pool 1C`).
+- **Explicit model effort preservation and Stage 4 Ultra baseline (`skillsdb/core/detector.py`, `v4.0.0-beta.4`)**:
+  - Fixed `parse_antigravity_model_spec()` so explicit `(Fast)`, `(Medium)`, or `(High)` tags in model selection strings take precedence over fallback `effort_override`, and fixed Stage 4 fallback in `detect_model_and_pool()` to preserve `TIER_ULTRA` on `Ultra` accounts and display `8 parallel threads` in `get_profile()` on `Pro` accounts.
+- **Context-backpack session isolation, relative `ast-map` path resolution, and multi-file digest disambiguation (`skillsdb/core/quota_router.py`, `skillsdb/core/fim.py`, `v4.0.0-beta.4`)**:
+  - Fixed `measure_session_backpack()` so a newly started `cid` without a transcript file returns `LIGHT (0 steps)` instead of reading an older conversation's transcript, and removed the 5-hour timestamp skip so uncompacted steps from earlier in a long session remain counted in the active context window.
+  - Fixed `execute_ast_map()` and `extract_ast_contract_map()` to resolve relative paths and globs against `project_root`, added Kotlin `fun` extraction, and disambiguated relative file paths in `execute_gemini_digest()` when multiple files share the same basename.
+
 ## [2.0.0-beta.3] - 2026-11-03
 
 ### Added

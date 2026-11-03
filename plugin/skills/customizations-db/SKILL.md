@@ -109,29 +109,51 @@ Each project maintains its own isolated SQLite memory database with FTS5 search 
   skillsdb sync pull   # Pull latest updates from network share
   ```
 
-### 7. Adaptive model concurrency and Ultra batching
-* **Check or set active model profile**:
+### 7. Adaptive model concurrency, Golden-Ratio quota router, and AST contract mapping
+SkillsDB v4.0.0 governs `Ultra` (16 parallel reader threads) and `Pro` (8 parallel reader threads) coding subscriptions across all 4 quota pools (`Pool 1A: Gemini 4 Argon`, `Pool 1B: Gemini 3.8 Flash`, `Pool 1C: Claude Opus/Sonnet 5.5`, `Pool 1D: GPT-OSS 120B`, `Pool 2: @google/gemini-cli`, `Pool 3: AI Studio REST`, `Pool 4: gemini.google.com`) using the Golden-Ratio (`61.8%` / `85.0%`) control plane:
+
+* **Inspect live 4-pool quota router status, 13-model effort matrix, and Context Backpack**:
   ```powershell
-  skillsdb profile          # View active model profile and concurrency settings
-  skillsdb profile set ultra
-  skillsdb profile auto     # Reset to automatic transcript/runtime detection
+  skillsdb quota-status          # Full 4-pool dashboard (alias: skillsdb quota)
+  skillsdb quota-status --json   # Machine-readable JSON telemetry
   ```
-* **Batch fetch multiple skills concurrently**:
+* **Check or configure active subscription tier, reasoning effort, and routing mode**:
+  ```powershell
+  skillsdb profile               # View active model, effort level, account tier, and worker threads
+  skillsdb profile set --account-tier ultra --effort high --mode golden_ratio
+  skillsdb profile set --account-tier pro --effort medium --mode golden_ratio
+  skillsdb profile auto          # Reset all overrides to automatic transcript/runtime detection
+  ```
+* **Extract multi-file AST contract and line-offset map (`[Lstart-Lend]` at ~95% token compression before editing)**:
+  ```powershell
+  skillsdb ast-map <file1> <file2> [--filter <symbol>] [--save-fact <key>]
+  ```
+* **Surgical Fill-in-the-Middle (FIM) code slicing around a line or symbol**:
+  ```powershell
+  skillsdb fim slice <file_path> --symbol <function_or_class_name>
+  skillsdb fim slice <file_path> --line <line_num> --prefix 25 --suffix 25
+  ```
+* **Offload large file, log, or git diff analysis to external Gemini pools (Context Shield)**:
+  ```powershell
+  skillsdb gemini-digest --files <paths_or_globs> --query "<analysis question>" [--git-diff] [--save-fact <key>]
+  ```
+* **Pool 4 Deep Research clipboard handover and ingestion (`gemini.google.com`)**:
+  ```powershell
+  skillsdb gemini-handover --topic "<research topic>" [--files <paths>]
+  skillsdb gemini-ingest --fact-key "<memory_fact_key>"
+  ```
+* **Reusable agent templates and deterministic subagent handoffs**:
+  ```powershell
+  skillsdb agent list
+  skillsdb agent get lead_architect
+  skillsdb handoff create --task <task_id> --role "Security Auditor" --notes "<instructions>"
+  ```
+* **High-concurrency batch skill retrieval and multi-query FTS5 search (16 threads on Ultra, 8 on Pro)**:
   ```powershell
   skillsdb get-skills <skill1> <skill2> ... --summary
-  ```
-* **Prefetch pre-indexed domain cluster**:
-  ```powershell
   skillsdb get-cluster flutter --summary
-  skillsdb get-cluster data --json
-  ```
-* **Multi-query parallel search**:
-  ```powershell
   skillsdb search-multi "<query1>" "<query2>" ...
-  ```
-* **Benchmark concurrency engine**:
-  ```powershell
-  skillsdb benchmark-concurrency --queries 20 --workers 16
+  skillsdb benchmark-concurrency --queries 20
   ```
 
 ### 8. Local Gitea backup and repository synchronization

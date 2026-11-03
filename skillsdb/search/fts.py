@@ -6,7 +6,7 @@ import json
 import sqlite3
 from pathlib import Path
 from ..config import TIER_ULTRA, estimate_tokens
-from ..core.detector import detect_model_tier, tier_to_display_label, tier_to_display_label
+from ..core.detector import detect_model_and_pool, detect_model_tier, tier_to_display_label
 from ..core.concurrency import extract_skill_sections
 from .synonyms import expand_query_with_synonyms, build_safe_fts_query
 
@@ -88,11 +88,17 @@ def suggest_skills(conn: sqlite3.Connection, task_description: str, limit: int =
         print(f"   Desc: {desc}")
         print(f"   Command to view: skillsdb get-skill {m['name']}\n")
 
-    tier, _ = detect_model_tier()
-    if tier == TIER_ULTRA and len(matches) > 1:
+    minfo = detect_model_and_pool()
+    tier = minfo.get("model_tier", "")
+    acc_tier = minfo.get("account_tier", "ultra")
+    if (acc_tier == "ultra" or tier == TIER_ULTRA) and len(matches) > 1:
         skill_names_str = " ".join([m['name'] for m in matches])
-        print(f"  [Ultra Concurrency Tip] Retrieve all recommended skills simultaneously in 1 call:")
+        print("  [Ultra Concurrency Tip] Retrieve all recommended skills simultaneously in 1 call (16 threads):")
         print(f"  skillsdb get-skills {skill_names_str}\n")
+    elif acc_tier == "pro" and len(matches) > 1:
+        skill_names_str = " ".join([m['name'] for m in matches])
+        print("  [Pro Concurrency & Quota Tip] Batch-fetch summaries (8 threads) or surgical micro-sections to save up to 85% context tokens:")
+        print(f"  skillsdb get-skills {skill_names_str} --summary\n")
     elif matches:
         lbl = tier_to_display_label(tier)
         print(f"  [{lbl} Quota Conservation Tip] Fetch surgical micro-skill sections to save up to 85% context tokens:")

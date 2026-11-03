@@ -290,7 +290,7 @@ def _extract_generic_regex_contracts(
 
     cls_re = re.compile(r"^\s*(?:export\s+)?(?:public\s+|private\s+|abstract\s+)?(?:class|interface|struct|enum)\s+([A-Za-z_][A-Za-z0-9_]*)")
     fn_re = re.compile(
-        r"^\s*(?:export\s+)?(?:async\s+)?(?:function|def|func|fn)\s+([A-Za-z_][A-Za-z0-9_-]*)\s*(\([^)]*\))?"
+        r"^\s*(?:export\s+)?(?:public\s+|private\s+|internal\s+)?(?:suspend\s+|async\s+)?(?:function|def|func|fn|fun)\s+([A-Za-z_][A-Za-z0-9_-]*)\s*(\([^)]*\))?"
     )
 
     for idx, raw_line in enumerate(lines, 1):
@@ -322,6 +322,7 @@ def extract_ast_contract_map(
     files: List[str],
     symbol_filter: Optional[str] = None,
     include_private: bool = True,
+    project_root: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """
     Builds a multi-file AST Contract & Line-Offset Map so Gemini 4 Argon can inspect
@@ -329,13 +330,19 @@ def extract_ast_contract_map(
     token compression before executing surgical read_file / edit_file calls.
     """
     start_t = time.perf_counter()
+    cwd = Path(project_root) if project_root else Path.cwd()
     resolved_files: List[Path] = []
     for pattern in (files or []):
         p_obj = Path(pattern)
         if p_obj.exists() and p_obj.is_file():
             resolved_files.append(p_obj)
+        elif not p_obj.is_absolute() and (cwd / p_obj).exists() and (cwd / p_obj).is_file():
+            resolved_files.append(cwd / p_obj)
         else:
-            for m in glob.glob(pattern, recursive=True):
+            glob_hits = glob.glob(str(pattern), recursive=True)
+            if not glob_hits and not p_obj.is_absolute():
+                glob_hits = glob.glob(str(cwd / pattern), recursive=True)
+            for m in glob_hits:
                 mp = Path(m)
                 if mp.exists() and mp.is_file():
                     resolved_files.append(mp)

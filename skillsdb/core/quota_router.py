@@ -331,6 +331,8 @@ def measure_session_backpack(cid: str = None, brain_dir: Path = None) -> Dict[st
         cand = b_dir / cid / ".system_generated" / "logs" / "transcript.jsonl"
         if cand.exists():
             t_file = cand
+        else:
+            return default_res
     if t_file is None:
         newest_mtime = -1.0
         for folder in b_dir.iterdir():
@@ -354,7 +356,6 @@ def measure_session_backpack(cid: str = None, brain_dir: Path = None) -> Dict[st
     uncompacted_steps = 0
     uncompacted_turns = 0
     active_chars = 0
-    cutoff_iso = (datetime.now(timezone.utc) - timedelta(hours=5.0)).strftime("%Y-%m-%dT%H:%M:%S")
 
     try:
         with open(t_file, "r", encoding="utf-8", errors="ignore") as f:
@@ -364,9 +365,6 @@ def measure_session_backpack(cid: str = None, brain_dir: Path = None) -> Dict[st
                     uncompacted_steps = 1
                     uncompacted_turns = 0
                     active_chars = min(len(line), 24000)
-                    continue
-                m_ts = re.search(r'"created_at"\s*:\s*"([^"]+)"', line)
-                if m_ts and m_ts.group(1) < cutoff_iso:
                     continue
                 uncompacted_steps += 1
                 active_chars += min(len(line), 8000)
@@ -743,21 +741,33 @@ def execute_gemini_digest(
     cwd = Path(project_root) if project_root else Path.cwd()
 
     if files:
+        raw_matched: List[Path] = []
         for pattern in files:
             p_obj = Path(pattern)
             if p_obj.exists() and p_obj.is_file():
-                matched_paths = [p_obj]
+                raw_matched.append(p_obj)
+            elif not p_obj.is_absolute() and (cwd / p_obj).exists() and (cwd / p_obj).is_file():
+                raw_matched.append(cwd / p_obj)
             else:
                 glob_matches = sorted(glob.glob(str(pattern), recursive=True))
                 if not glob_matches and not p_obj.is_absolute():
                     glob_matches = sorted(glob.glob(str(cwd / pattern), recursive=True))
-                matched_paths = [Path(m) for m in glob_matches if Path(m).is_file()]
-            for mp in matched_paths[:25]:
-                try:
-                    txt = mp.read_text(encoding="utf-8", errors="replace")
-                    collected_chunks.append((mp.name, txt))
-                except Exception:
-                    pass
+                raw_matched.extend(Path(m) for m in glob_matches if Path(m).is_file())
+        name_counts: Dict[str, int] = {}
+        for mp in raw_matched[:25]:
+            name_counts[mp.name] = name_counts.get(mp.name, 0) + 1
+        for mp in raw_matched[:25]:
+            try:
+                txt = mp.read_text(encoding="utf-8", errors="replace")
+                lbl = mp.name
+                if name_counts.get(mp.name, 0) > 1:
+                    try:
+                        lbl = mp.resolve().relative_to(cwd.resolve()).as_posix()
+                    except Exception:
+                        lbl = mp.as_posix()
+                collected_chunks.append((lbl, txt))
+            except Exception:
+                pass
 
     if include_git_diff:
         try:
@@ -1073,6 +1083,7 @@ def execute_ast_map(
         files=files,
         symbol_filter=symbol_filter,
         include_private=include_private,
+        project_root=project_root,
     )
     if not res.get("success"):
         return res
@@ -1160,3 +1171,9 @@ def print_quota_status(as_json: bool = False, cid: str = None, db_path: Path = D
         print(f"  * Optimization Advice:             {decision['degradation_advice']}")
     print("==================================================================\n")
     return decision
+
+
+# Canonical public API aliases
+evaluate_quota_route = compute_routing_decision
+prepare_web_handover = create_web_handover
+ingest_web_handover = ingest_web_response

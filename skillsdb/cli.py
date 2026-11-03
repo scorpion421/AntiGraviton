@@ -388,24 +388,24 @@ def build_parser() -> argparse.ArgumentParser:
     get_skills_parser = subparsers.add_parser("get-skills", help="Retrieve multiple skills concurrently in a single batch call")
     get_skills_parser.add_argument("names", nargs="+", help="Skill names to retrieve concurrently")
     get_skills_parser.add_argument("--summary", action="store_true", help="Output only outlines and section lists")
-    get_skills_parser.add_argument("--workers", type=int, default=16, help="Max worker threads (default: 16)")
+    get_skills_parser.add_argument("--workers", type=int, default=None, help="Max worker threads (default: auto 16 on Ultra / 8 on Pro)")
     get_skills_parser.add_argument("--json", action="store_true", help="Output results as JSON")
 
     search_multi_parser = subparsers.add_parser("search-multi", help="Execute multiple search queries concurrently")
     search_multi_parser.add_argument("queries", nargs="+", help="Search queries")
-    search_multi_parser.add_argument("--workers", type=int, default=16, help="Max worker threads (default: 16)")
+    search_multi_parser.add_argument("--workers", type=int, default=None, help="Max worker threads (default: auto 16 on Ultra / 8 on Pro)")
     search_multi_parser.add_argument("--limit", type=int, default=4, help="Limit per query (default: 4)")
     search_multi_parser.add_argument("--json", action="store_true", help="Output results as JSON")
 
     cluster_parser = subparsers.add_parser("get-cluster", help="Prefetch all skills belonging to a domain cluster concurrently")
     cluster_parser.add_argument("domain", help=f"Domain cluster ({', '.join(SKILL_CLUSTERS.keys())})")
     cluster_parser.add_argument("--summary", action="store_true", help="Output only outlines and section lists")
-    cluster_parser.add_argument("--workers", type=int, default=16, help="Max worker threads (default: 16)")
+    cluster_parser.add_argument("--workers", type=int, default=None, help="Max worker threads (default: auto 16 on Ultra / 8 on Pro)")
     cluster_parser.add_argument("--json", action="store_true", help="Output results as JSON")
 
     bench_parser = subparsers.add_parser("benchmark-concurrency", help="Benchmark sequential vs. parallel multi-threaded retrieval")
     bench_parser.add_argument("--queries", type=int, default=20, help="Number of queries/skills to test (default: 20)")
-    bench_parser.add_argument("--workers", type=int, default=16, help="Max worker threads (default: 16)")
+    bench_parser.add_argument("--workers", type=int, default=None, help="Max worker threads (default: auto 16 on Ultra / 8 on Pro)")
 
     # Gitea Service and Automated Commit Sync Commands
     subparsers.add_parser("gitea-status", help="Show status of Gitea service, API health, and repositories")

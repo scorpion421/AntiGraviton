@@ -1906,9 +1906,18 @@ def stats(conn: sqlite3.Connection, show_savings: bool = False, target_date: str
         print(f"Prompt Bloat Avoided: ~{savings['tokens_saved']:,} tokens (-{red_pct:.1f}% per turn)")
         print(f"Cost Saved (Gemini Pro):   ~${savings['dollars_saved_pro']:.2f} USD")
         print(f"Cost Saved (Gemini Ultra): ~${savings['dollars_saved_ultra']:.2f} USD")
-        tier, tdesc = detect_model_tier()
-        if tier == TIER_ULTRA:
-            print(f"Active Profile:       ULTRA (~${savings['dollars_saved_ultra']:.2f} USD saved / high quota protection)")
+        minfo = detect_model_and_pool()
+        acc_tier = minfo.get("account_tier", "ultra")
+        if acc_tier == "ultra" or minfo.get("model_tier") == TIER_ULTRA:
+            print(
+                f"Active Profile:       ULTRA [Model: {minfo['model_name']} | Pool: {minfo['pool']}] "
+                f"(~${savings['dollars_saved_ultra']:.2f} USD saved / 16-thread high concurrency)"
+            )
+        else:
+            print(
+                f"Active Profile:       PRO [Model: {minfo['model_name']} | Pool: {minfo['pool']}] "
+                f"(~${savings['dollars_saved_pro']:.2f} USD saved / 8-thread Golden-Ratio protection)"
+            )
     try:
         l24 = get_ledger_24h_summary(db_path=DB_PATH)
         if l24["saved_agy_tokens_total"] > 0 or l24["subagent_24h_rewrites"] > 0:

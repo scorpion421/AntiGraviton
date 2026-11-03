@@ -685,7 +685,12 @@ def handle_pre_tool_guardrail_hook():
                 prompt_str = str(args.get("Prompt") or "")
                 combined_text = f"{role_str}\n{prompt_str}"
                 force_inherit = any(tag in combined_text.upper() for tag in ("[FORCE-INHERIT]", "[FORCE-ULTRA]"))
-                if req_model in ("", "inherit") and not force_inherit:
+                is_coding_self = (type_name == "self")
+                is_exploratory = (not is_coding_self) and (
+                    type_name == "research"
+                    or any(k in role_str.lower() for k in ("research", "auditor", "scanner", "finder", "search", "explorer", "log"))
+                )
+                if not force_inherit and (req_model in ("", "inherit") or (is_coding_self and req_model in ("flash", "flash_lite"))):
                     cid = str(payload.get("conversationId") or "").strip() or None
                     model_hint = payload.get("modelName") or payload.get("model")
                     db_override = Path(payload["dbPath"]) if payload.get("dbPath") else DB_PATH
@@ -696,16 +701,14 @@ def handle_pre_tool_guardrail_hook():
                         model_name_hint=model_hint,
                         brain_dir=brain_override,
                     )
-                    is_exploratory = (
-                        type_name == "research"
-                        or any(k in role_str.lower() for k in ("research", "auditor", "scanner", "finder", "search", "explorer", "log"))
-                    )
                     target_sub_model = (
                         decision["subagent_research_model"]
                         if is_exploratory
                         else decision["subagent_general_model"]
                     )
-                    if target_sub_model and target_sub_model != "inherit":
+                    if is_coding_self and req_model in ("flash", "flash_lite"):
+                        target_sub_model = target_sub_model or "inherit"
+                    if target_sub_model and target_sub_model != req_model:
                         record_quota_ledger_entry(
                             pool="agy_subagent_rewrite",
                             execution_tier="lite" if "flash" in target_sub_model else "pro",
@@ -717,7 +720,7 @@ def handle_pre_tool_guardrail_hook():
                             saved_agy_turns=1,
                             latency_ms=1,
                             status="ok",
-                            task_summary=f"PreToolUse overwrite invoke_subagent ({type_name or 'agent'}): inherit -> {target_sub_model}",
+                            task_summary=f"PreToolUse overwrite invoke_subagent ({type_name or 'agent'}): {req_model or 'inherit'} -> {target_sub_model}",
                             db_path=db_override,
                         )
                         print(json.dumps({

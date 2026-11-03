@@ -7,8 +7,34 @@ import json
 import re
 import concurrent.futures
 from pathlib import Path
-from ..config import DB_PATH, SKILL_CLUSTERS, estimate_tokens
+from ..config import (
+    DB_PATH,
+    SKILL_CLUSTERS,
+    TIER_ULTRA,
+    TIER_STANDARD,
+    TIER_LOCAL,
+    TIER_OFFLINE,
+    estimate_tokens,
+)
 from .db import get_connection, get_thread_connection
+from .detector import detect_model_and_pool
+
+
+def resolve_optimal_workers(db_path: Path = DB_PATH) -> int:
+    """Dynamically resolves ThreadPoolExecutor worker count from active account and model tier (16 on Ultra, 8 on Pro, 1 on Local/Offline)."""
+    try:
+        info = detect_model_and_pool(db_path=db_path)
+        m_tier = info.get("model_tier", TIER_STANDARD)
+        acc_tier = info.get("account_tier", "ultra")
+        if m_tier in (TIER_LOCAL, TIER_OFFLINE):
+            return 1
+        if acc_tier == "ultra" or m_tier == TIER_ULTRA:
+            return 16
+        if acc_tier == "pro" or m_tier == TIER_STANDARD:
+            return 8
+    except Exception:
+        pass
+    return 8
 
 
 def extract_skill_sections(content: str) -> list[dict]:
@@ -111,11 +137,12 @@ def fetch_single_skill(skill_name: str, db_path: Path = DB_PATH, summary: bool =
     }
 
 
-def get_skills_parallel(skill_names: list[str], max_workers: int = 16, as_json: bool = False, summary: bool = False, db_path: Path = DB_PATH) -> list[dict]:
+def get_skills_parallel(skill_names: list[str], max_workers: int = None, as_json: bool = False, summary: bool = False, db_path: Path = DB_PATH) -> list[dict]:
     """Retrieves multiple skills concurrently using ThreadPoolExecutor under SQLite WAL mode."""
+    workers = max_workers if (max_workers is not None and max_workers > 0) else resolve_optimal_workers(db_path)
     unique_names = list(dict.fromkeys(skill_names))
     results = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(unique_names) or 1, max_workers)) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(unique_names) or 1, workers)) as executor:
         future_to_name = {executor.submit(fetch_single_skill, name, db_path, summary): name for name in unique_names}
         for future in concurrent.futures.as_completed(future_to_name):
             try:
@@ -169,10 +196,11 @@ def search_single_query(query: str, db_path: Path = DB_PATH, limit: int = 4) -> 
     return [{"name": r["name"], "plugin": r["plugin_name"], "category": r["category"], "description": r["description"] or "", "tokens": r["token_estimate"]} for r in rows]
 
 
-def search_multi_parallel(queries: list[str], max_workers: int = 16, limit_per_query: int = 4, as_json: bool = False, db_path: Path = DB_PATH) -> dict:
+def search_multi_parallel(queries: list[str], max_workers: int = None, limit_per_query: int = 4, as_json: bool = False, db_path: Path = DB_PATH) -> dict:
     """Executes multiple full-text search queries concurrently."""
+    workers = max_workers if (max_workers is not None and max_workers > 0) else resolve_optimal_workers(db_path)
     all_results = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(queries) or 1, max_workers)) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(queries) or 1, workers)) as executor:
         future_to_q = {executor.submit(search_single_query, q, db_path, limit_per_query): q for q in queries}
         for future in concurrent.futures.as_completed(future_to_q):
             q = future_to_q[future]
@@ -202,20 +230,23 @@ def search_multi_parallel(queries: list[str], max_workers: int = 16, limit_per_q
     return all_results
 
 
-def get_cluster(domain: str, max_workers: int = 16, as_json: bool = False, summary: bool = False, db_path: Path = DB_PATH):
+def get_cluster(domain: str, max_workers: int = None, as_json: bool = False, summary: bool = False, db_path: Path = DB_PATH):
     """Retrieves all pre-indexed skills belonging to a domain cluster concurrently in a single call."""
     dom_clean = domain.strip().lower()
     if dom_clean not in SKILL_CLUSTERS:
         print(f"Error: Unknown skill cluster '{domain}'. Available clusters: {', '.join(SKILL_CLUSTERS.keys())}")
         return
 
+    workers = max_workers if (max_workers is not None and max_workers > 0) else resolve_optimal_workers(db_path)
+    tier_banner = "Ultra Concurrency" if workers >= 16 else f"Pro Concurrency ({workers} threads)"
     cluster_skills = SKILL_CLUSTERS[dom_clean]
-    print(f"[Ultra Concurrency] Prefetching complete '{dom_clean}' cluster ({len(cluster_skills)} skills: {', '.join(cluster_skills)})...\n")
-    get_skills_parallel(cluster_skills, max_workers=max_workers, as_json=as_json, summary=summary, db_path=db_path)
+    print(f"[{tier_banner}] Prefetching complete '{dom_clean}' cluster ({len(cluster_skills)} skills: {', '.join(cluster_skills)})...\n")
+    get_skills_parallel(cluster_skills, max_workers=workers, as_json=as_json, summary=summary, db_path=db_path)
 
 
-def benchmark_concurrency(num_queries: int = 20, max_workers: int = 16, db_path: Path = DB_PATH):
+def benchmark_concurrency(num_queries: int = 20, max_workers: int = None, db_path: Path = DB_PATH):
     """Compares sequential vs. parallel multi-query throughput on customizations.db."""
+    workers = max_workers if (max_workers is not None and max_workers > 0) else resolve_optimal_workers(db_path)
     conn = get_connection(db_path)
     try:
         cursor = conn.cursor()
@@ -229,7 +260,7 @@ def benchmark_concurrency(num_queries: int = 20, max_workers: int = 16, db_path:
         return
 
     print(f"\n================ SKILLSDB CONCURRENCY BENCHMARK ================")
-    print(f"Dataset: {len(names)} skills | Max ThreadPool Workers: {max_workers}")
+    print(f"Dataset: {len(names)} skills | Max ThreadPool Workers: {workers}")
 
     # Sequential benchmark
     start_seq = time.perf_counter()
@@ -241,7 +272,7 @@ def benchmark_concurrency(num_queries: int = 20, max_workers: int = 16, db_path:
     # Parallel benchmark
     start_par = time.perf_counter()
     unique_names = list(dict.fromkeys(names))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(unique_names) or 1, max_workers)) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(unique_names) or 1, workers)) as executor:
         list(executor.map(lambda n: fetch_single_skill(n, db_path, summary=True), unique_names))
     par_duration = time.perf_counter() - start_par
     print(f"Parallel Execution Time:   {par_duration * 1000:.2f} ms ({len(names) / (par_duration or 0.001):.1f} queries/sec)")
