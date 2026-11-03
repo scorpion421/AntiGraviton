@@ -24,6 +24,7 @@ _REQUIRED_CENTRAL_TABLES = frozenset({
     "rules_fts",
     "skills_fts",
     "synonym_fts",
+    "quota_ledger",
 })
 
 
@@ -167,7 +168,7 @@ def _central_schema_ready(conn: sqlite3.Connection) -> bool:
         cur = conn.cursor()
         cur.execute(
             "SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND name IN "
-            "('rules', 'skills', 'runtime_config', 'synonym_synapses', 'rules_fts', 'skills_fts', 'synonym_fts');"
+            "('rules', 'skills', 'runtime_config', 'synonym_synapses', 'rules_fts', 'skills_fts', 'synonym_fts', 'quota_ledger');"
         )
         found = {row[0] for row in cur.fetchall()}
         return _REQUIRED_CENTRAL_TABLES.issubset(found)
@@ -258,6 +259,24 @@ def init_db(conn: sqlite3.Connection) -> None:
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL,
         updated_at TEXT
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS quota_ledger (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pool TEXT NOT NULL,
+        execution_tier TEXT NOT NULL,
+        model_used TEXT,
+        effort_level TEXT DEFAULT 'medium',
+        input_tokens INTEGER DEFAULT 0,
+        output_tokens INTEGER DEFAULT 0,
+        saved_agy_tokens INTEGER DEFAULT 0,
+        saved_agy_turns INTEGER DEFAULT 0,
+        latency_ms INTEGER DEFAULT 0,
+        status TEXT DEFAULT 'ok',
+        task_summary TEXT,
+        created_at TEXT NOT NULL
     );
     """)
 

@@ -15,6 +15,7 @@ from ..config import DB_PATH, __version__
 from ..core.db import get_connection, init_db
 from ..core.guardrails import check_text, fix_text
 from ..core.fim import slice_fim, slice_fim_symbol, format_fim_block
+from ..core.quota_router import compute_routing_decision, execute_gemini_digest
 from ..search.fts import suggest_skills, get_skill, get_active_rules
 from ..memory.agent_templates import list_agent_templates, get_agent_template, format_agent_prompt
 from ..memory.gitea_sync import gitea_status_summary, save_code_commit
@@ -110,6 +111,27 @@ TOOLS_REGISTRY = [
                 "message": {"type": "string", "description": "Commit message describing the milestone"}
             },
             "required": ["project_path", "message"]
+        }
+    },
+    {
+        "name": "skillsdb_quota_status",
+        "description": "Inspect the 4-pool quota router status, active Antigravity model and effort level (Fast/Medium/High), 5h rolling usage, and 24h external Gemini offload stats.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {}
+        }
+    },
+    {
+        "name": "skillsdb_gemini_digest",
+        "description": "Offload analysis of large files, logs, or git diffs to external Gemini pools (or local deterministic extractor) to keep main Antigravity context clean.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "files": {"type": "array", "items": {"type": "string"}, "description": "File paths or globs to digest"},
+                "query": {"type": "string", "description": "Analysis question or extraction instruction"},
+                "tier": {"type": "string", "description": "Execution tier: auto, ultra, pro, or lite"}
+            },
+            "required": ["query"]
         }
     }
 ]
@@ -210,6 +232,17 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> str:
             proj_path = Path(args.get("project_path", "."))
             msg = args.get("message", "Synchronize workspace via MCP")
             res = save_code_commit(proj_path, message=msg, push=True)
+            return json.dumps(res, indent=2)
+
+        elif name == "skillsdb_quota_status":
+            return json.dumps(compute_routing_decision(), indent=2)
+
+        elif name == "skillsdb_gemini_digest":
+            res = execute_gemini_digest(
+                files=args.get("files") or [],
+                query=args.get("query") or "Summarize key findings and line numbers.",
+                execution_tier=args.get("tier") or "auto",
+            )
             return json.dumps(res, indent=2)
 
         return f"Unknown tool: {name}"

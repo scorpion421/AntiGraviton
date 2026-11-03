@@ -14,15 +14,41 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-__version__ = "3.8.14"
-__suite_version__ = "1.5.14"
+__version__ = "3.8.15"
+__suite_version__ = "1.5.15"
 
-# Model capability tiers
-TIER_LEAN = "lean"          # Gemini Flash, Flash-Lite, micro-skills, minimal token footprint
-TIER_STANDARD = "standard"  # Gemini Pro, standard sequential execution
-TIER_ULTRA = "ultra"        # Gemini Ultra, high-concurrency batching & subagent swarming
+# Model capability & subscription tiers
+TIER_LEAN = "lean"          # Lite / Gemini 3.8 Flash (Fast/Medium) / Flash-Lite, minimal token footprint
+TIER_LITE = "lean"          # Explicit alias for Lite tier
+TIER_STANDARD = "standard"  # Pro / Claude Sonnet 5.5 / Gemini 3.8 Flash (High) / GPT-OSS 120B (Medium)
+TIER_PRO = "standard"       # Explicit alias for Pro tier
+TIER_ULTRA = "ultra"        # Ultra / Gemini 4 Argon (Medium/High) / Claude Opus 5.5 (Medium/High)
 TIER_LOCAL = "local"        # Local / sovereign model (Ollama, Codestral, vLLM) with zero cloud egress
 TIER_OFFLINE = "offline"    # Air-gapped offline operation
+
+TIER_ALIASES = {
+    "ultra": TIER_ULTRA,
+    "pro": TIER_STANDARD,
+    "standard": TIER_STANDARD,
+    "lite": TIER_LEAN,
+    "lean": TIER_LEAN,
+    "local": TIER_LOCAL,
+    "offline": TIER_OFFLINE,
+}
+
+# Reasoning effort levels (supported on Argon, Flash 3.8, Opus 5.5, Sonnet 5.5; GPT-OSS 120B fixed at medium)
+EFFORT_FAST = "fast"
+EFFORT_MEDIUM = "medium"
+EFFORT_HIGH = "high"
+
+# Quota pool identifiers
+POOL_AGY_GEMINI_HIGH = "agy_gemini_high"
+POOL_AGY_GEMINI_FAST = "agy_gemini_fast"
+POOL_AGY_CLAUDE = "agy_claude"
+POOL_AGY_OPEN_WEIGHT = "agy_open_weight"
+POOL_EXT_CLI_OAUTH = "ext_cli_oauth"
+POOL_EXT_AISTUDIO_API = "ext_aistudio_api"
+POOL_EXT_WEB_HANDOVER = "ext_web_handover"
 
 # Pre-indexed skill clusters for instant parallel prefetching
 SKILL_CLUSTERS = {

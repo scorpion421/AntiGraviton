@@ -1156,5 +1156,140 @@ class TestGiteaSync(unittest.TestCase):
         self.assertTrue(any(v["rule"] == "secret-leak-detection" for v in violations))
 
 
+    def test_v1_5_15_multi_pool_quota_router_and_13_model_effort_matrix(self):
+        """Verifies v1.5.15 13-combination model+effort catalog, 4-pool quota router, PreToolUse invoke_subagent overwrite, and gemini-digest."""
+        import io
+        import json
+        from unittest.mock import patch
+        from skillsdb.core.detector import (
+            parse_antigravity_model_spec,
+            set_profile,
+        )
+        from skillsdb.core.quota_router import (
+            compute_routing_decision,
+            execute_gemini_digest,
+            get_ledger_24h_summary,
+        )
+        from skillsdb.core.guardrails import handle_pre_tool_guardrail_hook
+
+        # 1. Verify all 13 internal Antigravity model + effort combinations (4 models x 3 efforts + GPT-OSS 120B fixed at Medium)
+        four_three_models = [
+            ("Gemini 4 Argon", "gemini-4-argon", "agy_gemini_high"),
+            ("Gemini 3.8 Flash", "gemini-3.8-flash", "agy_gemini_fast"),
+            ("Claude Opus 5.5", "claude-opus-5.5", "agy_claude"),
+            ("Claude Sonnet 5.5", "claude-sonnet-5.5", "agy_claude"),
+        ]
+        for base_label, fam_key, expected_pool in four_three_models:
+            weights = {}
+            for eff in ("Fast", "Medium", "High"):
+                spec = parse_antigravity_model_spec(f"{base_label} ({eff})")
+                self.assertIsNotNone(spec)
+                self.assertEqual(spec["model_family"], fam_key)
+                self.assertEqual(spec["pool"], expected_pool)
+                self.assertEqual(spec["effort_level"], eff.lower())
+                self.assertEqual(spec["supported_efforts"], ["fast", "medium", "high"])
+                weights[eff.lower()] = spec["quota_weight"]
+            self.assertLess(weights["fast"], weights["medium"])
+            self.assertLess(weights["medium"], weights["high"])
+
+        # GPT-OSS 120B must always be pinned to Medium even if Fast or High is passed
+        for raw_gpt in ("GPT-OSS 120B (Medium)", "GPT-OSS 120B (High)", "GPT-OSS 120B Fast"):
+            gpt_spec = parse_antigravity_model_spec(raw_gpt)
+            self.assertIsNotNone(gpt_spec)
+            self.assertEqual(gpt_spec["model_family"], "gpt-oss-120b")
+            self.assertEqual(gpt_spec["pool"], "agy_open_weight")
+            self.assertEqual(gpt_spec["effort_level"], "medium")
+            self.assertEqual(gpt_spec["supported_efforts"], ["medium"])
+
+        # 2. Verify obsolete Gemini 3.1 Pro is removed from AGENTS.md
+        agents_md = (Path(__file__).resolve().parent.parent / "plugin" / "rules" / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertNotIn("3.1 Pro", agents_md)
+        self.assertIn("Gemini 4 Argon", agents_md)
+        self.assertIn("Gemini 3.8 Flash", agents_md)
+        self.assertIn("Claude Opus 5.5", agents_md)
+        self.assertIn("Claude Sonnet 5.5", agents_md)
+        self.assertIn("GPT-OSS 120B", agents_md)
+
+        # 3. Verify 2D Account Tier (ultra/pro/lite) x Effort routing decision & PreToolUse invoke_subagent overwrite
+        temp_central_db = self.test_dir / "central_v1515.db"
+        fake_brain = self.test_dir / "brain_v1515"
+        fake_brain.mkdir(parents=True, exist_ok=True)
+
+        set_profile(tier_name="ultra", account_tier="ultra", effort_level="high", quota_mode="balanced", db_path=temp_central_db)
+        dec_ultra = compute_routing_decision(db_path=temp_central_db, model_name_hint="Gemini 4 Argon (High)", brain_dir=fake_brain)
+        self.assertEqual(dec_ultra["account_tier"], "ultra")
+        self.assertEqual(dec_ultra["digest_line_threshold"], 250)
+        self.assertEqual(dec_ultra["subagent_research_model"], "flash")
+
+        # PreToolUse hook on invoke_subagent(TypeName='research', Model='inherit') must overwrite Model -> 'flash'
+        sub_req_res = json.dumps({
+            "dbPath": str(temp_central_db),
+            "brainDir": str(fake_brain),
+            "modelName": "Gemini 4 Argon (High)",
+            "toolCall": {
+                "name": "invoke_subagent",
+                "args": {"TypeName": "research", "Role": "Codebase Researcher", "Prompt": "Find all callers", "Model": "inherit"},
+            },
+        })
+        out_sub1 = io.StringIO()
+        with patch("sys.stdin", io.StringIO(sub_req_res)), patch("sys.stdout", out_sub1):
+            handle_pre_tool_guardrail_hook()
+        res_sub1 = json.loads(out_sub1.getvalue())
+        self.assertEqual(res_sub1["decision"], "allow")
+        self.assertEqual(res_sub1.get("overwrite"), {"Model": "flash"})
+
+        # Cross-pool protection: When Claude Opus 5.5 is active in main chat, a general subagent with Model='inherit' must overwrite to 'pro'
+        sub_req_claude = json.dumps({
+            "dbPath": str(temp_central_db),
+            "brainDir": str(fake_brain),
+            "modelName": "Claude Opus 5.5 (Medium)",
+            "toolCall": {
+                "name": "invoke_subagent",
+                "args": {"TypeName": "self", "Role": "Module Builder", "Prompt": "Implement helper", "Model": "inherit"},
+            },
+        })
+        out_sub2 = io.StringIO()
+        with patch("sys.stdin", io.StringIO(sub_req_claude)), patch("sys.stdout", out_sub2):
+            handle_pre_tool_guardrail_hook()
+        res_sub2 = json.loads(out_sub2.getvalue())
+        self.assertEqual(res_sub2["decision"], "allow")
+        self.assertEqual(res_sub2.get("overwrite"), {"Model": "pro"})
+
+        # Lite account tier must route research subagents to 'flash_lite' and set digest threshold <= 80
+        set_profile(account_tier="lite", quota_mode="auto", db_path=temp_central_db)
+        dec_lite = compute_routing_decision(db_path=temp_central_db, model_name_hint="Gemini 3.8 Flash (Fast)", brain_dir=fake_brain)
+        self.assertEqual(dec_lite["account_tier"], "lite")
+        self.assertEqual(dec_lite["effective_mode"], "shield")
+        self.assertEqual(dec_lite["subagent_research_model"], "flash_lite")
+        self.assertLessEqual(dec_lite["digest_line_threshold"], 80)
+
+        # 4. Verify execute_gemini_digest context-shield execution, fact persistence, and quota_ledger accounting
+        sample_log = self.test_dir / "sample_cbs.log"
+        sample_log.write_text(
+            "\n".join(
+                [f"2026-11-03 08:00:{i:02d} Info CBS Normal line {i}" for i in range(60)]
+                + ["2026-11-03 08:01:00 Error CBS Failed to process package_123 with HRESULT 0x800f0922"]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        digest_res = execute_gemini_digest(
+            files=[str(sample_log)],
+            query="Find CBS error and HRESULT code",
+            execution_tier="lite",
+            preferred_pool="local",
+            save_fact_key="cbs_error_digest",
+            project_root=self.test_dir,
+            db_path=temp_central_db,
+        )
+        self.assertTrue(digest_res["success"])
+        self.assertIn("0x800f0922", digest_res["digest"])
+        self.assertIn("L61", digest_res["digest"])
+
+        l24 = get_ledger_24h_summary(db_path=temp_central_db)
+        self.assertGreaterEqual(l24["subagent_24h_rewrites"], 2)
+        self.assertGreater(l24["saved_agy_tokens_total"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

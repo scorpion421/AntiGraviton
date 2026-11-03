@@ -14,7 +14,8 @@ import subprocess
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Tuple, Optional
-from skillsdb.config import resolve_user_home
+from ..config import resolve_user_home, DB_PATH
+from .quota_router import compute_routing_decision, record_quota_ledger_entry
 
 # Invariant characters
 EM_DASH = "\u2014"
@@ -675,6 +676,60 @@ def handle_pre_tool_guardrail_hook():
             or "<tool_input>"
         )
 
+        # A.0 Automatic 0-Turn Subagent Quota & Cross-Pool Routing via PreToolUse overwrite
+        if tool_name == "invoke_subagent" or (not tool_name and "TypeName" in args and "Prompt" in args):
+            try:
+                req_model = str(args.get("Model") or "inherit").strip().lower()
+                type_name = str(args.get("TypeName") or "").strip().lower()
+                role_str = str(args.get("Role") or "")
+                prompt_str = str(args.get("Prompt") or "")
+                combined_text = f"{role_str}\n{prompt_str}"
+                force_inherit = any(tag in combined_text.upper() for tag in ("[FORCE-INHERIT]", "[FORCE-ULTRA]"))
+                if req_model in ("", "inherit") and not force_inherit:
+                    cid = str(payload.get("conversationId") or "").strip() or None
+                    model_hint = payload.get("modelName") or payload.get("model")
+                    db_override = Path(payload["dbPath"]) if payload.get("dbPath") else DB_PATH
+                    brain_override = Path(payload["brainDir"]) if payload.get("brainDir") else None
+                    decision = compute_routing_decision(
+                        cid=cid,
+                        db_path=db_override,
+                        model_name_hint=model_hint,
+                        brain_dir=brain_override,
+                    )
+                    is_exploratory = (
+                        type_name == "research"
+                        or any(k in role_str.lower() for k in ("research", "auditor", "scanner", "finder", "search", "explorer", "log"))
+                    )
+                    target_sub_model = (
+                        decision["subagent_research_model"]
+                        if is_exploratory
+                        else decision["subagent_general_model"]
+                    )
+                    if target_sub_model and target_sub_model != "inherit":
+                        record_quota_ledger_entry(
+                            pool="agy_subagent_rewrite",
+                            execution_tier="lite" if "flash" in target_sub_model else "pro",
+                            model_used=target_sub_model,
+                            effort_level=decision["state"]["effort_level"],
+                            input_tokens=0,
+                            output_tokens=0,
+                            saved_agy_tokens=4500,
+                            saved_agy_turns=1,
+                            latency_ms=1,
+                            status="ok",
+                            task_summary=f"PreToolUse overwrite invoke_subagent ({type_name or 'agent'}): inherit -> {target_sub_model}",
+                            db_path=db_override,
+                        )
+                        print(json.dumps({
+                            "decision": "allow",
+                            "overwrite": {"Model": target_sub_model},
+                        }))
+                        return
+            except Exception:
+                pass
+            print(json.dumps({"decision": "allow"}))
+            return
+
         # A. Automatic Anti-Salami-Slicing window expansion for read_file / view_file via PreToolUse overwrite
         if tool_name in ("read_file", "view_file") or (not tool_name and ("StartLine" in args or "EndLine" in args) and "Content" not in args and "Replacement" not in args):
             if args.get("ByteOffset") is None and (args.get("StartLine") is not None or args.get("EndLine") is not None) and target_file != "<tool_input>":
@@ -812,7 +867,7 @@ def handle_pre_tool_guardrail_hook():
                             reason = (
                                 "SkillsDB Subagent Firewall (Rule 5): "
                                 "You have already executed 4+ consecutive exploratory search commands in the main context. "
-                                "Delegate open multi-file root-cause searching to invoke_subagent(TypeName='research') to prevent main-context token burn!"
+                                "Delegate open multi-file root-cause searching to invoke_subagent(TypeName='research', Model='flash') or offload large log/file analysis via 'skillsdb gemini-digest --files <paths> --query \"...\"' to prevent main-context token burn!"
                             )
                             print(json.dumps({"decision": "deny", "reason": reason}))
                             return

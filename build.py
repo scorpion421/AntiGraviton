@@ -14,6 +14,7 @@ MODULE_ORDER = [
     "core/db.py",
     "search/synonyms.py",
     "core/detector.py",
+    "core/quota_router.py",
     "core/concurrency.py",
     "core/guardrails.py",
     "core/fim.py",
@@ -48,6 +49,7 @@ import os
 import io
 import sys
 import re
+import glob
 import json
 import time
 import stat
@@ -69,8 +71,8 @@ import urllib.request
 import urllib.error
 import concurrent.futures
 from pathlib import Path
-from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional, Tuple
+from datetime import datetime, timezone, timedelta
+from typing import Dict, Any, List, Optional, Tuple, Iterator, Set
 
 if sys.platform == "win32":
     try:
@@ -99,7 +101,7 @@ def sync_project_versions(repo_root: Path, suite_ver: str, eng_ver: str) -> None
     """Synchronizes suite_ver and eng_ver from skillsdb/config.py across all project manifests, installers, and docs."""
     import json as _json
     import sqlite3 as _sqlite3
-    from datetime import datetime, timezone
+    from datetime import datetime, timezone, timedelta
 
     test_count = sum(len(re.findall(r'^\s*def test_', p.read_text(encoding='utf-8', errors='ignore'), re.M)) for p in (repo_root / 'tests').glob('test_*.py')) or 86
     version_file = repo_root / "VERSION"
@@ -261,7 +263,7 @@ def bundle():
                 continue
 
             # Skip top-level standard library imports already in header
-            if line == stripped and re.match(r"^(import|from)\s+(os|io|sys|re|json|time|stat|uuid|queue|random|atexit|base64|shutil|sqlite3|tempfile|argparse|threading|subprocess|contextlib|importlib|urllib|concurrent|pathlib|datetime|typing)\b", stripped):
+            if line == stripped and re.match(r"^(import|from)\s+(os|io|sys|re|glob|json|time|stat|uuid|queue|random|atexit|base64|shutil|sqlite3|tempfile|argparse|threading|subprocess|contextlib|importlib|urllib|concurrent|pathlib|datetime|typing)\b", stripped):
                 if "(" in stripped and ")" not in stripped:
                     in_multiline_skip = True
                 continue

@@ -23,7 +23,9 @@ from ..config import (
     estimate_tokens,
 )
 from ..core.db import get_connection, init_db, managed_connection
-from ..core.detector import detect_model_tier
+from ..core.detector import detect_model_tier, detect_model_and_pool
+from ..core.quota_router import detect_external_pools, detect_model_and_pool
+from ..core.quota_router import detect_external_pools
 from ..core.concurrency import fetch_single_skill
 from ..memory.project_memory import find_project_root, _is_protected_non_workspace
 from ..memory.gitea_sync import get_gitea_config, get_gitea_service_status, check_gitea_health, get_learned_workspaces, is_gitea_configured
@@ -584,10 +586,17 @@ def doctor(conn: sqlite3.Connection):
     except Exception as e:
         print(f"[FAIL] Central Database error: {e}")
 
-    # 2. Model Profile & Concurrency Health Check
+    # 2. Model Profile, Effort Level & Multi-Pool Offload Health Check
     try:
-        tier, tdesc = detect_model_tier()
+        minfo = detect_model_and_pool()
+        tier = minfo["model_tier"]
+        tdesc = minfo["source"]
         print(f"[OK] Model Concurrency Profile: {tier.upper()} ({tdesc})")
+        print(f"[OK] Active Model & Effort: {minfo['model_name']} [Effort: {minfo['effort_level'].upper()} | Account: {minfo['account_tier'].upper()} | Pool: {minfo['pool']}]")
+        ext_p = detect_external_pools()
+        cli_s = "READY" if ext_p["ext_cli_oauth"]["authenticated"] else ("INSTALLED" if ext_p["ext_cli_oauth"]["available"] else "OPTIONAL")
+        api_s = "READY" if ext_p["ext_aistudio_api"]["available"] else "OPTIONAL"
+        print(f"[OK] Multi-Pool Quota Router: Pool 2 CLI-OAuth={cli_s}, Pool 3 AIStudio-API={api_s}, Pool 4 Web-Bridge=READY")
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
             futures = [ex.submit(fetch_single_skill, "customizations-db", DB_PATH, True) for _ in range(8)]

@@ -6,7 +6,7 @@ import json
 import sqlite3
 from pathlib import Path
 from ..config import TIER_ULTRA, estimate_tokens
-from ..core.detector import detect_model_tier
+from ..core.detector import detect_model_tier, tier_to_display_label, tier_to_display_label
 from ..core.concurrency import extract_skill_sections
 from .synonyms import expand_query_with_synonyms, build_safe_fts_query
 
@@ -93,6 +93,10 @@ def suggest_skills(conn: sqlite3.Connection, task_description: str, limit: int =
         skill_names_str = " ".join([m['name'] for m in matches])
         print(f"  [Ultra Concurrency Tip] Retrieve all recommended skills simultaneously in 1 call:")
         print(f"  skillsdb get-skills {skill_names_str}\n")
+    elif matches:
+        lbl = tier_to_display_label(tier)
+        print(f"  [{lbl} Quota Conservation Tip] Fetch surgical micro-skill sections to save up to 85% context tokens:")
+        print(f"  skillsdb get-skill {matches[0]['name']} --summary\n")
 
 
 def search(conn: sqlite3.Connection, query: str):

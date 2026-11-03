@@ -104,13 +104,13 @@ The agent must always adhere to the active global rules registered in the databa
 
 
 
-7. **Adaptive model concurrency protocol (Ultra / Standard / Lean)**:
+7. **Adaptive model concurrency and multi-pool quota routing protocol (Ultra / Pro / Lite)**:
 
-   - SkillsDB autonomously detects the active Gemini model tier (`ultra`, `standard`, `lean`).
+   - SkillsDB autonomously detects both the account subscription tier (`ultra`, `pro`, `lite`), the active Antigravity model family across all internal quota pools (`Gemini 4 Argon [Fast | Medium | High]`, `Gemini 3.8 Flash [Fast | Medium | High]`, `Claude Opus 5.5 [Fast | Medium | High]`, `Claude Sonnet 5.5 [Fast | Medium | High]`, and `GPT-OSS 120B [Medium]`), and external Gemini offload pools (`@google/gemini-cli` OAuth, `Google AI Studio` REST API, and `gemini.google.com` Web handover).
 
-   - **Gemini Ultra mode**: When Ultra is active (including `Gemini 4 Argon` and `Gemini 3.1 Pro`), utilize high-concurrency capabilities. Fetch skills in parallel batch calls (`skillsdb get-skills <skill1> <skill2> ...` or `skillsdb get-cluster <domain>`), execute multi-query searches concurrently (`skillsdb search-multi "<q1>" "<q2>"`), and swarm tasks across parallel background subagents (up to 16 workers) to minimize turnaround latency.
+   - **Ultra mode (`Gemini 4 Argon [Medium/High]` / `Claude Opus 5.5 [Medium/High]`)**: Utilize high-concurrency capabilities (up to 16 parallel reader threads via `skillsdb get-skills`, `skillsdb get-cluster`, and `skillsdb search-multi`). Keep the flagship main context clean by offloading read-only log/diff/multi-file analysis exceeding the tier threshold (`> 400 lines` on `Fast/Medium` or `> 250 lines` on `High` effort) via `skillsdb gemini-digest --files <paths> --query "<question>"` and routing exploratory `research` subagents to `Model="flash"` (`Gemini 3.8 Flash`).
 
-   - **Gemini Standard / Lean mode**: Conserve quota and avoid prompt bloat. Fetch targeted micro-skill sections via `skillsdb get-skill <name> --section "<Section>"` or `--summary` sequentially.
+   - **Pro / Lite mode (`Claude Sonnet 5.5`, `Gemini 3.8 Flash`, `GPT-OSS 120B`, or `shield` conservation mode)**: Conserve rolling 5-hour quota and avoid cumulative context tax. Fetch targeted micro-skill sections via `skillsdb get-skill <name> --section "<Section>"` or `--summary`, offload read-only file/log analysis (`> 200 lines` on `Pro`, `> 80 lines` on `Lite`) via `skillsdb gemini-digest`, and ensure subagents never consume scarce `Claude 5.5` quota by routing subagents to `Model="flash"` or `"flash_lite"` (enforced automatically at 0 extra turns by the `PreToolUse` hook).
 
 
 

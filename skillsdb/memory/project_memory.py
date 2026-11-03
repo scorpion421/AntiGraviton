@@ -1,9 +1,9 @@
-import re
 """
 Project-level episodic memory (.agents/memory.db), lifecycle hook handler, and statistics.
 """
 
 import os
+import re
 import sys
 import json
 import sqlite3
@@ -11,9 +11,10 @@ import shutil
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from ..config import TIER_ULTRA, DB_PATH, GEMINI_DIR, __version__
+from ..config import TIER_ULTRA, DB_PATH, GEMINI_DIR, resolve_user_home, __version__
 from ..core.db import get_connection, managed_connection
 from ..core.detector import detect_model_tier
+from ..core.quota_router import compute_routing_decision, format_hook_routing_banner, get_ledger_24h_summary
 from .writer_queue import get_writer_queue, flush_journals
 from ..platform.windows_utf8 import ensure_windows_utf8_manifests
 from .gitea_config import (
@@ -1595,7 +1596,17 @@ def handle_pre_invocation_hook():
 
     if tier == TIER_ULTRA:
         lines.append("[SKILLSDB RUNTIME PROFILE: GEMINI ULTRA (16-thread high-concurrency mode)]")
-        lines.append("Parallel batch fetching active: 'skillsdb get-skills <s1> <s2>' | Clusters: 'skillsdb get-cluster <domain>' | Parallel search: 'skillsdb search-multi <q1> <q2>' | Concurrent subagents: 8-16 parallel workers supported.\n")
+        lines.append("Parallel batch fetching active: 'skillsdb get-skills <s1> <s2>' | Clusters: 'skillsdb get-cluster <domain>' | Parallel search: 'skillsdb search-multi <q1> <q2>' | Concurrent subagents: 8-16 parallel workers supported.")
+    try:
+        routing_dec = compute_routing_decision(
+            cid=cid,
+            db_path=central_db_override,
+            model_name_hint=model_hint,
+            brain_dir=brain_dir_override,
+        )
+        lines.append(format_hook_routing_banner(routing_dec))
+    except Exception:
+        pass
 
     # Auto-initialize project memory and local Git repository if a valid project workspace is open and has files
     if has_valid_workspace and root_path and db_path:
@@ -1869,5 +1880,13 @@ def stats(conn: sqlite3.Connection, show_savings: bool = False, target_date: str
         tier, tdesc = detect_model_tier()
         if tier == TIER_ULTRA:
             print(f"Active Profile:       ULTRA (~${savings['dollars_saved_ultra']:.2f} USD saved / high quota protection)")
+    try:
+        l24 = get_ledger_24h_summary(db_path=DB_PATH)
+        if l24["saved_agy_tokens_total"] > 0 or l24["subagent_24h_rewrites"] > 0:
+            print("\n--- Multi-Pool Quota Router & External Offload Savings ---")
+            print(f"24h External Offloads: CLI-OAuth={l24['cli_24h_requests']}, AIStudio-API={l24['aistudio_24h_requests']}, Web-Handovers={l24['web_24h_handovers']}, Subagent-Rewrites={l24['subagent_24h_rewrites']}")
+            print(f"Offload Quota Saved:   ~{l24['saved_agy_tokens_total']:,} AGY tokens ({l24['saved_agy_turns_total']} turns avoided)")
+    except Exception:
+        pass
     print(f"[OK] Version: v{__version__} (Up to date)")
     print("================================================================\n")

@@ -9,7 +9,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content|read_file|view_file|run_command",
+        "matcher": "write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content|read_file|view_file|run_command|invoke_subagent",
         "hooks": [
           {
             "type": "command",

@@ -5,6 +5,20 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.15] - 2026-11-03
+
+### Added
+- **Multi-pool quota router and 3x3 `Ultra / Pro / Lite` governance engine (`skillsdb/core/quota_router.py`)**: Implemented unified quota routing across all 4 quota pools: Pool 1 (internal Antigravity 5-hour rolling window across Pool 1A `Gemini 4 Argon`, Pool 1B `Gemini 3.8 Flash`, Pool 1C `Claude Opus 5.5` / `Claude Sonnet 5.5`, and Pool 1D `GPT-OSS 120B`), Pool 2 (standalone `@google/gemini-cli` 24-hour OAuth developer quota), Pool 3 (`Google AI Studio` low-latency REST API), and Pool 4 (`gemini.google.com` Deep Research clipboard handover bridge).
+- **13-combination model and reasoning effort catalog (`skillsdb/core/detector.py`)**: Added `parse_antigravity_model_spec()` and `detect_model_and_pool()` supporting `Fast`, `Medium`, and `High` reasoning effort levels (and effort-weighted quota multipliers) on `Gemini 4 Argon`, `Gemini 3.8 Flash`, `Claude Opus 5.5`, and `Claude Sonnet 5.5`, while pinning `GPT-OSS 120B` to `Medium`.
+- **Zero-turn `PreToolUse` subagent model overwrite (`plugin/hooks.json`, `skillsdb/core/guardrails.py`)**: Added `invoke_subagent` to the `PreToolUse` matcher so `handle_pre_tool_guardrail_hook()` automatically rewrites `Model="inherit"` to `"flash"` or `"flash_lite"` for exploratory `research` subagents and shifts subagents off the Anthropic `Claude 5.5` pool onto the Google Gemini pool at zero extra turns.
+- **Context-shield CLI & MCP tools (`skillsdb/cli.py`, `skillsdb/platform/mcp_server.py`, `skillsdb/core/db.py`)**: Added `skillsdb quota-status` (alias `quota`), `skillsdb gemini-digest`, `skillsdb gemini-handover`, `skillsdb gemini-ingest`, and the `quota_ledger` SQLite table tracking offloaded requests and saved Antigravity tokens/turns.
+
+### Changed
+- **Updated Rule 7 and removed legacy `Gemini 3.1 Pro` references (`plugin/rules/AGENTS.md`, `skillsdb/core/detector.py`)**: Replaced obsolete `Gemini 3.1 Pro` references with the 5 active Antigravity models and their effort levels (`Fast`, `Medium`, `High`).
+
+### Fixed
+- **Enterprise Active Directory transcript path resolution in `detector.py`**: Replaced `Path.home() / ".gemini"` with `GEMINI_DIR` (`resolve_user_home()`) in `detect_model_and_pool()` so live transcript model detection resolves `%USERPROFILE%\.gemini` reliably when `HOME=Q:\`.
+
 ## [1.5.14] - 2026-11-02
 
 ### Changed

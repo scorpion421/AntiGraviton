@@ -11,6 +11,12 @@ from pathlib import Path
 from .config import SKILL_CLUSTERS, DB_PATH
 from .core.db import get_connection, init_db
 from .core.detector import get_profile, set_profile
+from .core.quota_router import (
+    print_quota_status,
+    execute_gemini_digest,
+    create_web_handover,
+    ingest_web_response,
+)
 from .core.concurrency import (
     get_skills_parallel,
     search_multi_parallel,
@@ -332,10 +338,41 @@ def build_parser() -> argparse.ArgumentParser:
     mem_prune_parser.add_argument("--max-age", type=int, default=30, help="Max age in days")
     mem_prune_parser.add_argument("--project", default=None, help="Project root directory (optional)")
 
-    # Model Profile Commands
-    profile_parser = subparsers.add_parser("profile", help="View or configure model tier concurrency profile (ultra, standard, lean, local, offline, auto)")
+    # Model Profile & Multi-Pool Quota Router Commands
+    profile_parser = subparsers.add_parser("profile", help="View or configure model tier, account quota tier (ultra/pro/lite), effort level (fast/medium/high), and routing mode")
     profile_parser.add_argument("action", nargs="?", default="get", choices=["get", "set", "auto"], help="Profile action (default: get)")
-    profile_parser.add_argument("tier", nargs="?", default=None, help="Model tier when action is 'set' (ultra, standard, lean, local, offline)")
+    profile_parser.add_argument("tier", nargs="?", default=None, help="Model tier when action is 'set' (ultra, pro, lite, standard, lean, local, offline, auto)")
+    profile_parser.add_argument("--account-tier", default=None, choices=["ultra", "pro", "lite", "auto"], help="Set subscription account quota tier (ultra, pro, lite, auto)")
+    profile_parser.add_argument("--effort", default=None, choices=["fast", "medium", "high", "auto"], help="Set reasoning effort override (fast, medium, high, auto)")
+    profile_parser.add_argument("--mode", default=None, choices=["auto", "balanced", "shield", "conserve", "turbo", "direct"], help="Set quota router operating mode")
+    profile_parser.add_argument("--api-key", default=None, help="Configure Google AI Studio GEMINI_API_KEY in runtime_config (or 'clear' to remove)")
+
+    quota_parser = subparsers.add_parser("quota-status", aliases=["quota"], help="Display 4-pool quota router status, 13-model effort matrix, 5h/24h usage, and offload savings")
+    quota_parser.add_argument("--json", action="store_true", help="Output full routing telemetry as JSON")
+
+    digest_parser = subparsers.add_parser("gemini-digest", help="Offload large file, log, or git diff analysis to external Gemini pools (Context Shield)")
+    digest_parser.add_argument("--files", "-f", nargs="+", default=None, help="File paths or glob patterns to digest")
+    digest_parser.add_argument("--query", "-q", default="Summarize key findings, errors, and exact line numbers.", help="Analysis question or extraction instruction")
+    digest_parser.add_argument("--git-diff", action="store_true", help="Include uncommitted git diff HEAD in the digest")
+    digest_parser.add_argument("--tier", choices=["auto", "ultra", "pro", "lite"], default="auto", help="Execution complexity tier (default: auto)")
+    digest_parser.add_argument("--pool", choices=["auto", "cli", "api", "local"], default="auto", help="Preferred execution pool (default: auto)")
+    digest_parser.add_argument("--save-fact", default=None, help="Optional fact key to persist the distilled digest directly into .agents/memory.db")
+    digest_parser.add_argument("--project", default=None, help="Project root directory (optional)")
+    digest_parser.add_argument("--json", action="store_true", help="Output result as JSON")
+
+    handover_parser = subparsers.add_parser("gemini-handover", help="Create a Pool 4 (gemini.google.com Deep Research) prompt bundle in the Windows clipboard")
+    handover_parser.add_argument("--topic", "-t", required=True, help="Deep Research or architectural analysis topic")
+    handover_parser.add_argument("--files", "-f", nargs="*", default=None, help="Optional workspace files to attach")
+    handover_parser.add_argument("--project", default=None, help="Project root directory (optional)")
+    handover_parser.add_argument("--open-browser", action="store_true", help="Open https://gemini.google.com/app in the default browser")
+    handover_parser.add_argument("--no-clipboard", action="store_true", help="Do not copy to Windows clipboard")
+    handover_parser.add_argument("--json", action="store_true", help="Output handover bundle as JSON")
+
+    ingest_parser = subparsers.add_parser("gemini-ingest", help="Ingest a copied Pool 4 (gemini.google.com) response from clipboard into .agents/memory.db")
+    ingest_parser.add_argument("--fact-key", default="gemini_web_research_finding", help="Fact key to store in .agents/memory.db")
+    ingest_parser.add_argument("--text", default=None, help="Explicit response text (defaults to reading Windows clipboard)")
+    ingest_parser.add_argument("--project", default=None, help="Project root directory (optional)")
+    ingest_parser.add_argument("--json", action="store_true", help="Output result as JSON")
 
     # Parallel Concurrency Commands
     get_skills_parser = subparsers.add_parser("get-skills", help="Retrieve multiple skills concurrently in a single batch call")
@@ -792,15 +829,77 @@ def main(argv: list[str] = None):
         elif args.command == "export-skill":
             export_skill(conn, args.name, args.target)
         elif args.command == "profile":
-            if args.action == "set":
-                if not args.tier:
-                    print("Error: Specify tier to set (ultra, standard, lean, local, offline). Example: skillsdb profile set local")
+            has_flags = any(getattr(args, k, None) is not None for k in ("account_tier", "effort", "mode", "api_key"))
+            if args.action == "set" or has_flags:
+                if not args.tier and not has_flags:
+                    print("Error: Specify tier (ultra, pro, lite, standard, lean, local, offline, auto) or --account-tier / --effort / --mode / --api-key.")
                 else:
-                    set_profile(args.tier, db_path=DB_PATH)
+                    set_profile(
+                        tier_name=args.tier,
+                        db_path=DB_PATH,
+                        account_tier=getattr(args, "account_tier", None),
+                        effort_level=getattr(args, "effort", None),
+                        quota_mode=getattr(args, "mode", None),
+                        api_key=getattr(args, "api_key", None),
+                    )
             elif args.action == "auto":
-                set_profile("auto", db_path=DB_PATH)
+                set_profile("auto", db_path=DB_PATH, account_tier="auto", effort_level="auto", quota_mode="auto")
             else:
-                get_profile()
+                get_profile(db_path=DB_PATH)
+        elif args.command in ("quota-status", "quota"):
+            print_quota_status(as_json=getattr(args, "json", False), db_path=DB_PATH)
+        elif args.command == "gemini-digest":
+            proj_p = Path(args.project) if getattr(args, "project", None) else None
+            res = execute_gemini_digest(
+                files=args.files,
+                query=args.query,
+                execution_tier=args.tier,
+                preferred_pool=args.pool,
+                include_git_diff=getattr(args, "git_diff", False),
+                save_fact_key=getattr(args, "save_fact", None),
+                project_root=proj_p,
+                db_path=DB_PATH,
+            )
+            if getattr(args, "json", False):
+                print(json.dumps(res, indent=2))
+            elif not res.get("success"):
+                print(f"Error: {res.get('error', 'Digest failed')}")
+                sys.exit(1)
+            else:
+                print(f"\n=== GEMINI CONTEXT-SHIELD DIGEST [Pool: {res['pool_used']} | Model: {res['model_used']} | Tier: {res['execution_tier'].upper()}] ===")
+                print(f"Files ({len(res['files_digested'])}): {', '.join(res['files_digested'])}")
+                print(f"Token Compression: ~{res['input_tokens']:,} raw tokens -> ~{res['output_tokens']:,} tokens (Saved ~{res['saved_agy_tokens']:,} AGY tokens & {res['saved_agy_turns']} turns in {res['latency_ms']} ms)\n")
+                print(res["digest"])
+                print("\n================================================================================\n")
+        elif args.command == "gemini-handover":
+            proj_p = Path(args.project) if getattr(args, "project", None) else None
+            res = create_web_handover(
+                topic=args.topic,
+                files=args.files,
+                project_root=proj_p,
+                open_browser=getattr(args, "open_browser", False),
+                copy_clipboard=not getattr(args, "no_clipboard", False),
+                db_path=DB_PATH,
+            )
+            if getattr(args, "json", False):
+                print(json.dumps(res, indent=2))
+            else:
+                clip_msg = "Copied to Windows clipboard (press Ctrl+V in gemini.google.com)" if res["copied_to_clipboard"] else "Generated prompt bundle"
+                print(f"[OK] Pool 4 Deep Research Handover Ready: {clip_msg} (~{res['prompt_tokens']} tokens).")
+        elif args.command == "gemini-ingest":
+            proj_p = Path(args.project) if getattr(args, "project", None) else None
+            res = ingest_web_response(
+                raw_text=getattr(args, "text", None),
+                fact_key=args.fact_key,
+                project_root=proj_p,
+            )
+            if getattr(args, "json", False):
+                print(json.dumps(res, indent=2))
+            elif not res.get("success"):
+                print(f"Error: {res.get('error')}")
+                sys.exit(1)
+            else:
+                print(f"[OK] Ingested Pool 4 response (~{res['ingested_tokens']} tokens) into .agents/memory.db under key '{res['fact_key']}'.")
         elif args.command == "get-skills":
             get_skills_parallel(args.names, max_workers=args.workers, as_json=args.json, summary=args.summary, db_path=DB_PATH)
         elif args.command == "search-multi":
