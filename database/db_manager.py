@@ -767,12 +767,13 @@ def _classify_model_string(text: str) -> str | None:
 
 def detect_account_tier(db_path: Path = None) -> tuple[str, str]:
     """
-    Detects the subscription / account quota tier ('ultra', 'pro', 'lite').
-    Controls the 5-hour Antigravity and 24-hour external CLI/API quota budgets.
+    Detects the subscription / account quota tier ('ultra' or 'pro').
+    AntiGraviton is engineered strictly for professional coding and supports exclusively
+    Google AI Ultra ('ultra') and Google AI Pro ('pro') subscription tiers.
     """
     env_acc = (os.environ.get("SKILLSDB_ACCOUNT_TIER") or "").strip().lower()
-    if env_acc in ("ultra", "pro", "standard", "lite", "lean"):
-        norm = "ultra" if env_acc == "ultra" else ("pro" if env_acc in ("pro", "standard") else "lite")
+    if env_acc in ("ultra", "pro", "standard", "lite", "lean", "free"):
+        norm = "ultra" if env_acc == "ultra" else "pro"
         return norm, f"Environment variable SKILLSDB_ACCOUNT_TIER={norm}"
 
     target_db = db_path or DB_PATH
@@ -785,8 +786,8 @@ def detect_account_tier(db_path: Path = None) -> tuple[str, str]:
                 row = cur.fetchone()
                 if row and row[0]:
                     val = row[0].strip().lower()
-                    if val in ("ultra", "pro", "standard", "lite", "lean"):
-                        norm = "ultra" if val == "ultra" else ("pro" if val in ("pro", "standard") else "lite")
+                    if val in ("ultra", "pro", "standard", "lite", "lean", "free"):
+                        norm = "ultra" if val == "ultra" else "pro"
                         return norm, f"Configured account profile (runtime_config.account_tier={norm})"
             finally:
                 conn.close()
@@ -1054,15 +1055,15 @@ def set_profile(
             if acc_clean == "auto":
                 cursor.execute("DELETE FROM runtime_config WHERE key = 'account_tier';")
                 updates_made.append("account_tier=AUTO")
-            elif acc_clean in ("ultra", "pro", "standard", "lite", "lean"):
-                norm_acc = "ultra" if acc_clean == "ultra" else ("pro" if acc_clean in ("pro", "standard") else "lite")
+            elif acc_clean in ("ultra", "pro", "standard", "lite", "lean", "free"):
+                norm_acc = "ultra" if acc_clean == "ultra" else "pro"
                 cursor.execute(
                     "INSERT OR REPLACE INTO runtime_config (key, value, updated_at) VALUES ('account_tier', ?, ?);",
                     (norm_acc, now_iso),
                 )
                 updates_made.append(f"account_tier={norm_acc.upper()}")
             else:
-                print(f"Error: Unknown account tier '{account_tier}'. Choose from: ultra, pro, lite, auto.")
+                print(f"Error: Unknown account tier '{account_tier}'. Supported coding subscription tiers: ultra, pro, auto.")
                 return
 
         if effort_level:
@@ -1082,7 +1083,7 @@ def set_profile(
 
         if quota_mode:
             mode_clean = quota_mode.strip().lower()
-            if mode_clean in ("auto", "balanced", "shield", "conserve", "turbo", "direct"):
+            if mode_clean in ("auto", "balanced", "golden_ratio", "shield", "conserve", "turbo", "direct"):
                 norm_mode = "shield" if mode_clean == "conserve" else mode_clean
                 cursor.execute(
                     "INSERT OR REPLACE INTO runtime_config (key, value, updated_at) VALUES ('quota_mode', ?, ?);",
@@ -1090,7 +1091,7 @@ def set_profile(
                 )
                 updates_made.append(f"quota_mode={norm_mode.upper()}")
             else:
-                print(f"Error: Unknown quota mode '{quota_mode}'. Choose from: auto, balanced, shield, turbo, direct.")
+                print(f"Error: Unknown quota mode '{quota_mode}'. Choose from: auto, balanced, golden_ratio, shield, turbo, direct.")
                 return
 
         if api_key is not None:
@@ -1163,8 +1164,11 @@ ACCOUNT_TIER_BUDGETS = {
     "ultra": {
         "agy_5h_soft_limit_units": 600.0,
         "agy_5h_turn_limit": 200,
-        "digest_line_threshold_base": 400,
+        "golden_ratio_pct": 61.8,
+        "shield_pct": 85.0,
+        "digest_line_threshold_base": 350,
         "digest_line_threshold_high_effort": 250,
+        "digest_line_threshold_golden_ratio": 180,
         "max_workers": 16,
         "cli_daily_limit": 2000,
         "aistudio_daily_limit": 1500,
@@ -1173,22 +1177,15 @@ ACCOUNT_TIER_BUDGETS = {
     "pro": {
         "agy_5h_soft_limit_units": 180.0,
         "agy_5h_turn_limit": 60,
+        "golden_ratio_pct": 61.8,
+        "shield_pct": 85.0,
         "digest_line_threshold_base": 200,
         "digest_line_threshold_high_effort": 140,
-        "max_workers": 4,
+        "digest_line_threshold_golden_ratio": 120,
+        "max_workers": 8,
         "cli_daily_limit": 1500,
         "aistudio_daily_limit": 1500,
         "default_research_subagent_model": "flash",
-    },
-    "lite": {
-        "agy_5h_soft_limit_units": 25.0,
-        "agy_5h_turn_limit": 10,
-        "digest_line_threshold_base": 80,
-        "digest_line_threshold_high_effort": 60,
-        "max_workers": 1,
-        "cli_daily_limit": 1000,
-        "aistudio_daily_limit": 1000,
-        "default_research_subagent_model": "flash_lite",
     },
 }
 
@@ -1200,10 +1197,6 @@ EXTERNAL_GEMINI_MODELS = {
     "pro": {
         "cli": "gemini-2.5-pro",
         "api": "gemini-2.5-flash",
-    },
-    "lite": {
-        "cli": "gemini-2.5-flash",
-        "api": "gemini-2.5-flash-lite",
     },
 }
 
@@ -1485,15 +1478,15 @@ def compute_routing_decision(
     brain_dir: Path = None,
 ) -> Dict[str, Any]:
     """
-    Computes the live 3D routing policy combining:
-      1. Account quota tier ('ultra', 'pro', 'lite')
+    Computes the live Golden-Ratio ('Goldener Schnitt') routing policy for Ultra and Pro coding accounts:
+      1. Account quota tier ('ultra' or 'pro' exclusively)
       2. Active Antigravity model family & internal pool (1A, 1B, 1C, 1D)
       3. Active reasoning effort level ('fast', 'medium', 'high')
       4. Rolling 5-hour Antigravity load and 24-hour external pool budgets
     """
     state = detect_model_and_pool(cid=cid, db_path=db_path, model_name_hint=model_name_hint)
-    account_tier = state["account_tier"]
-    budget = ACCOUNT_TIER_BUDGETS.get(account_tier, ACCOUNT_TIER_BUDGETS["pro"])
+    account_tier = "ultra" if state["account_tier"] == "ultra" else "pro"
+    budget = ACCOUNT_TIER_BUDGETS[account_tier]
 
     rolling_5h = scan_rolling_5h_antigravity_usage(brain_dir=brain_dir)
     ledger_24h = get_ledger_24h_summary(db_path=db_path)
@@ -1508,51 +1501,56 @@ def compute_routing_decision(
     soft_limit = budget["agy_5h_soft_limit_units"]
     load_pct = round((total_5h_units / soft_limit) * 100.0, 1) if soft_limit > 0 else 100.0
 
-    # Determine effective operating mode
-    if configured_mode in ("balanced", "shield", "turbo", "direct"):
+    # Golden Ratio ('Goldener Schnitt': 61.8% / 85.0%) Operating Mode Cascade:
+    # - < 61.8%: 'balanced' (Full Argon High power for coding & architecture)
+    # - 61.8% - 85.0%: 'golden_ratio' (100% Argon coding, step Effort High -> Medium for standard coding, tighten digest offload)
+    # - >= 85.0%: 'shield' (100% Argon/Claude coding, cross-pool failover to Claude 5.5 Pool 1C, max read-only offload)
+    if configured_mode in ("balanced", "golden_ratio", "shield", "turbo", "direct"):
         effective_mode = configured_mode
     else:
-        if account_tier == "lite" or load_pct >= 65.0:
+        if load_pct >= budget["shield_pct"]:
             effective_mode = "shield"
+        elif load_pct >= budget["golden_ratio_pct"]:
+            effective_mode = "golden_ratio"
         else:
             effective_mode = "balanced"
 
-    # Dynamic digest line threshold (tighter when High effort is active to avoid high-effort context tax)
+    # Dynamic digest line threshold (tighter when High effort or Golden Ratio / Shield is active)
     if effective_mode == "shield":
-        digest_line_threshold = min(100, budget["digest_line_threshold_high_effort"])
+        digest_line_threshold = min(100, budget["digest_line_threshold_golden_ratio"])
+    elif effective_mode == "golden_ratio":
+        digest_line_threshold = budget["digest_line_threshold_golden_ratio"]
     elif active_effort == EFFORT_HIGH:
         digest_line_threshold = budget["digest_line_threshold_high_effort"]
     else:
         digest_line_threshold = budget["digest_line_threshold_base"]
 
-    # Subagent model targets (0-turn PreToolUse overwrite targets)
-    if account_tier == "lite" or effective_mode == "shield":
-        subagent_research_model = "flash_lite"
-    else:
-        subagent_research_model = budget["default_research_subagent_model"]
+    # Subagent model targets (0-turn PreToolUse overwrite targets):
+    # 1. Read-only 'research' subagents ALWAYS use full Gemini 3.8 Flash ('flash' in Pool 1B) on Ultra & Pro.
+    subagent_research_model = budget["default_research_subagent_model"]
 
-    # Cross-pool subagent protection & Strict Coding Quality Guarantee:
-    # Coding/implementation subagents (TypeName='self') NEVER downgrade to Flash on Ultra/Pro!
-    # They stay 100% on Gemini 4 Argon ('inherit' when main is Argon, or 'pro' when main is Claude 5.5).
+    # 2. Coding/implementation subagents (TypeName='self') NEVER downgrade to Flash!
+    #    They stay 100% on Gemini 4 Argon ('inherit' when main is Argon, or 'pro' when main is Claude 5.5).
     if active_pool == POOL_AGY_CLAUDE:
-        subagent_general_model = "flash" if account_tier == "lite" else "pro"
-    elif account_tier == "lite":
-        subagent_general_model = "flash"
+        subagent_general_model = "pro"
     else:
         subagent_general_model = "inherit"
 
-    # Step-by-step degradation & cross-pool failover recommendation
+    # Golden Ratio step-by-step coding & quota optimization advice
     degradation_advice = ""
-    if load_pct >= 60.0 or account_tier == "lite":
+    if load_pct >= budget["golden_ratio_pct"]:
         claude_turns = rolling_5h["pools"][POOL_AGY_CLAUDE]["turns"]
-        gpt_turns = rolling_5h["pools"][POOL_AGY_OPEN_WEIGHT]["turns"]
-        steps_advice = []
+        steps_advice = [
+            "Coding Guarantee: Keep 100% of code generation on Gemini 4 Argon (never Flash)"
+        ]
         if active_effort == EFFORT_HIGH and EFFORT_MEDIUM in state["supported_efforts"]:
-            steps_advice.append(f"Step 1: Lower reasoning effort on {state['model_family']} from High -> Medium/Fast")
+            steps_advice.append(
+                f"Step 1 (Golden Ratio >= 62%): Switch {state['model_family']} Effort High (3.5x) -> Medium (2.2x) for standard coding (-37% burn, same Argon quality)"
+            )
         if active_pool == POOL_AGY_GEMINI_HIGH and claude_turns == 0:
-            steps_advice.append("Step 2: Pool 1C (Claude Sonnet 5.5 / Opus 5.5) is at 0 turns in the 5h window")
-        if gpt_turns == 0:
-            steps_advice.append("Step 3: Pool 1D (GPT-OSS 120B Medium) is at 0 turns as lightweight reserve")
+            steps_advice.append(
+                "Step 2 (Cross-Pool Coding Reserve): Pool 1C (Claude Opus 5.5 / Sonnet 5.5) is at 0 turns in the 5h window"
+            )
         degradation_advice = " | ".join(steps_advice)
 
     return {
@@ -1590,7 +1588,7 @@ def format_hook_routing_banner(decision: Dict[str, Any]) -> str:
         f"[SKILLSDB MULTI-POOL QUOTA ROUTER: Account={decision['account_tier'].upper()} | Mode={decision['effective_mode'].upper()} | Active={st['model_name']} (Pool={st['pool']}, Weight={st['quota_weight']}x)]",
         f"  * 5h Antigravity Window: {r5['total_turns']} turns ({r5['total_weighted_units']:.1f}/{decision['soft_limit_5h_units']:.0f} weighted units, {decision['load_pct_5h']:.0f}%) | Pool 1A Argon: {r5['pools'][POOL_AGY_GEMINI_HIGH]['turns']}t | Pool 1B Flash: {r5['pools'][POOL_AGY_GEMINI_FAST]['turns']}t | Pool 1C Claude: {r5['pools'][POOL_AGY_CLAUDE]['turns']}t | Pool 1D GPT-OSS: {r5['pools'][POOL_AGY_OPEN_WEIGHT]['turns']}t",
         f"  * External Gemini Pools (24h): Pool 2 CLI-OAuth={cli_state} ({l24['cli_24h_requests']}/{decision['cli_daily_limit']} RPD) | Pool 3 AIStudio-API={api_state} ({l24['aistudio_24h_requests']}/{decision['aistudio_daily_limit']} RPD) | Saved: ~{l24['saved_agy_tokens_total']:,} AGY tokens ({l24['saved_agy_turns_total']} turns)",
-        f"  * Routing Policy: Offload read-only logs/diffs/files > {decision['digest_line_threshold']} lines via 'skillsdb gemini-digest --files <paths> --query \"<q>\"'. Subagents auto-route to Model='{decision['subagent_research_model']}' (max {decision['max_workers']} workers).",
+        f"  * Golden Ratio Policy: 100% Argon/Claude for Coding (TypeName='self' -> '{decision['subagent_general_model']}'). Read-only 'research' subagents -> Model='{decision['subagent_research_model']}' (max {decision['max_workers']} workers). Offload read-only files > {decision['digest_line_threshold']} lines via 'skillsdb gemini-digest'.",
     ]
     if decision["degradation_advice"]:
         lines.append(f"  * Quota Optimization Advice: {decision['degradation_advice']}")
@@ -1598,20 +1596,17 @@ def format_hook_routing_banner(decision: Dict[str, Any]) -> str:
 
 
 def _classify_digest_task_tier(query: str, requested_tier: str, account_tier: str) -> str:
-    """Determines whether an offloaded digest task requires 'ultra', 'pro', or 'lite' execution."""
+    """Determines whether an offloaded digest task requires 'ultra' or 'pro' execution."""
     req = (requested_tier or "auto").strip().lower()
-    if req in ("ultra", "pro", "standard", "lite", "lean"):
-        return "ultra" if req == "ultra" else ("pro" if req in ("pro", "standard") else "lite")
-
-    if account_tier == "lite":
-        return "lite"
+    if req == "ultra":
+        return "ultra"
+    if req in ("pro", "standard", "lite", "lean"):
+        return "pro"
 
     q_low = (query or "").lower()
     if any(k in q_low for k in ("root cause", "security", "vulnerability", "architecture", "race condition", "deadlock", "forensic")):
         return "ultra" if account_tier == "ultra" else "pro"
-    if any(k in q_low for k in ("review", "diff", "compare", "refactor", "bug", "exception", "stack")):
-        return "pro"
-    return "lite"
+    return "pro"
 
 
 def _call_aistudio_rest_api(prompt: str, model_name: str, api_key: str, timeout: float = 25.0) -> Tuple[bool, str]:

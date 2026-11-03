@@ -191,12 +191,13 @@ def _classify_model_string(text: str) -> str | None:
 
 def detect_account_tier(db_path: Path = None) -> tuple[str, str]:
     """
-    Detects the subscription / account quota tier ('ultra', 'pro', 'lite').
-    Controls the 5-hour Antigravity and 24-hour external CLI/API quota budgets.
+    Detects the subscription / account quota tier ('ultra' or 'pro').
+    AntiGraviton is engineered strictly for professional coding and supports exclusively
+    Google AI Ultra ('ultra') and Google AI Pro ('pro') subscription tiers.
     """
     env_acc = (os.environ.get("SKILLSDB_ACCOUNT_TIER") or "").strip().lower()
-    if env_acc in ("ultra", "pro", "standard", "lite", "lean"):
-        norm = "ultra" if env_acc == "ultra" else ("pro" if env_acc in ("pro", "standard") else "lite")
+    if env_acc in ("ultra", "pro", "standard", "lite", "lean", "free"):
+        norm = "ultra" if env_acc == "ultra" else "pro"
         return norm, f"Environment variable SKILLSDB_ACCOUNT_TIER={norm}"
 
     target_db = db_path or DB_PATH
@@ -209,8 +210,8 @@ def detect_account_tier(db_path: Path = None) -> tuple[str, str]:
                 row = cur.fetchone()
                 if row and row[0]:
                     val = row[0].strip().lower()
-                    if val in ("ultra", "pro", "standard", "lite", "lean"):
-                        norm = "ultra" if val == "ultra" else ("pro" if val in ("pro", "standard") else "lite")
+                    if val in ("ultra", "pro", "standard", "lite", "lean", "free"):
+                        norm = "ultra" if val == "ultra" else "pro"
                         return norm, f"Configured account profile (runtime_config.account_tier={norm})"
             finally:
                 conn.close()
@@ -478,15 +479,15 @@ def set_profile(
             if acc_clean == "auto":
                 cursor.execute("DELETE FROM runtime_config WHERE key = 'account_tier';")
                 updates_made.append("account_tier=AUTO")
-            elif acc_clean in ("ultra", "pro", "standard", "lite", "lean"):
-                norm_acc = "ultra" if acc_clean == "ultra" else ("pro" if acc_clean in ("pro", "standard") else "lite")
+            elif acc_clean in ("ultra", "pro", "standard", "lite", "lean", "free"):
+                norm_acc = "ultra" if acc_clean == "ultra" else "pro"
                 cursor.execute(
                     "INSERT OR REPLACE INTO runtime_config (key, value, updated_at) VALUES ('account_tier', ?, ?);",
                     (norm_acc, now_iso),
                 )
                 updates_made.append(f"account_tier={norm_acc.upper()}")
             else:
-                print(f"Error: Unknown account tier '{account_tier}'. Choose from: ultra, pro, lite, auto.")
+                print(f"Error: Unknown account tier '{account_tier}'. Supported coding subscription tiers: ultra, pro, auto.")
                 return
 
         if effort_level:
@@ -506,7 +507,7 @@ def set_profile(
 
         if quota_mode:
             mode_clean = quota_mode.strip().lower()
-            if mode_clean in ("auto", "balanced", "shield", "conserve", "turbo", "direct"):
+            if mode_clean in ("auto", "balanced", "golden_ratio", "shield", "conserve", "turbo", "direct"):
                 norm_mode = "shield" if mode_clean == "conserve" else mode_clean
                 cursor.execute(
                     "INSERT OR REPLACE INTO runtime_config (key, value, updated_at) VALUES ('quota_mode', ?, ?);",
@@ -514,7 +515,7 @@ def set_profile(
                 )
                 updates_made.append(f"quota_mode={norm_mode.upper()}")
             else:
-                print(f"Error: Unknown quota mode '{quota_mode}'. Choose from: auto, balanced, shield, turbo, direct.")
+                print(f"Error: Unknown quota mode '{quota_mode}'. Choose from: auto, balanced, golden_ratio, shield, turbo, direct.")
                 return
 
         if api_key is not None:

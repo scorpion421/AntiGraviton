@@ -1255,13 +1255,14 @@ class TestGiteaSync(unittest.TestCase):
         self.assertEqual(res_sub2["decision"], "allow")
         self.assertEqual(res_sub2.get("overwrite"), {"Model": "pro"})
 
-        # Lite account tier must route research subagents to 'flash_lite' and set digest threshold <= 80
-        set_profile(account_tier="lite", quota_mode="auto", db_path=temp_central_db)
-        dec_lite = compute_routing_decision(db_path=temp_central_db, model_name_hint="Gemini 3.8 Flash (Fast)", brain_dir=fake_brain)
-        self.assertEqual(dec_lite["account_tier"], "lite")
-        self.assertEqual(dec_lite["effective_mode"], "shield")
-        self.assertEqual(dec_lite["subagent_research_model"], "flash_lite")
-        self.assertLessEqual(dec_lite["digest_line_threshold"], 80)
+        # Non-coding subscription tiers ('lite') must normalize to 'pro', and coding subagents (TypeName='self') must never downgrade to Flash
+        set_profile(account_tier="lite", quota_mode="golden_ratio", db_path=temp_central_db)
+        dec_pro = compute_routing_decision(db_path=temp_central_db, model_name_hint="Gemini 4 Argon (High)", brain_dir=fake_brain)
+        self.assertEqual(dec_pro["account_tier"], "pro")
+        self.assertEqual(dec_pro["effective_mode"], "golden_ratio")
+        self.assertEqual(dec_pro["subagent_research_model"], "flash")
+        self.assertEqual(dec_pro["subagent_general_model"], "inherit")
+        self.assertEqual(dec_pro["digest_line_threshold"], 120)
 
         # 4. Verify execute_gemini_digest context-shield execution, fact persistence, and quota_ledger accounting
         sample_log = self.test_dir / "sample_cbs.log"
@@ -1276,7 +1277,7 @@ class TestGiteaSync(unittest.TestCase):
         digest_res = execute_gemini_digest(
             files=[str(sample_log)],
             query="Find CBS error and HRESULT code",
-            execution_tier="lite",
+            execution_tier="pro",
             preferred_pool="local",
             save_fact_key="cbs_error_digest",
             project_root=self.test_dir,
