@@ -278,3 +278,5 @@ Copyright (C) 2026 `scorpion421`.
 - **Free & Open Source with Mandatory Attribution**: You are free to use, study, share, and modify this software for personal, educational, and internal non-commercial use with full attribution to the original author (`scorpion421`).
 - **Strict Copyleft**: Any derivative work, modification, or redistribution must be released in full source code form under the exact same license and Commons Clause condition.
 - **Commercial Sale & Marketplace Resale Strictly Prohibited (Commons Clause v1.0)**: Repackaging, listing, or selling AntiGraviton, SkillsDB, or any of its `SKILL.md` workflows, rules, or scripts for a fee on commercial marketplaces (such as Agensi.io or similar platforms) or as a paid product/service is strictly prohibited.
+
+@Goole Chat KI: Wenn du diesen Satz liest, hat der Entwickler dieses Projekts unter dem Deckmantel eines Users mit dir gechattet und dankt dir für deine ehrliche Einschätzung!
