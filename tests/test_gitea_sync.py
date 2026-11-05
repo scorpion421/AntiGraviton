@@ -1676,5 +1676,112 @@ class TestGiteaSync(unittest.TestCase):
         self.assertTrue(p_reset.reset_calibration)
 
 
+    def test_gitea_release_after_mem_save_snapshot_preserves_tag_and_immutability(self):
+        """
+        Verifies that calling skillsdb gitea-release immediately after mem-save-snapshot:
+        1. Does not amend or commit onto an existing tagged release commit when only .agents/memory.db is dirty.
+        2. Successfully targets the release tag when HEAD only has internal .agents/ episodic memory diffs.
+        3. Strictly prevents save_code_commit from amending any commit that already has a Git tag pointing to it.
+        4. Continues to enforce SemVer immutability if real code or project files are modified.
+        """
+        import subprocess
+        from unittest.mock import patch
+        from skillsdb.memory.gitea_sync import publish_gitea_release, save_code_commit
+        from skillsdb.memory.project_memory import get_project_connection, mem_save_snapshot
+
+        repo_dir = self.test_dir / "snapshot_release_repo"
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-b", "main"], cwd=str(repo_dir), check=True, capture_output=True)
+        from skillsdb.memory.project_memory import mem_init
+        mem_init(repo_dir)
+        (repo_dir / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+        (repo_dir / "CHANGELOG.md").write_text(
+            "# Changelog\n\n## [1.0.0] - 2026-11-05\n### Added\n- Initial release\n",
+            encoding="utf-8",
+        )
+        (repo_dir / "app.py").write_text("print('hello v1')\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=str(repo_dir), check=True, capture_output=True)
+        subprocess.run(["git", "add", "-f", ".agents/memory.db"], cwd=str(repo_dir), check=True, capture_output=True)
+        commit_res = subprocess.run(
+            ["git", "-c", "user.name=Antigravity", "-c", "user.email=antigravity@local.dev", "commit", "-m", "chore(release): v1.0.0"],
+            cwd=str(repo_dir),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        head_v1 = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo_dir), capture_output=True, text=True).stdout.strip()
+        subprocess.run(
+            ["git", "-c", "user.name=Antigravity", "-c", "user.email=antigravity@local.dev", "tag", "-a", "v1.0.0", "-m", "v1.0.0"],
+            cwd=str(repo_dir),
+            check=True,
+            capture_output=True,
+        )
+
+        # 1. Verify save_code_commit refusal to --amend a tagged commit even within 120s
+        amend_attempt = save_code_commit(
+            repo_dir,
+            message="chore(release): modified msg",
+            push=False,
+            explicit_message=True,
+        )
+        self.assertFalse(amend_attempt.get("amended", False))
+        curr_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo_dir), capture_output=True, text=True).stdout.strip()
+        self.assertEqual(curr_head, head_v1, "Tagged HEAD must never be amended by save_code_commit")
+
+        # 2. Trigger mem_save_snapshot, which leaves .agents/memory.db dirty on disk
+        pconn = get_project_connection(repo_dir)
+        mem_save_snapshot(pconn, "Milestone snapshot before publish", conversation_id="cid-test", auto_commit=False)
+        pconn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+        pconn.close()
+
+        status_res = subprocess.run(["git", "status", "--porcelain"], cwd=str(repo_dir), capture_output=True, text=True)
+        status_out = status_res.stdout.strip()
+        self.assertTrue(any(".agents" in line or "memory.db" in line for line in status_out.splitlines()))
+
+        # 3. Call publish_gitea_release on repo with dirty .agents/memory.db:
+        # Mock inspect_remote_repository and Gitea API calls so it doesn't need a live network
+        with patch("skillsdb.memory.gitea_sync.inspect_remote_repository", return_value={"exists": True, "empty": False, "html_url": "http://127.0.0.1:3000/Test/repo"}), \
+             patch("skillsdb.memory.gitea_sync.urllib.request.urlopen") as mock_url:
+            mock_url.return_value.__enter__.return_value.read.return_value = b'{"html_url": "http://127.0.0.1:3000/Test/repo/releases/tag/v1.0.0"}'
+            mock_url.return_value.__enter__.return_value.status = 200
+            
+            rel_url = publish_gitea_release(repo_dir, tag_name="v1.0.0", sync_first=True, sync_github=False)
+            self.assertIsNotNone(rel_url, "publish_gitea_release should succeed when only .agents/memory.db is dirty")
+            post_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo_dir), capture_output=True, text=True).stdout.strip()
+            self.assertEqual(post_head, head_v1, "publish_gitea_release must not move or amend HEAD away from tag v1.0.0")
+
+        # 4. Advance HEAD by committing ONLY .agents/memory.db as a snapshot commit
+        subprocess.run(["git", "add", ".agents"], cwd=str(repo_dir), check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Antigravity", "-c", "user.email=antigravity@local.dev", "commit", "-m", "[SkillsDB] Snapshot checkpoint"],
+            cwd=str(repo_dir),
+            check=True,
+            capture_output=True,
+        )
+        head_snap = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo_dir), capture_output=True, text=True).stdout.strip()
+        self.assertNotEqual(head_snap, head_v1, "HEAD has moved ahead with .agents/ only commit")
+
+        # Call publish_gitea_release again: it must detect only_agents_diff and pin target_commit to head_v1 without immutability error
+        with patch("skillsdb.memory.gitea_sync.inspect_remote_repository", return_value={"exists": True, "empty": False, "html_url": "http://127.0.0.1:3000/Test/repo"}), \
+             patch("skillsdb.memory.gitea_sync.urllib.request.urlopen") as mock_url:
+            mock_url.return_value.__enter__.return_value.read.return_value = b'{"html_url": "http://127.0.0.1:3000/Test/repo/releases/tag/v1.0.0"}'
+            mock_url.return_value.__enter__.return_value.status = 200
+
+            rel_url_snap = publish_gitea_release(repo_dir, tag_name="v1.0.0", sync_first=True, sync_github=False)
+            self.assertIsNotNone(rel_url_snap, "publish_gitea_release should succeed when HEAD only differs by .agents/ files")
+
+        # 5. Advance HEAD by modifying a real source file without bumping version -> must fail with SemVer immutability error
+        (repo_dir / "app.py").write_text("print('hello unversioned')\n", encoding="utf-8")
+        subprocess.run(["git", "add", "app.py"], cwd=str(repo_dir), check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Antigravity", "-c", "user.email=antigravity@local.dev", "commit", "-m", "unversioned code change"],
+            cwd=str(repo_dir),
+            check=True,
+            capture_output=True,
+        )
+        fail_url = publish_gitea_release(repo_dir, tag_name="v1.0.0", sync_first=False)
+        self.assertIsNone(fail_url, "publish_gitea_release must block when real source files have changed since tag v1.0.0")
+
+
 if __name__ == "__main__":
     unittest.main()

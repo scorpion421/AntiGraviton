@@ -5,6 +5,15 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.2] - 2026-11-05
+
+### Fixed
+- **SemVer immutability preservation and release tag synchronization after `mem-save-snapshot` (`skillsdb/memory/gitea_sync.py`, `v4.0.2`)**:
+  - Fixed a false-positive SemVer immutability collision where calling `skillsdb gitea-release` immediately after `skillsdb mem-save-snapshot` triggered `[SEMVER IMMUTABILITY ERROR]` because post-commit `.agents/memory.db` metadata updates or recent snapshot HEADs caused `sync_workspace` to amend or commit onto an already tagged release.
+  - Added a dedicated target-tag check in `publish_gitea_release`: if HEAD already matches the target release tag (`existing_tag_sha == head_sha`) and the working tree is either clean or only contains uncommitted internal `.agents/memory.db` updates (`only_agents_changed`), `sync_first` is automatically bypassed so HEAD is never amended or moved away from the release tag.
+  - Added internal `.agents/` commit-diff tolerance: if HEAD has moved ahead of the release tag solely due to internal `.agents/memory.db` episodic memory commits (`only_agents_diff`), `publish_gitea_release` automatically pins `target_commit` to `existing_tag_sha` without error.
+  - Added a strict tag check (`git tag --points-at HEAD`) in `save_code_commit` to guarantee that Git commits pointing to existing release tags are never amended via `commit --amend`.
+
 ## [2.0.1] - 2026-11-03
 
 ### Added

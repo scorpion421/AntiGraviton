@@ -1,5 +1,5 @@
 """
-SkillsDB v4.0.1 (AntiGraviton Suite v2.0.1) Multi-Pool Quota Router, Golden-Ratio (61.8% / 85.0%) Ultra/Pro Control Plane,
+SkillsDB v4.0.2 (AntiGraviton Suite v2.0.2) Multi-Pool Quota Router, Golden-Ratio (61.8% / 85.0%) Ultra/Pro Control Plane,
 Effort-Weighted 5h/24h Telemetry, Cross-Workstation Heartbeat Sync, Live Calibration Anchor, Context-Backpack Detector,
 and External Gemini Context-Shield Offload Engine.
 """
