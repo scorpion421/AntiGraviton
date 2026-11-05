@@ -572,6 +572,55 @@ def _is_exploratory_search_cmd(cmd: str) -> bool:
     return False
 
 
+def _is_subagent_context(payload: Dict[str, Any], t_path: Optional[Path] = None) -> bool:
+    """
+    Returns True if the current PreToolUse invocation originates from an isolated subagent
+    (e.g., TypeName='research' or 'self') rather than the primary user-facing conversation.
+    Checks both explicit hook payload metadata and the O(1) transcript header signature
+    (subagent transcripts begin with a parent SYSTEM_MESSAGE containing 'sender=' and have
+    no USER_INPUT / USER_EXPLICIT header steps).
+    """
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("isSubagent") or payload.get("parentConversationId"):
+        return True
+    sub_type = str(
+        payload.get("subagentType")
+        or payload.get("typeName")
+        or payload.get("agentType")
+        or payload.get("TypeName")
+        or ""
+    ).strip().lower()
+    if sub_type in ("research", "self", "image-generator", "subagent"):
+        return True
+    role_val = str(payload.get("role") or payload.get("agentRole") or "").strip()
+    if role_val:
+        return True
+
+    if t_path and t_path.exists():
+        try:
+            head_lines = []
+            with open(t_path, "r", encoding="utf-8", errors="ignore") as f:
+                for _ in range(8):
+                    line = f.readline()
+                    if not line:
+                        break
+                    head_lines.append(line)
+            has_user_input = any(
+                '"USER_INPUT"' in ln or '"USER_EXPLICIT"' in ln
+                for ln in head_lines
+            )
+            has_parent_sys_msg = any(
+                '"SYSTEM_MESSAGE"' in ln and ("sender=" in ln or "<SYSTEM_MESSAGE>" in ln)
+                for ln in head_lines
+            )
+            if has_parent_sys_msg and not has_user_input:
+                return True
+        except Exception:
+            pass
+    return False
+
+
 def _was_file_region_read_in_current_epoch(
     payload: Dict[str, Any],
     fpath: Path,
@@ -814,6 +863,7 @@ def handle_pre_tool_guardrail_hook():
                 return
 
             # Subagent Firewall enforcement for 5+ consecutive exploratory search commands in the main context
+            # (Isolated subagents such as TypeName='research' are exempt so their searches never block or affect main-context streaks)
             if _is_exploratory_search_cmd(cmd_line):
                 try:
                     t_path_str = payload.get("transcriptPath") or ""
@@ -822,7 +872,7 @@ def handle_pre_tool_guardrail_hook():
                         resolve_user_home() / ".gemini" / "antigravity" / "brain" / cid / ".system_generated" / "logs" / "transcript.jsonl"
                         if cid else None
                     )
-                    if t_path and t_path.exists():
+                    if not _is_subagent_context(payload, t_path) and t_path and t_path.exists():
                         tail_lines = read_jsonl_tail_lines(t_path, max_bytes=131072, max_lines=30)
                         search_streak = 0
                         for rline in reversed(tail_lines):
@@ -830,6 +880,7 @@ def handle_pre_tool_guardrail_hook():
                                 '"USER_INPUT"' in rline
                                 or '"USER_EXPLICIT"' in rline
                                 or '"invoke_subagent"' in rline
+                                or ('"SYSTEM_MESSAGE"' in rline and "sender=" in rline)
                                 or "<CONTEXT_SUMMARY>" in rline
                             ):
                                 break

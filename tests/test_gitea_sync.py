@@ -1782,6 +1782,106 @@ class TestGiteaSync(unittest.TestCase):
         fail_url = publish_gitea_release(repo_dir, tag_name="v1.0.0", sync_first=False)
         self.assertIsNone(fail_url, "publish_gitea_release must block when real source files have changed since tag v1.0.0")
 
+    def test_subagent_firewall_exempts_research_subagents_and_resets_on_subagent_reply(self):
+        """
+        Verifies that the PreToolUse Subagent Firewall:
+        1. Exempts isolated subagents (detected via transcript SYSTEM_MESSAGE sender= header or payload metadata)
+           even when executing 5+ consecutive exploratory shell search commands.
+        2. Resets the main-context search_streak when a subagent reply (SYSTEM_MESSAGE with sender=) arrives.
+        3. Continues to block 5+ consecutive exploratory search commands in the main conversation context.
+        """
+        import io
+        import json
+        from unittest.mock import patch
+        from skillsdb.core.guardrails import _is_subagent_context, handle_pre_tool_guardrail_hook
+
+        local_search = "Get-ChildItem -Recurse src | Select-String 'TODO'"
+        search_step = json.dumps({
+            "step_index": 10,
+            "type": "PLANNER_RESPONSE",
+            "tool_calls": [{"name": "run_command", "args": {"CommandLine": local_search}}],
+        })
+
+        # 1. Subagent transcript starting with EPHEMERAL_MESSAGE + parent SYSTEM_MESSAGE (sender=<parent-cid>)
+        sub_t_file = self.test_dir / "subagent_research_transcript.jsonl"
+        sub_header_0 = json.dumps({
+            "step_index": 0,
+            "type": "EPHEMERAL_MESSAGE",
+            "source": "SYSTEM",
+            "content": "[SKILLSDB CRITICAL GUARDRAIL & INVARIANTS (TURN 1)]",
+        })
+        sub_header_1 = json.dumps({
+            "step_index": 1,
+            "type": "SYSTEM_MESSAGE",
+            "source": "SYSTEM",
+            "content": "<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-05T13:19:48Z sender=c00da419-466a-4abc-8a48-2b3fa4cf0d7a priority=MESSAGE_PRIORITY_NORMAL content=Investigate root cause across files\n</SYSTEM_MESSAGE>",
+        })
+        sub_t_file.write_text(
+            "\n".join([sub_header_0, sub_header_1] + [search_step] * 6) + "\n",
+            encoding="utf-8",
+        )
+        self.assertTrue(_is_subagent_context({}, sub_t_file))
+        self.assertTrue(_is_subagent_context({"typeName": "research"}, None))
+        self.assertTrue(_is_subagent_context({"isSubagent": True}, None))
+
+        p_sub = json.dumps({
+            "transcriptPath": str(sub_t_file),
+            "toolCall": {
+                "name": "run_command",
+                "args": {"CommandLine": local_search, "WaitMsBeforeAsync": 10000},
+            },
+        })
+        out_sub = io.StringIO()
+        with patch("sys.stdin", io.StringIO(p_sub)), patch("sys.stdout", out_sub):
+            handle_pre_tool_guardrail_hook()
+        res_sub = json.loads(out_sub.getvalue())
+        self.assertEqual(res_sub["decision"], "allow", "Isolated research subagent must never be blocked by Subagent Firewall")
+
+        # 2. Main conversation transcript where a subagent reply (SYSTEM_MESSAGE with sender=) resets the streak
+        main_t_file = self.test_dir / "main_with_subagent_reply_transcript.jsonl"
+        main_user_step = json.dumps({
+            "step_index": 1,
+            "type": "USER_INPUT",
+            "source": "USER_EXPLICIT",
+            "content": "Find and fix the bug",
+        })
+        sub_reply_step = json.dumps({
+            "step_index": 15,
+            "type": "SYSTEM_MESSAGE",
+            "source": "SYSTEM",
+            "content": "<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-05T13:22:00Z sender=f24434a3-8fe6-41f2-baca-d9e99bd38db1 content=Subagent findings...\n</SYSTEM_MESSAGE>",
+        })
+        main_t_file.write_text(
+            "\n".join([main_user_step] + [search_step] * 3 + [sub_reply_step] + [search_step] * 2) + "\n",
+            encoding="utf-8",
+        )
+        self.assertFalse(_is_subagent_context({}, main_t_file))
+
+        p_main_reset = json.dumps({
+            "transcriptPath": str(main_t_file),
+            "toolCall": {
+                "name": "run_command",
+                "args": {"CommandLine": local_search, "WaitMsBeforeAsync": 10000},
+            },
+        })
+        out_main_reset = io.StringIO()
+        with patch("sys.stdin", io.StringIO(p_main_reset)), patch("sys.stdout", out_main_reset):
+            handle_pre_tool_guardrail_hook()
+        res_main_reset = json.loads(out_main_reset.getvalue())
+        self.assertEqual(res_main_reset["decision"], "allow", "Subagent reply SYSTEM_MESSAGE must reset main-context search_streak")
+
+        # 3. Main conversation transcript with 4 consecutive searches after USER_INPUT -> 5th search is DENIED
+        main_t_file.write_text(
+            "\n".join([main_user_step] + [search_step] * 4) + "\n",
+            encoding="utf-8",
+        )
+        out_main_deny = io.StringIO()
+        with patch("sys.stdin", io.StringIO(p_main_reset)), patch("sys.stdout", out_main_deny):
+            handle_pre_tool_guardrail_hook()
+        res_main_deny = json.loads(out_main_deny.getvalue())
+        self.assertEqual(res_main_deny["decision"], "deny")
+        self.assertIn("Subagent Firewall", res_main_deny["reason"])
+
 
 if __name__ == "__main__":
     unittest.main()

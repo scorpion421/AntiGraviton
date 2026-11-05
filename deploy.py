@@ -141,6 +141,43 @@ def safe_deploy_database(source_db_file: Path, target_db_file: Path) -> None:
             dst_conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
 
 
+def safe_copy_file(src: Path, dst: Path) -> None:
+    """
+    Copies src to dst safely on Windows even when dst is memory-mapped by an active
+    hook or MCP server process (WinError 1224 / PermissionError).
+    """
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    old_dst = dst.with_suffix(dst.suffix + ".old")
+    if old_dst.exists():
+        try:
+            old_dst.unlink()
+        except OSError:
+            pass
+    try:
+        shutil.copy2(src, dst)
+        return
+    except OSError:
+        pass
+
+    tmp_dst = dst.with_suffix(dst.suffix + ".tmp")
+    shutil.copy2(src, tmp_dst)
+    try:
+        os.replace(tmp_dst, dst)
+        return
+    except OSError:
+        if dst.exists():
+            try:
+                os.replace(dst, old_dst)
+            except OSError:
+                pass
+        os.replace(tmp_dst, dst)
+        if old_dst.exists():
+            try:
+                old_dst.unlink()
+            except OSError:
+                pass
+
+
 def deploy(source_dir: Path = None, target_dir: Path = None):
     user_home = resolve_user_home()
     if not source_dir:
@@ -175,9 +212,17 @@ def deploy(source_dir: Path = None, target_dir: Path = None):
     print("[2/5] Deploying database and management CLI...")
     target_db_file = target_db_dir / "customizations.db"
     safe_deploy_database(source_dir / "database" / "customizations.db", target_db_file)
-    shutil.copy2(source_dir / "database" / "db_manager.py", target_db_dir / "db_manager.py")
+    safe_copy_file(source_dir / "database" / "db_manager.py", target_db_dir / "db_manager.py")
     if (source_dir / "skillsdb").exists():
-        shutil.copytree(source_dir / "skillsdb", target_db_dir / "skillsdb", dirs_exist_ok=True)
+        for src_p in (source_dir / "skillsdb").rglob("*"):
+            rel_p = src_p.relative_to(source_dir / "skillsdb")
+            if "__pycache__" in rel_p.parts:
+                continue
+            dst_p = target_db_dir / "skillsdb" / rel_p
+            if src_p.is_dir():
+                dst_p.mkdir(parents=True, exist_ok=True)
+            else:
+                safe_copy_file(src_p, dst_p)
     print(f"      Database deployed to: {target_db_dir}")
 
     # Deploy global CLI wrapper to ~/.gemini/antigravity/bin (in system PATH)

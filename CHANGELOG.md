@@ -5,6 +5,16 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.3] - 2026-11-05
+
+### Fixed
+- **Subagent Firewall exemption for isolated `research` / `self` subagents and main-context streak reset (`skillsdb/core/guardrails.py`, `v4.0.3`)**:
+  - Fixed a false-positive Subagent Firewall trigger where `handle_pre_tool_guardrail_hook` counted and blocked 5+ exploratory shell search commands (`Get-ChildItem`, `Select-String`, `rg`, `grep`, `python -c`) inside an already isolated `research` subagent conversation because subagent transcripts start with a parent `SYSTEM_MESSAGE` (`sender=<parent-cid>`) rather than `USER_INPUT`.
+  - Added `_is_subagent_context(payload, t_path)` using $O(1)$ transcript header inspection (first 8 lines containing `SYSTEM_MESSAGE` with `sender=` and no `USER_INPUT` / `USER_EXPLICIT`) alongside payload metadata (`isSubagent`, `parentConversationId`, `subagentType`, `typeName`, `agentType`, `role`) so isolated subagents are 100% exempt from the Subagent Firewall.
+  - Updated the main-context `search_streak` scanner to also reset whenever a subagent reply (`SYSTEM_MESSAGE` with `sender=`) arrives in the parent conversation.
+- **Windows-safe atomic deployment when `db_manager.py` is memory-mapped (`deploy.py`, `v4.0.3`)**:
+  - Added `safe_copy_file()` in `deploy.py` to prevent `WinError 1224` (`ERROR_USER_MAPPED_FILE`) on Windows when `~/.gemini/database/db_manager.py` is concurrently held open by an active MCP server or hook process.
+
 ## [2.0.2] - 2026-11-05
 
 ### Fixed
