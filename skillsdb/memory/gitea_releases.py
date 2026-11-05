@@ -2,6 +2,7 @@
 Keep a Changelog 1.1.0 parsing and automated Gitea/GitHub release publishing for SkillsDB.
 """
 
+import os
 import re
 import json
 import uuid
@@ -85,6 +86,7 @@ def _extract_changelog_section(
     Reads VERSION and CHANGELOG.md in project_root and extracts:
     (normalized_tag, release_title, markdown_body).
     """
+    project_root = Path(os.path.abspath(str(project_root)))
     raw_ver = target_version.strip() if target_version else None
     if not raw_ver:
         ver_file = project_root / "VERSION"
@@ -252,7 +254,7 @@ def _attach_release_binary_assets(
     if not rel_id or not base_url or not owner or not repo_name or not token:
         return uploaded_names
 
-    project_root = Path(project_root)
+    project_root = Path(os.path.abspath(str(project_root)))
     existing_map = {
         a.get("name"): a.get("id")
         for a in (existing_assets or [])
@@ -264,86 +266,119 @@ def _attach_release_binary_assets(
         return uploaded_names
 
     clean_ver = tag.lstrip("vV")
-    primary_file = candidates[0]
-    ext = ".tar.gz" if primary_file.name.lower().endswith(".tar.gz") else primary_file.suffix
-    low_primary = primary_file.name.lower()
+    quoted_owner = urllib.parse.quote(str(owner), safe="")
+    quoted_repo = urllib.parse.quote(str(repo_name), safe="")
 
-    if low_primary.endswith(".apk"):
-        asset_name = f"{repo_name}-{tag}-clean-signed.apk" if "clean" in low_primary else f"{repo_name}-{tag}.apk"
-        content_type = "application/vnd.android.package-archive"
-    else:
-        if tag.lower() in low_primary or (clean_ver and clean_ver.lower() in low_primary):
-            asset_name = primary_file.name
+    # Select distinct deliverables belonging to the primary artifact's ecosystem family
+    _ecosystem_families = [
+        {".apk", ".aab"},
+        {".ipa"},
+        {".exe", ".msi", ".msix"},
+        {".dmg", ".pkg"},
+        {".deb", ".rpm", ".appimage"},
+        {".whl", ".tar.gz"},
+        {".xpi", ".crx", ".vsix"},
+    ]
+    first_ext = ".tar.gz" if candidates[0].name.lower().endswith(".tar.gz") else candidates[0].suffix.lower()
+    allowed_exts = {first_ext}
+    for fam in _ecosystem_families:
+        if first_ext in fam:
+            allowed_exts = fam
+            break
+
+    selected_files: List[Path] = []
+    seen_apk = False
+    for cand in candidates:
+        cand_ext = ".tar.gz" if cand.name.lower().endswith(".tar.gz") else cand.suffix.lower()
+        if cand_ext not in allowed_exts:
+            continue
+        if cand_ext == ".apk":
+            if seen_apk:
+                continue
+            seen_apk = True
+        selected_files.append(cand)
+
+    for primary_file in selected_files:
+        ext = ".tar.gz" if primary_file.name.lower().endswith(".tar.gz") else primary_file.suffix
+        low_primary = primary_file.name.lower()
+
+        if low_primary.endswith(".apk"):
+            asset_name = f"{repo_name}-{tag}-clean-signed.apk" if "clean" in low_primary else f"{repo_name}-{tag}.apk"
+            content_type = "application/vnd.android.package-archive"
         else:
-            asset_name = f"{repo_name}-{tag}{ext}"
-        content_type = "application/zip" if ext in (".zip", ".whl", ".jar", ".xpi") else "application/octet-stream"
+            if tag.lower() in low_primary or (clean_ver and clean_ver.lower() in low_primary) or len(selected_files) > 1:
+                asset_name = primary_file.name if (tag.lower() in low_primary or (clean_ver and clean_ver.lower() in low_primary)) else f"{repo_name}-{tag}-{primary_file.name}"
+            else:
+                asset_name = f"{repo_name}-{tag}{ext}"
+            content_type = "application/zip" if ext in (".zip", ".whl", ".jar", ".xpi") else "application/octet-stream"
 
-    if asset_name in existing_map and not overwrite:
-        return uploaded_names
+        if asset_name in existing_map and not overwrite:
+            continue
 
-    file_bytes: Optional[bytes] = None
-    is_tag_specific_file = tag.lower() in low_primary or (clean_ver and clean_ver.lower() in low_primary)
-    if is_tag_specific_file:
-        try:
-            file_bytes = primary_file.read_bytes()
-        except Exception:
-            pass
-
-    if not file_bytes and (project_root / ".git" / "HEAD").exists():
-        try:
-            rel_path = primary_file.relative_to(project_root).as_posix()
-            git_show = subprocess.run(
-                ["git", "show", f"{tag}:{rel_path}"],
-                cwd=str(project_root),
-                capture_output=True,
-                timeout=15,
-            )
-            if git_show.returncode == 0 and git_show.stdout:
-                file_bytes = git_show.stdout
-        except Exception:
-            pass
-
-    if not file_bytes:
-        try:
-            file_bytes = primary_file.read_bytes()
-        except Exception:
-            return uploaded_names
-
-    try:
-        if asset_name in existing_map and existing_map[asset_name]:
-            del_req = urllib.request.Request(
-                f"{base_url.rstrip('/')}/api/v1/repos/{owner}/{repo_name}/releases/{rel_id}/assets/{existing_map[asset_name]}",
-                method="DELETE",
-                headers={"Authorization": f"token {token}", "User-Agent": "SkillsDB-GiteaSync/1.0"},
-            )
-            with urllib.request.urlopen(del_req, timeout=10.0):
-                pass
-        boundary = f"----SkillsDBAssetBoundary{uuid.uuid4().hex}"
-        body = (
-            f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="attachment"; filename="{asset_name}"\r\n'
-            f"Content-Type: {content_type}\r\n\r\n"
-        ).encode("utf-8") + file_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
-        up_url = f"{base_url.rstrip('/')}/api/v1/repos/{owner}/{repo_name}/releases/{rel_id}/assets?name={urllib.parse.quote(asset_name)}"
-        up_req = urllib.request.Request(
-            up_url,
-            data=body,
-            method="POST",
-            headers={
-                "Authorization": f"token {token}",
-                "Content-Type": f"multipart/form-data; boundary={boundary}",
-                "User-Agent": "SkillsDB-GiteaSync/1.0",
-            },
-        )
-        with urllib.request.urlopen(up_req, timeout=30.0) as resp:
-            if resp.status in (200, 201):
-                uploaded_names.append(asset_name)
-    except Exception as e:
-        if hasattr(e, "close"):
+        file_bytes: Optional[bytes] = None
+        is_tag_specific_file = tag.lower() in low_primary or (clean_ver and clean_ver.lower() in low_primary)
+        if is_tag_specific_file:
             try:
-                e.close()
+                file_bytes = primary_file.read_bytes()
             except Exception:
                 pass
+
+        if not file_bytes and (project_root / ".git" / "HEAD").exists():
+            try:
+                rel_path = primary_file.relative_to(project_root).as_posix()
+                git_show = subprocess.run(
+                    ["git", "show", f"{tag}:{rel_path}"],
+                    cwd=str(project_root),
+                    capture_output=True,
+                    timeout=15,
+                )
+                if git_show.returncode == 0 and git_show.stdout:
+                    file_bytes = git_show.stdout
+            except Exception:
+                pass
+
+        if not file_bytes:
+            try:
+                file_bytes = primary_file.read_bytes()
+            except Exception:
+                continue
+
+        try:
+            if asset_name in existing_map and existing_map[asset_name]:
+                del_req = urllib.request.Request(
+                    f"{base_url.rstrip('/')}/api/v1/repos/{quoted_owner}/{quoted_repo}/releases/{rel_id}/assets/{existing_map[asset_name]}",
+                    method="DELETE",
+                    headers={"Authorization": f"token {token}", "User-Agent": "SkillsDB-GiteaSync/1.0"},
+                )
+                with urllib.request.urlopen(del_req, timeout=10.0):
+                    pass
+            boundary = f"----SkillsDBAssetBoundary{uuid.uuid4().hex}"
+            body = (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="attachment"; filename="{asset_name}"\r\n'
+                f"Content-Type: {content_type}\r\n\r\n"
+            ).encode("utf-8") + file_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
+            up_url = f"{base_url.rstrip('/')}/api/v1/repos/{quoted_owner}/{quoted_repo}/releases/{rel_id}/assets?name={urllib.parse.quote(asset_name)}"
+            up_req = urllib.request.Request(
+                up_url,
+                data=body,
+                method="POST",
+                headers={
+                    "Authorization": f"token {token}",
+                    "Content-Type": f"multipart/form-data; boundary={boundary}",
+                    "User-Agent": "SkillsDB-GiteaSync/1.0",
+                },
+            )
+            with urllib.request.urlopen(up_req, timeout=30.0) as resp:
+                if resp.status in (200, 201):
+                    uploaded_names.append(asset_name)
+                    existing_map[asset_name] = True
+        except Exception as e:
+            if hasattr(e, "close"):
+                try:
+                    e.close()
+                except Exception:
+                    pass
     return uploaded_names
 
 
@@ -359,6 +394,7 @@ def sync_changelog_releases(
     as formal Releases on Gitea (and optionally GitHub if a github remote and gh CLI exist).
     Returns the list of synced release tags.
     """
+    project_root = Path(os.path.abspath(str(project_root)))
     changelog_path = project_root / "CHANGELOG.md"
     if not changelog_path.exists() or _is_temp_workspace(project_root):
         return []
@@ -384,6 +420,8 @@ def sync_changelog_releases(
         except Exception:
             pass
     repo_name = resolved_repo_name
+    quoted_owner = urllib.parse.quote(str(owner or ""), safe="")
+    quoted_repo = urllib.parse.quote(str(repo_name or ""), safe="")
     synced_tags: List[str] = []
 
     if shutil.which("git") and (project_root / ".git" / "HEAD").exists():
@@ -426,7 +464,7 @@ def sync_changelog_releases(
             existing_map: Dict[str, Dict[str, Any]] = {}
             page = 1
             while page <= 5:
-                rel_url = f"{base_url}/api/v1/repos/{owner}/{repo_name}/releases?limit=100&page={page}"
+                rel_url = f"{base_url}/api/v1/repos/{quoted_owner}/{quoted_repo}/releases?limit=100&page={page}"
                 req = urllib.request.Request(
                     rel_url,
                     headers={
@@ -459,10 +497,10 @@ def sync_changelog_releases(
                             _attach_release_binary_assets(base_url, owner, repo_name, existing_map[tag].get("id"), tag, existing_map[tag].get("assets", []), token, project_root)
                         continue
                     rel_id = existing_map[tag]["id"]
-                    target_url = f"{base_url}/api/v1/repos/{owner}/{repo_name}/releases/{rel_id}"
+                    target_url = f"{base_url}/api/v1/repos/{quoted_owner}/{quoted_repo}/releases/{rel_id}"
                     method = "PATCH"
                 else:
-                    target_url = f"{base_url}/api/v1/repos/{owner}/{repo_name}/releases"
+                    target_url = f"{base_url}/api/v1/repos/{quoted_owner}/{quoted_repo}/releases"
                     method = "POST"
 
                 target_branch = "main"

@@ -11,6 +11,7 @@ import json
 import shutil
 import tempfile
 import subprocess
+import urllib.parse
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone
@@ -408,6 +409,7 @@ def _resolve_workspace_repo_name(project_root: Path, repo_name: Optional[str] = 
     matching existing GitHub remote names or hyphen/underscore variants on Gitea before falling back
     to the folder name.
     """
+    project_root = Path(os.path.abspath(str(project_root)))
     if repo_name:
         return repo_name
 
@@ -1065,7 +1067,7 @@ def publish_gitea_release(
     unless an explicit historical target_commit is specified.
     Returns the HTML URL of the published Gitea release, or None on failure.
     """
-    project_root = Path(project_root)
+    project_root = Path(os.path.abspath(str(project_root)))
     target_name = _resolve_workspace_repo_name(project_root, repo_name)
     auto_tag, auto_title, auto_notes = _extract_changelog_section(project_root, tag_name)
     final_tag = (tag_name.strip() if tag_name else auto_tag)
@@ -1122,12 +1124,10 @@ def publish_gitea_release(
     is_clean_tree = (status_chk.returncode == 0 and not changed_files)
 
     # 1. If HEAD already matches the target tag:
-    # If the working tree is clean or has only internal .agents/memory.db updates,
-    # skip sync_first completely! HEAD is already the designated release commit for final_tag.
-    # This prevents chore(release) from amending or committing onto an already tagged release commit.
+    # Unconditionally skip sync_first! HEAD is already the designated release commit for final_tag.
+    # This prevents chore(release) from committing onto an already tagged release commit and causing a self-inflicted SemVer immutability error.
     if existing_tag_sha and head_sha and existing_tag_sha == head_sha:
-        if is_clean_tree or only_agents_changed:
-            sync_first = False
+        sync_first = False
 
     # 2. If HEAD has moved ahead of existing_tag_sha, check if the diff is purely internal .agents/ episodic memory:
     diff_chk = subprocess.run(
@@ -1259,10 +1259,13 @@ def publish_gitea_release(
         "User-Agent": "SkillsDB-GiteaSync/1.0",
     }
 
+    quoted_user = urllib.parse.quote(str(user), safe="")
+    quoted_target = urllib.parse.quote(str(target_name), safe="")
+
     existing_rel = None
     try:
         list_req = urllib.request.Request(
-            f"{base_url}/api/v1/repos/{user}/{target_name}/releases?limit=50",
+            f"{base_url}/api/v1/repos/{quoted_user}/{quoted_target}/releases?limit=50",
             headers=headers,
         )
         with urllib.request.urlopen(list_req, timeout=5.0) as resp:
@@ -1294,7 +1297,7 @@ def publish_gitea_release(
         rel_id = existing_rel["id"]
         try:
             patch_req = urllib.request.Request(
-                f"{base_url}/api/v1/repos/{user}/{target_name}/releases/{rel_id}",
+                f"{base_url}/api/v1/repos/{quoted_user}/{quoted_target}/releases/{rel_id}",
                 data=json.dumps(payload_dict).encode("utf-8"),
                 method="PATCH",
                 headers=headers,
@@ -1314,7 +1317,7 @@ def publish_gitea_release(
     if not html_url:
         try:
             post_req = urllib.request.Request(
-                f"{base_url}/api/v1/repos/{user}/{target_name}/releases",
+                f"{base_url}/api/v1/repos/{quoted_user}/{quoted_target}/releases",
                 data=json.dumps(payload_dict).encode("utf-8"),
                 method="POST",
                 headers=headers,
@@ -1370,6 +1373,7 @@ def init_workspace_gitea(
     If a non-empty repository with the target name already exists on Gitea and neither
     use_existing nor overwrite was specified, halts and prompts the agent/user for a decision.
     """
+    project_root = Path(os.path.abspath(str(project_root)))
     target_name = _resolve_workspace_repo_name(project_root, repo_name)
     print(f"Initializing Gitea repository '{target_name}' for workspace: {project_root}")
 
@@ -1405,6 +1409,7 @@ def sync_workspace(
     _skip_auto_release: bool = False,
 ) -> bool:
     """Initializes, learns, and synchronizes a specific workspace (including Keep a Changelog releases and collision checks) to Gitea."""
+    project_root = Path(os.path.abspath(str(project_root)))
     has_explicit_msg = bool(message and message.strip() and message != "Synchronize workspace code history")
     msg = message or "Synchronize workspace code history"
     target_name = _resolve_workspace_repo_name(project_root, repo_name)

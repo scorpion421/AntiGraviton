@@ -1025,6 +1025,19 @@ def compute_routing_decision(
 
     p1a_data = rolling_5h["pools"].get(POOL_AGY_GEMINI_HIGH, {"turns": 0, "weighted_units": 0.0})
     p1b_data = rolling_5h["pools"].get(POOL_AGY_GEMINI_FAST, {"turns": 0, "weighted_units": 0.0})
+    p1c_data = rolling_5h["pools"].get(POOL_AGY_CLAUDE, {"turns": 0, "weighted_units": 0.0})
+    claude_share_pct = round(
+        (p1c_data["weighted_units"] / max(1.0, p1a_data["weighted_units"] + p1c_data["weighted_units"])) * 100.0,
+        1,
+    )
+    claude_anchor = {
+        "pool": POOL_AGY_CLAUDE,
+        "turns_5h": p1c_data["turns"],
+        "weighted_units_5h": p1c_data["weighted_units"],
+        "coding_share_pct": claude_share_pct,
+        "target_share_pct": 38.2 if load_pct >= budget["golden_ratio_pct"] else 0.0,
+        "recommend_failover": bool(load_pct >= budget["golden_ratio_pct"] and claude_share_pct < 20.0),
+    }
 
     return {
         "state": state,
@@ -1052,6 +1065,7 @@ def compute_routing_decision(
             "subagent_spawns": rolling_5h["subagent_spawns"],
             "subagent_flash_rewrites": ledger_24h["subagent_24h_rewrites"],
         },
+        "pool_1c_anchor": claude_anchor,
         "routing": {
             "mode": effective_mode,
             "digest_line_threshold": digest_line_threshold,

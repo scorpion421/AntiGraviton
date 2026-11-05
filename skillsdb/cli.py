@@ -248,7 +248,7 @@ def build_parser() -> argparse.ArgumentParser:
     ho_create.add_argument("--json", action="store_true", help="Output raw JSON instead of markdown block")
 
     ho_list = ho_sub.add_parser("list", help="List recent agent handoffs")
-    ho_list.add_argument("--status", choices=["pending", "accepted", "completed", "rejected"], default=None, help="Filter by status")
+    ho_list.add_argument("--status", choices=["pending", "accepted", "completed", "rejected", "in_progress", "active", "done", "cancelled", "canceled", "failed"], default=None, help="Filter by status")
     ho_list.add_argument("--project", default=None, help="Project root directory (optional)")
     ho_list.add_argument("--json", action="store_true", help="Output as JSON")
 
@@ -259,7 +259,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     ho_update = ho_sub.add_parser("update", help="Update the status of a handoff")
     ho_update.add_argument("id", help="Handoff ID")
-    ho_update.add_argument("status", choices=["pending", "accepted", "completed", "rejected"], help="New status")
+    ho_update.add_argument("status", choices=["pending", "accepted", "completed", "rejected", "in_progress", "active", "done", "cancelled", "canceled", "failed"], help="New status")
     ho_update.add_argument("--project", default=None, help="Project root directory (optional)")
 
     ho_accept = ho_sub.add_parser("accept", help="Mark a handoff as accepted")
@@ -585,7 +585,7 @@ def main(argv: list[str] = None):
             return
 
         elif args.guard_action == "verify-task":
-            proj_p = Path(args.project) if getattr(args, "project", None) else None
+            proj_p = Path(os.path.abspath(str(args.project))) if getattr(args, "project", None) else None
             res = verify_task(args.task_id, test_cmd=args.cmd, project_root=proj_p, strict=args.strict, auto_fix=not args.no_fix)
             if res["verified"]:
                 print(f"[VERIFIED] Task #{res['task_id']} marked COMPLETED.")
@@ -602,7 +602,7 @@ def main(argv: list[str] = None):
 
     # Route handoff commands
     if args.command == "handoff":
-        proj_p = Path(args.project) if getattr(args, "project", None) else None
+        proj_p = Path(os.path.abspath(str(args.project))) if getattr(args, "project", None) else None
         if args.ho_action == "create":
             context_vars = None
             if args.vars:
@@ -678,7 +678,7 @@ def main(argv: list[str] = None):
         if getattr(args, "all", False):
             sync_all_workspaces()
         else:
-            proj_root = Path(args.project) if getattr(args, "project", None) else find_project_root()
+            proj_root = Path(os.path.abspath(str(args.project))) if getattr(args, "project", None) else find_project_root()
             sync_gh = getattr(args, "github", False)
             force_rel = getattr(args, "releases", False)
             ok = sync_workspace(
@@ -744,7 +744,7 @@ def main(argv: list[str] = None):
         gitea_credential_helper(getattr(args, "action", "get"))
         return
     elif args.command == "gitea-release":
-        proj_root = Path(args.project) if getattr(args, "project", None) else find_project_root()
+        proj_root = Path(os.path.abspath(str(args.project))) if getattr(args, "project", None) else find_project_root()
         url = publish_gitea_release(
             proj_root,
             tag_name=getattr(args, "tag", None),
@@ -761,7 +761,7 @@ def main(argv: list[str] = None):
 
     # Route project memory commands directly to project database
     if args.command and (args.command.startswith("mem-") or args.command == "context"):
-        proj_root = Path(args.project) if getattr(args, "project", None) else find_project_root()
+        proj_root = Path(os.path.abspath(str(args.project))) if getattr(args, "project", None) else find_project_root()
         if args.command == "mem-init":
             mem_init(proj_root)
             return

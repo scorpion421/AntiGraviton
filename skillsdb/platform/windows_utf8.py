@@ -19,6 +19,15 @@ UTF8_MANIFEST_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 
 def get_antigravity_paths() -> Path:
     """Detect Antigravity installation root directory on Windows."""
+    agent_exe = os.environ.get("ANTIGRAVITY_AGENTAPI_EXE", "").strip()
+    if agent_exe:
+        try:
+            exe_p = Path(os.path.abspath(agent_exe))
+            for par in exe_p.parents:
+                if (par / "Antigravity.exe").exists():
+                    return par
+        except Exception:
+            pass
     specs = [
         ("LOCALAPPDATA", ("Programs", "antigravity")),
         ("PROGRAMFILES", ("antigravity",)),

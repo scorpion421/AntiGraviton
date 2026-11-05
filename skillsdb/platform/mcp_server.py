@@ -5,6 +5,7 @@ Enables any MCP-compatible agent or client (Google Antigravity, Cursor, Continue
 to connect directly to SkillsDB's knowledge engine, guardrails, FIM slicing, and memory over stdio.
 """
 
+import os
 import sys
 import json
 import sqlite3
@@ -171,16 +172,17 @@ TOOLS_REGISTRY = [
     },
     {
         "name": "skillsdb_task_board",
-        "description": "List, add, or update deterministic tasks in the project task board (.agents/memory.db).",
+        "description": "List, add, update, delete, or clear deterministic tasks in the project task board (.agents/memory.db).",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "action": {"type": "string", "description": "Action: list, add, or update (default: list)"},
+                "action": {"type": "string", "description": "Action: list, add, update, delete, or clear (default: list)"},
                 "title": {"type": "string", "description": "Task title (when action is add or update)"},
                 "description": {"type": "string", "description": "Optional task description (when action is add)"},
-                "task_id": {"type": "integer", "description": "Task ID (when action is update)"},
+                "task_id": {"type": "integer", "description": "Task ID (when action is update or delete)"},
                 "status": {"type": "string", "description": "Status filter or new status: pending, in_progress, completed, blocked"},
                 "priority": {"type": "string", "description": "Priority: low, med, high, critical"},
+                "all": {"type": "boolean", "description": "When action is clear, clear all tasks instead of only completed"},
                 "project_path": {"type": "string", "description": "Optional project root directory"}
             }
         }
@@ -313,7 +315,7 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> str:
 
         elif name == "skillsdb_gitea_sync":
             proj_raw = args.get("project_path") or args.get("project") or args.get("cwd") or "."
-            proj_path = Path(proj_raw)
+            proj_path = Path(os.path.abspath(str(proj_raw)))
             msg = args.get("message", "Synchronize workspace via MCP")
             res = save_code_commit(proj_path, message=msg, push=True)
             return json.dumps(res, indent=2)
@@ -323,7 +325,7 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> str:
 
         elif name == "skillsdb_gemini_digest":
             proj_raw = args.get("project_path") or args.get("project") or args.get("cwd")
-            proj_p = Path(proj_raw) if proj_raw else None
+            proj_p = Path(os.path.abspath(str(proj_raw))) if proj_raw else None
             res = execute_gemini_digest(
                 files=args.get("files") or [],
                 query=args.get("query") or "Summarize key findings and line numbers.",
@@ -337,7 +339,7 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> str:
 
         elif name == "skillsdb_ast_map":
             proj_raw = args.get("project_path") or args.get("project") or args.get("cwd")
-            proj_p = Path(proj_raw) if proj_raw else None
+            proj_p = Path(os.path.abspath(str(proj_raw))) if proj_raw else None
             sym_filter = args.get("symbol_filter") or args.get("filter") or args.get("query")
             res = execute_ast_map(
                 files=args.get("files") or [],
@@ -353,7 +355,7 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> str:
             from contextlib import redirect_stdout
             from ..memory.project_memory import find_project_root, get_project_connection, mem_get_context
             proj_raw = args.get("project_path") or args.get("project") or args.get("cwd")
-            proj_p = Path(proj_raw) if proj_raw else find_project_root()
+            proj_p = Path(os.path.abspath(str(proj_raw))) if proj_raw else find_project_root()
             pconn = get_project_connection(proj_p)
             try:
                 f = io.StringIO()
@@ -371,34 +373,52 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> str:
                 get_project_connection,
                 mem_task_add,
                 mem_task_update,
+                mem_task_delete,
+                mem_task_clear,
                 mem_task_list,
             )
             proj_raw = args.get("project_path") or args.get("project") or args.get("cwd")
-            proj_p = Path(proj_raw) if proj_raw else find_project_root()
+            proj_p = Path(os.path.abspath(str(proj_raw))) if proj_raw else find_project_root()
             action = (args.get("action") or "list").strip().lower()
             tid = args.get("task_id") if args.get("task_id") is not None else args.get("id")
             desc_val = args.get("description") or args.get("desc") or ""
+            if action == "add" and not str(args.get("title") or "").strip():
+                return "Error: 'title' is required when action is 'add'."
+            if action in ("update", "delete"):
+                if tid is None:
+                    return f"Error: 'task_id' is required when action is '{action}'."
+                try:
+                    tid_int = int(str(tid).strip().lstrip("#"))
+                except (ValueError, TypeError):
+                    return f"Error: Invalid integer task_id '{tid}'."
+            if action not in ("list", "add", "update", "delete", "clear"):
+                return f"Error: Unknown action '{action}'. Use list, add, update, delete, or clear."
+
             pconn = get_project_connection(proj_p)
             try:
                 f = io.StringIO()
                 with redirect_stdout(f):
-                    if action == "add" and args.get("title"):
+                    if action == "add":
                         mem_task_add(
                             pconn,
-                            args["title"],
+                            str(args["title"]).strip(),
                             description=desc_val,
                             priority=args.get("priority", "med"),
                             status=args.get("status", "pending"),
                         )
-                    elif action == "update" and tid is not None:
+                    elif action == "update":
                         mem_task_update(
                             pconn,
-                            int(tid),
+                            tid_int,
                             status=args.get("status"),
                             priority=args.get("priority"),
                             title=args.get("title"),
                             description=desc_val if ("description" in args or "desc" in args) else None,
                         )
+                    elif action == "delete":
+                        mem_task_delete(pconn, tid_int)
+                    elif action == "clear":
+                        mem_task_clear(pconn, only_completed=not bool(args.get("all", False)))
                     else:
                         mem_task_list(pconn, status=args.get("status"), as_json=True)
                 return f.getvalue()
@@ -407,7 +427,7 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> str:
 
         elif name == "skillsdb_gemini_handover":
             proj_raw = args.get("project_path") or args.get("project") or args.get("cwd")
-            proj_p = Path(proj_raw) if proj_raw else None
+            proj_p = Path(os.path.abspath(str(proj_raw))) if proj_raw else None
             res = create_web_handover(
                 topic=args.get("topic") or "Architectural research",
                 files=args.get("files"),
@@ -418,7 +438,7 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> str:
 
         elif name == "skillsdb_gemini_ingest":
             proj_raw = args.get("project_path") or args.get("project") or args.get("cwd")
-            proj_p = Path(proj_raw) if proj_raw else None
+            proj_p = Path(os.path.abspath(str(proj_raw))) if proj_raw else None
             res = ingest_web_response(
                 raw_text=args.get("text"),
                 fact_key=args.get("fact_key") or "gemini_web_research_finding",

@@ -410,8 +410,8 @@ def _extract_python_ast_contracts(
     }
 
 
-def _strip_strings_and_comments_for_braces(line: str) -> str:
-    """Strips string literals and single-line comments so brace counting is never skewed by quoted '{' or '}'."""
+def _strip_strings_and_comments_for_braces(line: str, in_block_comment: bool = False) -> Tuple[str, bool]:
+    """Strips string literals, single-line comments, and multi-line /* ... */ block comments for accurate brace counting."""
     out: List[str] = []
     in_str: Optional[str] = None
     escape = False
@@ -419,6 +419,13 @@ def _strip_strings_and_comments_for_braces(line: str) -> str:
     n = len(line)
     while i < n:
         ch = line[i]
+        if in_block_comment:
+            if ch == "*" and i + 1 < n and line[i + 1] == "/":
+                in_block_comment = False
+                i += 2
+            else:
+                i += 1
+            continue
         if escape:
             escape = False
             i += 1
@@ -436,13 +443,17 @@ def _strip_strings_and_comments_for_braces(line: str) -> str:
             in_str = ch
             i += 1
             continue
+        if ch == "/" and i + 1 < n and line[i + 1] == "*":
+            in_block_comment = True
+            i += 2
+            continue
         if ch == "/" and i + 1 < n and line[i + 1] == "/":
             break
         if ch == "#" and (i == 0 or line[i - 1].isspace()):
             break
         out.append(ch)
         i += 1
-    return "".join(out)
+    return "".join(out), in_block_comment
 
 
 def _find_block_end_line(lines: List[str], start_idx: int, is_sql: bool = False) -> int:
@@ -470,8 +481,9 @@ def _find_block_end_line(lines: List[str], start_idx: int, is_sql: bool = False)
 
     depth = 0
     saw_open = False
+    in_block = False
     for i in range(start_idx, min(total, start_idx + 2500)):
-        cleaned = _strip_strings_and_comments_for_braces(lines[i])
+        cleaned, in_block = _strip_strings_and_comments_for_braces(lines[i], in_block)
         opens = cleaned.count("{")
         closes = cleaned.count("}")
         if opens > 0:
@@ -491,7 +503,7 @@ def _extract_generic_regex_contracts(
 ) -> Dict[str, Any]:
     """
     Structure & [Lstart-Lend] block-boundary extractor for PowerShell, TypeScript/JavaScript,
-    Go, Rust, C#, Java, Kotlin, Dart, and SQL.
+    Go, Rust, C#, Java, Kotlin, Dart, and SQL (supporting multi-line parameter signatures).
     """
     filt = (symbol_filter or "").strip().lower()
     lines = content.splitlines()
@@ -506,7 +518,7 @@ def _extract_generic_regex_contracts(
         r"|impl(?:\s*<[^>]*>)?\s+(?:[A-Za-z0-9_:<>]+\s+for\s+)?([A-Za-z_][A-Za-z0-9_]*))"
     )
     fn_re = re.compile(
-        r"^\s*(?:export\s+)?(?:default\s+)?(?:pub(?:\([^)]*\))?\s+|public\s+|private\s+|protected\s+|internal\s+|static\s+|virtual\s+|override\s+| inline\s+)*"
+        r"^\s*(?:export\s+)?(?:default\s+)?(?:pub(?:\([^)]*\))?\s+|public\s+|private\s+|protected\s+|internal\s+|static\s+|virtual\s+|override\s+|inline\s+)*"
         r"(?:suspend\s+|async\s+)*"
         r"(?:function|filter|workflow|def|func|fn|fun)\s+"
         r"(?:\([^)]+\)\s*)?"  # Optional Go receiver e.g. (s *Server)
@@ -528,8 +540,11 @@ def _extract_generic_regex_contracts(
     active_cls: Optional[Dict[str, Any]] = None
     active_cls_end = 0
     active_cls_name = ""
+    skip_until_idx_0 = -1
 
     for idx_0, raw_line in enumerate(lines):
+        if idx_0 <= skip_until_idx_0:
+            continue
         idx = idx_0 + 1
         if active_cls is not None and idx > active_cls_end:
             if not filt or filt in active_cls_name.lower() or active_cls["methods"]:
@@ -564,16 +579,31 @@ def _extract_generic_regex_contracts(
             active_cls_name = cname
             continue
 
-        fm = fn_re.match(raw_line) or ts_arrow_re.match(raw_line)
+        candidate_line = raw_line
+        if "(" in raw_line and raw_line.count("(") > raw_line.count(")"):
+            joined_parts = [raw_line.rstrip()]
+            paren_bal = raw_line.count("(") - raw_line.count(")")
+            for look_idx in range(idx_0 + 1, min(len(lines), idx_0 + 10)):
+                nxt = lines[look_idx].strip()
+                joined_parts.append(nxt)
+                paren_bal += nxt.count("(") - nxt.count(")")
+                if paren_bal <= 0 and ("{" in nxt or "=>" in nxt or nxt.endswith(")") or ":" in nxt):
+                    if "{" not in nxt and look_idx + 1 < len(lines) and lines[look_idx + 1].strip().startswith("{"):
+                        joined_parts.append("{")
+                    skip_until_idx_0 = look_idx
+                    break
+            candidate_line = re.sub(r"\s+", " ", " ".join(joined_parts))
+
+        fm = fn_re.match(candidate_line) or ts_arrow_re.match(candidate_line)
         if not fm and active_cls is not None:
-            fm = typed_method_re.match(raw_line)
+            fm = typed_method_re.match(candidate_line)
         if fm:
             fname = fm.group(1)
             if fname in ("if", "for", "while", "switch", "catch", "using", "lock", "synchronized"):
                 continue
             end_l = _find_block_end_line(lines, idx_0)
             loc = f"[L{idx}-L{end_l}]" if end_l > idx else f"[L{idx}]"
-            sig_clean = raw_line.strip().rstrip("{").strip()
+            sig_clean = candidate_line.strip().rstrip("{").strip()
             if active_cls is not None and idx <= active_cls_end:
                 if not filt or filt in active_cls_name.lower() or filt in fname.lower():
                     active_cls["methods"].append(f"{sig_clean} {loc}")

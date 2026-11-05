@@ -184,7 +184,8 @@ def ensure_remote_repository(repo_name: str, description: Optional[str] = None) 
 
     create_urls = []
     if user and user.lower() != "antigravity":
-        create_urls.append(f"{base_url}/api/v1/admin/users/{user}/repos")
+        quoted_u = urllib.parse.quote(str(user), safe="")
+        create_urls.append(f"{base_url}/api/v1/admin/users/{quoted_u}/repos")
     create_urls.append(f"{base_url}/api/v1/user/repos")
     payload = json.dumps({
         "name": repo_name,
@@ -261,7 +262,8 @@ def list_gitea_repositories() -> List[Dict[str, Any]]:
 
     urls = []
     if target_user:
-        urls.append(f"{config['url']}/api/v1/users/{target_user}/repos?limit=100")
+        quoted_tu = urllib.parse.quote(str(target_user), safe="")
+        urls.append(f"{config['url']}/api/v1/users/{quoted_tu}/repos?limit=100")
     urls.append(f"{config['url']}/api/v1/user/repos?limit=100")
 
     for url in urls:

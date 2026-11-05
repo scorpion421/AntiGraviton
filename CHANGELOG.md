@@ -5,6 +5,33 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.8] - 2026-11-05
+
+### Added
+- **Claude (`Pool 1C`) cross-pool anchor metrics in `compute_routing_decision()` (`skillsdb/core/quota_router.py`, `v4.0.8`)**:
+  - Added `pool_1c_anchor` (`turns_5h`, `weighted_units_5h`, `coding_share_pct`, `target_share_pct`, `recommend_failover`) to `compute_routing_decision()` so `Pool 1C` (`Claude Opus 5.5` / `Claude Sonnet 5.5`) is tracked as a quantitative cross-pool coding anchor alongside `Pool 1A` (`Gemini 4 Argon`) and `Pool 1B` (`Gemini 3.8 Flash`).
+- **Complete `delete` and `clear` actions in `skillsdb_task_board` MCP tool (`skillsdb/platform/mcp_server.py`, `v4.0.8`)**:
+  - Added `action="delete"` and `action="clear"` (with optional `all=True`) to `skillsdb_task_board`, plus strict validation for missing `title` on `add`, `#`-prefixed or non-integer `task_id` on `update`/`delete`, and unknown action names.
+
+### Changed
+- **Multi-line function signature and `/* ... */` block-comment support in `ast-map` (`skillsdb/core/fim.py`, `v4.0.8`)**:
+  - Updated `_strip_strings_and_comments_for_braces()` and `_find_block_end_line()` to track multi-line `/* ... */` block comments across lines so stray braces inside comments never skew `[Lstart-Lend]` block boundaries.
+  - Updated `_extract_generic_regex_contracts()` to join multi-line parameter lists (`(` across up to 8 continuation lines) before matching function/method signatures in TypeScript/JavaScript, Rust, Go, C#, Java, Kotlin, and Dart.
+- **Multi-deliverable release asset upload in `_attach_release_binary_assets()` (`skillsdb/memory/gitea_releases.py`, `v4.0.8`)**:
+  - Updated `_attach_release_binary_assets()` to iterate over all distinct deliverable artifacts discovered for a release (e.g. `.apk` + `.aab`, `.exe` + `.msi`, or `.whl` + `.tar.gz`) instead of uploading only `candidates[0]`.
+
+### Fixed
+- **Zero-mutation upstream database attachment in `safe_deploy_database()` (`deploy.py`, `v4.0.8`)**:
+  - Fixed `safe_deploy_database()` dirtying `database/customizations.db` in the Git working tree by copying `source_db_file` to a temporary file (`target_db_file.with_suffix(".upstream.<pid>.tmp")`) before executing `ATTACH DATABASE ? AS upstream;` and cleaning it up in `finally:`.
+- **Self-inflicted `[SEMVER IMMUTABILITY ERROR]` in `publish_gitea_release()` and `Path(".")` repo name resolution (`skillsdb/memory/gitea_sync.py`, `skillsdb/memory/gitea_releases.py`, `skillsdb/cli.py`, `skillsdb/platform/mcp_server.py`, `v4.0.8`)**:
+  - Fixed `publish_gitea_release()` so `sync_first = False` is always enforced whenever `existing_tag_sha == head_sha`, preventing an auto-generated `chore(release)` commit from advancing `HEAD` past an already tagged release commit.
+  - Normalized `project_root` via `Path(os.path.abspath(str(project_root)))` across `gitea_sync.py`, `gitea_releases.py`, `cli.py`, and `mcp_server.py` so passing `--project .` (`Path(".").name == ""`) always resolves the actual folder name.
+  - Added consistent `urllib.parse.quote(..., safe="")` encoding for `owner` and `repo_name` across all Gitea REST API endpoints in `gitea_service.py`, `gitea_releases.py`, and `gitea_sync.py`.
+- **Cross-workstation snapshot retention in `mem_prune()`, status aliases in `handoff`, custom drive discovery in `windows_utf8.py`, and LAN host credential scrubbing (`skillsdb/memory/project_memory.py`, `skillsdb/memory/handoff.py`, `skillsdb/cli.py`, `skillsdb/platform/windows_utf8.py`, `skillsdb/memory/gitea_config.py`, `v4.0.8`)**:
+  - Updated `mem_prune()` so snapshots from remote workstations (`conversation_id` not in local `~/.gemini/antigravity/brain/`) are retained until `age_days > max_age_days` or `max_snapshots` is exceeded.
+  - Wired `_HANDOFF_STATUS_ALIASES` (`in_progress`, `active`, `done`, `cancelled`, `canceled`, `failed`) into `list_handoffs()`, `update_handoff()` (via `WriterQueue`), and `cli.py` `argparse` choices.
+  - Updated `get_antigravity_paths()` in `windows_utf8.py` to inspect `ANTIGRAVITY_AGENTAPI_EXE` parent directories, and updated `_scrub_workspace_git_config_credentials()` in `gitea_config.py` to scrub embedded tokens from configured LAN/hostname Gitea URLs.
+
 ## [2.0.7] - 2026-11-05
 
 ### Added

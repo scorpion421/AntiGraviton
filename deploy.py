@@ -50,7 +50,9 @@ def safe_deploy_database(source_db_file: Path, target_db_file: Path) -> None:
                 cur = conn.cursor()
                 cur.execute("PRAGMA quick_check;")
                 if cur.fetchone()[0] == "ok":
-                    cur.execute("ATTACH DATABASE ? AS upstream;", (str(source_db_file),))
+                    tmp_upstream = target_db_file.with_suffix(f".upstream.{os.getpid()}.tmp")
+                    shutil.copy2(source_db_file, tmp_upstream)
+                    cur.execute("ATTACH DATABASE ? AS upstream;", (str(tmp_upstream),))
                     try:
                         cur.execute("""
                         INSERT OR REPLACE INTO skills (name, plugin_name, category, is_active, description, content, token_estimate, updated_at)
@@ -120,6 +122,11 @@ def safe_deploy_database(source_db_file: Path, target_db_file: Path) -> None:
                             cur.execute("DETACH DATABASE upstream;")
                         except sqlite3.Error:
                             pass
+                        for sfx in ("", "-wal", "-shm"):
+                            try:
+                                Path(str(tmp_upstream) + sfx).unlink(missing_ok=True)
+                            except OSError:
+                                pass
                     conn.execute("PRAGMA wal_checkpoint(PASSIVE);")
                     return
         except Exception:

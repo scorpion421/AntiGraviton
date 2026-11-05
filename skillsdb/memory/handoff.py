@@ -16,7 +16,17 @@ from .project_memory import (
     get_project_db_path,
     get_project_connection,
 )
+from .writer_queue import get_writer_queue
 from ..config import DB_PATH
+
+_HANDOFF_STATUS_ALIASES = {
+    "in_progress": "accepted",
+    "active": "accepted",
+    "done": "completed",
+    "cancelled": "rejected",
+    "canceled": "rejected",
+    "failed": "rejected",
+}
 
 
 def generate_handoff_id() -> str:
@@ -73,19 +83,24 @@ def create_handoff(
         scoped_vars.setdefault("task_id", task_id)
         scoped_vars.setdefault("priority", task_data["priority"])
 
-        # 5. Insert handoff record
+        # 5. Insert handoff record via WriterQueue
         handoff_id = generate_handoff_id()
         now_iso = datetime.now(timezone.utc).isoformat()
         vars_json = json.dumps(scoped_vars, ensure_ascii=True)
-
-        cursor.execute("""
-        INSERT INTO task_handoffs (id, task_id, source_role, target_role, context_variables, notes, status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?);
-        """, (handoff_id, task_id, source_role, target_role, vars_json, notes, now_iso, now_iso))
-
-        conn.commit()
+        db_file = get_project_db_path(root)
     finally:
         conn.close()
+
+    wq = get_writer_queue(db_file)
+    wq.execute_write(
+        lambda cur: cur.execute(
+            """
+            INSERT INTO task_handoffs (id, task_id, source_role, target_role, context_variables, notes, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?);
+            """,
+            (handoff_id, task_id, source_role, target_role, vars_json, notes, now_iso, now_iso),
+        )
+    )
 
     payload = {
         "handoff_id": handoff_id,
@@ -152,8 +167,9 @@ def list_handoffs(project_root: Optional[Path] = None, status: Optional[str] = N
         query = "SELECT id, task_id, source_role, target_role, status, notes, created_at FROM task_handoffs"
         params = []
         if status:
+            norm_st = _HANDOFF_STATUS_ALIASES.get(status.strip().lower(), status.strip().lower())
             query += " WHERE status = ?"
-            params.append(status.lower())
+            params.append(norm_st)
         query += " ORDER BY created_at DESC LIMIT 20;"
 
         cursor.execute(query, params)
@@ -217,14 +233,7 @@ def read_handoff(handoff_id: str, project_root: Optional[Path] = None) -> Option
 
 def update_handoff(handoff_id: str, status: str, project_root: Optional[Path] = None) -> bool:
     """Updates the lifecycle status of a handoff (pending, accepted, completed, rejected)."""
-    status_aliases = {
-        "in_progress": "accepted",
-        "active": "accepted",
-        "done": "completed",
-        "cancelled": "rejected",
-        "canceled": "rejected",
-    }
-    status_clean = status_aliases.get((status or "").strip().lower(), (status or "").strip().lower())
+    status_clean = _HANDOFF_STATUS_ALIASES.get((status or "").strip().lower(), (status or "").strip().lower())
     if status_clean not in ("pending", "accepted", "completed", "rejected"):
         print(f"Error: Invalid handoff status '{status}'. Allowed: pending, accepted, completed, rejected")
         return False
@@ -232,20 +241,29 @@ def update_handoff(handoff_id: str, status: str, project_root: Optional[Path] = 
     root = project_root or find_project_root()
     conn = get_project_connection(root)
     try:
-        cursor = conn.cursor()
-        now_iso = datetime.now(timezone.utc).isoformat()
-
-        cursor.execute("""
-        UPDATE task_handoffs
-        SET status = ?, updated_at = ?
-        WHERE id = ?;
-        """, (status_clean, now_iso, handoff_id))
-
-        changed = cursor.rowcount > 0
-        conn.commit()
-        return changed
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM task_handoffs WHERE id = ?;", (handoff_id,))
+        exists = cur.fetchone() is not None
+        db_file = get_project_db_path(root)
     finally:
         conn.close()
+
+    if not exists:
+        return False
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    wq = get_writer_queue(db_file)
+    wq.execute_write(
+        lambda cur: cur.execute(
+            """
+            UPDATE task_handoffs
+            SET status = ?, updated_at = ?
+            WHERE id = ?;
+            """,
+            (status_clean, now_iso, handoff_id),
+        )
+    )
+    return True
 
 
 def accept_handoff(handoff_id: str, project_root: Optional[Path] = None) -> bool:

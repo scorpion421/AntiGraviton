@@ -247,12 +247,24 @@ def _scrub_workspace_git_config_credentials(project_root: Path, db_path: Path = 
     credentials, migrates the token into customizations.db (if not already present) and
     rewrites .git/config in place with the clean token-free URL.
     """
-    git_cfg = project_root / ".git" / "config"
+    git_cfg = Path(os.path.abspath(str(project_root))) / ".git" / "config"
     if not git_cfg.exists():
         return False
     try:
         raw_cfg = git_cfg.read_text(encoding="utf-8", errors="ignore")
-        pattern = re.compile(r"(url\s*=\s*)(https?://)([^:@/\s]+):([^@/\s]+)@((?:127\.0\.0\.1|localhost)(?::\d+)?/([^\s/]+)/[^\s]+)")
+        host_alts = ["127\\.0\\.0\\.1", "localhost"]
+        try:
+            cfg = get_gitea_config(db_path=db_path)
+            cfg_url = (cfg.get("url") or "").strip()
+            m_host = re.match(r"^https?://([^:/\s]+)", cfg_url)
+            if m_host:
+                custom_h = re.escape(m_host.group(1))
+                if custom_h not in host_alts:
+                    host_alts.append(custom_h)
+        except Exception:
+            pass
+        host_group = "|".join(host_alts)
+        pattern = re.compile(rf"(url\s*=\s*)(https?://)([^:@/\s]+):([^@/\s]+)@((?:{host_group})(?::\d+)?/([^\s/]+)/[^\s]+)")
         matches = list(pattern.finditer(raw_cfg))
         if not matches:
             return False

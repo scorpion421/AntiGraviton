@@ -928,19 +928,21 @@ def mem_prune(conn: sqlite3.Connection, max_snapshots: int = 10, max_age_days: i
     for s in snapshots:
         cid = s["conversation_id"]
         sid = s["id"]
-        if cid and cid != "default" and existing_cids and cid not in existing_cids:
+        age_days = 0
+        try:
+            snap_time = datetime.fromisoformat(s["created_at"].replace("Z", "+00:00"))
+            age_days = (now - snap_time).days
+        except Exception:
+            pass
+
+        if cid and cid != "default" and existing_cids and cid not in existing_cids and age_days > max_age_days:
             cursor.execute("DELETE FROM session_snapshots WHERE id = ?;", (sid,))
             pruned_orphans += 1
             continue
 
-        try:
-            snap_time = datetime.fromisoformat(s["created_at"].replace("Z", "+00:00"))
-            age_days = (now - snap_time).days
-            if age_days > max_age_days:
-                cursor.execute("DELETE FROM session_snapshots WHERE id = ?;", (sid,))
-                pruned_expired += 1
-        except Exception:
-            pass
+        if age_days > max_age_days:
+            cursor.execute("DELETE FROM session_snapshots WHERE id = ?;", (sid,))
+            pruned_expired += 1
 
     cursor.execute("SELECT id FROM session_snapshots ORDER BY id DESC;")
     all_remaining = [r[0] for r in cursor.fetchall()]

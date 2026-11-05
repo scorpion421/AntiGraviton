@@ -2389,6 +2389,141 @@ class TestGiteaSync(unittest.TestCase):
         self.assertIsNone(parse_antigravity_model_spec("gemini-2.5-flash"))
         self.assertIsNotNone(parse_antigravity_model_spec("gemini-3.8-flash"))
 
+    def test_v2_0_8_dual_instance_red_team_round_2_hardening(self):
+        """
+        Verifies all Red-Team Round 2 findings discovered jointly by the Office and Home instances:
+        1. deploy.py safe_deploy_database copies source_db_file to a temp file before ATTACH DATABASE so repo DB stays 100% clean.
+        2. project_memory.py mem_prune preserves fresh cross-workstation snapshots (cid not in local brain) within max_age_days.
+        3. fim.py _extract_generic_regex_contracts handles multi-line function signatures and multi-line /* ... */ block comments.
+        4. gitea_sync.py / gitea_releases.py normalize Path('.') so project_root.name is never empty ('').
+        5. mcp_server.py skillsdb_task_board supports 'delete' and 'clear', validates required args, and catches non-integer task_id.
+        6. cli.py and handoff.py accept status aliases ('in_progress', 'done', 'cancelled') in list_handoffs and CLI parser.
+        7. windows_utf8.py get_antigravity_paths discovers Antigravity.exe via ANTIGRAVITY_AGENTAPI_EXE parent directories.
+        8. gitea_config.py _scrub_workspace_git_config_credentials scrubs tokens from configured custom/LAN Gitea hosts.
+        9. quota_router.py compute_routing_decision includes pool_1c_anchor (Claude 5.5 anchor metrics).
+        """
+        import json
+        import hashlib
+        from unittest.mock import patch
+        from deploy import safe_deploy_database
+        from skillsdb.memory.project_memory import (
+            get_project_connection,
+            mem_save_snapshot,
+            mem_prune,
+        )
+        from skillsdb.core.fim import _extract_generic_regex_contracts
+        from skillsdb.memory.gitea_releases import _extract_changelog_section
+        from skillsdb.memory.gitea_sync import _resolve_workspace_repo_name
+        from skillsdb.platform.mcp_server import handle_tool_call
+        from skillsdb.memory.handoff import create_handoff, update_handoff, list_handoffs
+        from skillsdb.cli import build_parser
+        from skillsdb.platform.windows_utf8 import get_antigravity_paths
+        from skillsdb.memory.gitea_config import set_gitea_config, _scrub_workspace_git_config_credentials
+        from skillsdb.core.quota_router import compute_routing_decision
+
+        # 1. safe_deploy_database never mutates source_db_file byte-for-byte
+        src_db = self.test_dir / "src_customizations.db"
+        dst_db = self.test_dir / "dst_customizations.db"
+        shutil.copy2(self.db_path, src_db)
+        shutil.copy2(self.db_path, dst_db)
+        before_sha = hashlib.sha256(src_db.read_bytes()).hexdigest()
+        safe_deploy_database(src_db, dst_db)
+        after_sha = hashlib.sha256(src_db.read_bytes()).hexdigest()
+        self.assertEqual(before_sha, after_sha)
+
+        # 2. mem_prune preserves fresh cross-workstation snapshots
+        pconn = get_project_connection(self.test_dir)
+        try:
+            mem_save_snapshot(pconn, "RemoteHomeWorkstationSnapshot", conversation_id="remote-home-cid-999", auto_commit=False)
+            mem_prune(pconn, max_snapshots=10, max_age_days=30)
+            rem_cnt = pconn.execute(
+                "SELECT count(*) FROM session_snapshots WHERE conversation_id = 'remote-home-cid-999';"
+            ).fetchone()[0]
+            self.assertEqual(rem_cnt, 1)
+        finally:
+            pconn.close()
+
+        # 3. Multi-line function signatures & multi-line /* { */ block comments in _extract_generic_regex_contracts
+        ts_code = (
+            "export class PaymentService {\n"
+            "  /* Multi-line comment with stray brace {\n"
+            "     still inside comment */\n"
+            "  public async processOrder(\n"
+            "    orderId: string,\n"
+            "    amountCents: number\n"
+            "  ): Promise<boolean> {\n"
+            "    return true;\n"
+            "  }\n"
+            "}\n"
+        )
+        ts_contracts = _extract_generic_regex_contracts(ts_code, suffix=".ts")
+        self.assertEqual(len(ts_contracts["classes"]), 1)
+        self.assertIn("[L1-L10]", ts_contracts["classes"][0]["header"])
+        self.assertTrue(any("processOrder" in m and "[L4-L9]" in m for m in ts_contracts["classes"][0]["methods"]))
+
+        # 4. Path('.') normalization in _extract_changelog_section and _resolve_workspace_repo_name
+        (self.test_dir / "VERSION").write_text("2.0.8\n", encoding="utf-8")
+        (self.test_dir / "CHANGELOG.md").write_text("## [2.0.8] - 2026-11-05\n\n### Fixed\n- Round 2.\n", encoding="utf-8")
+        old_cwd = os.getcwd()
+        try:
+            os.chdir(str(self.test_dir))
+            tag_n, title_n, _ = _extract_changelog_section(Path("."))
+            self.assertEqual(tag_n, "v2.0.8")
+            self.assertTrue(title_n.startswith(self.test_dir.name))
+            self.assertEqual(_resolve_workspace_repo_name(Path(".")), self.test_dir.name)
+        finally:
+            os.chdir(old_cwd)
+
+        # 5. mcp_server skillsdb_task_board validation + delete/clear actions
+        err_add = handle_tool_call("skillsdb_task_board", {"action": "add", "project_path": str(self.test_dir)})
+        self.assertTrue(err_add.startswith("Error:"))
+        err_bad_id = handle_tool_call("skillsdb_task_board", {"action": "update", "task_id": "not-an-int", "project_path": str(self.test_dir)})
+        self.assertTrue(err_bad_id.startswith("Error:"))
+        ok_add = handle_tool_call("skillsdb_task_board", {"action": "add", "title": "MCP Round 2 Task", "project_path": str(self.test_dir)})
+        self.assertIn("Task created (ID", ok_add)
+        tasks_json = json.loads(handle_tool_call("skillsdb_task_board", {"action": "list", "project_path": str(self.test_dir)}))
+        mcp_tid = tasks_json[0]["id"]
+        ok_del = handle_tool_call("skillsdb_task_board", {"action": "delete", "task_id": f"#{mcp_tid}", "project_path": str(self.test_dir)})
+        self.assertIn("deleted from project task board", ok_del)
+
+        # 6. CLI handoff status aliases ('in_progress', 'done') in build_parser and list_handoffs
+        parser = build_parser()
+        parsed_ho = parser.parse_args(["handoff", "update", "ho_123", "in_progress"])
+        self.assertEqual(parsed_ho.status, "in_progress")
+        pconn2 = get_project_connection(self.test_dir)
+        try:
+            from skillsdb.memory.project_memory import mem_task_add
+            t2 = mem_task_add(pconn2, "Handoff Alias Test")
+        finally:
+            pconn2.close()
+        ho2 = create_handoff(t2, "Verifier", project_root=self.test_dir)
+        self.assertTrue(update_handoff(ho2["id"], "in_progress", project_root=self.test_dir))
+        self.assertEqual(len(list_handoffs(project_root=self.test_dir, status="in_progress")), 1)
+
+        # 7. windows_utf8 get_antigravity_paths via ANTIGRAVITY_AGENTAPI_EXE
+        fake_ag_root = self.test_dir / "CustomDrive" / "AntigravityApp"
+        fake_ag_bin = fake_ag_root / "resources" / "app" / "bin"
+        fake_ag_bin.mkdir(parents=True, exist_ok=True)
+        (fake_ag_root / "Antigravity.exe").write_text("stub", encoding="utf-8")
+        fake_agent_exe = fake_ag_bin / "agentapi.exe"
+        fake_agent_exe.write_text("stub", encoding="utf-8")
+        with patch.dict(os.environ, {"ANTIGRAVITY_AGENTAPI_EXE": str(fake_agent_exe)}):
+            self.assertEqual(get_antigravity_paths().resolve(), fake_ag_root.resolve())
+
+        # 8. _scrub_workspace_git_config_credentials with custom LAN Gitea host
+        set_gitea_config(url="http://gitea.lan:3000", user="lanuser", token="lantoken12345678901234", db_path=self.db_path)
+        lan_ws = self.test_dir / "lan_repo"
+        (lan_ws / ".git").mkdir(parents=True, exist_ok=True)
+        git_cfg_file = lan_ws / ".git" / "config"
+        git_cfg_file.write_text('[remote "origin"]\n\turl = http://lanuser:secretlantok@gitea.lan:3000/lanuser/lan_repo.git\n', encoding="utf-8")
+        self.assertTrue(_scrub_workspace_git_config_credentials(lan_ws, db_path=self.db_path))
+        self.assertNotIn("secretlantok", git_cfg_file.read_text(encoding="utf-8"))
+
+        # 9. compute_routing_decision includes pool_1c_anchor
+        routing_dec = compute_routing_decision(db_path=self.db_path)
+        self.assertIn("pool_1c_anchor", routing_dec)
+        self.assertEqual(routing_dec["pool_1c_anchor"]["pool"], "agy_claude")
+
 
 if __name__ == "__main__":
     unittest.main()
