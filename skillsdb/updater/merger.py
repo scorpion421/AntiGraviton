@@ -150,6 +150,9 @@ def check_update(quiet: bool = False) -> dict:
 
 def merge_upstream_database(local_db_path: Path, upstream_db_path: Path) -> dict:
     """Non-destructive differential merge preserving all user-learned rules and runtime configuration."""
+    import os
+    local_db_path = Path(local_db_path)
+    upstream_db_path = Path(upstream_db_path)
     with managed_connection(local_db_path) as conn:
         init_db(conn)
         cur = conn.cursor()
@@ -157,7 +160,9 @@ def merge_upstream_database(local_db_path: Path, upstream_db_path: Path) -> dict
         cur.execute("SELECT COUNT(*) FROM rules WHERE category = 'learned';")
         learned_before = cur.fetchone()[0]
 
-        cur.execute("ATTACH DATABASE ? AS upstream;", (str(upstream_db_path),))
+        tmp_upstream = local_db_path.with_suffix(f".upstream.{os.getpid()}.tmp")
+        shutil.copy2(upstream_db_path, tmp_upstream)
+        cur.execute("ATTACH DATABASE ? AS upstream;", (str(tmp_upstream),))
         try:
             cur.execute("""
             INSERT OR REPLACE INTO skills (name, plugin_name, category, is_active, description, content, token_estimate, updated_at)
@@ -227,6 +232,11 @@ def merge_upstream_database(local_db_path: Path, upstream_db_path: Path) -> dict
                 cur.execute("DETACH DATABASE upstream;")
             except sqlite3.Error:
                 pass
+            for suf in ("", "-wal", "-shm"):
+                try:
+                    Path(f"{tmp_upstream}{suf}").unlink(missing_ok=True)
+                except OSError:
+                    pass
 
         try:
             conn.execute("PRAGMA wal_checkpoint(PASSIVE);")

@@ -2420,14 +2420,18 @@ class TestGiteaSync(unittest.TestCase):
         from skillsdb.platform.windows_utf8 import get_antigravity_paths
         from skillsdb.memory.gitea_config import set_gitea_config, _scrub_workspace_git_config_credentials
         from skillsdb.core.quota_router import compute_routing_decision
+        from skillsdb.updater.merger import merge_upstream_database
 
-        # 1. safe_deploy_database never mutates source_db_file byte-for-byte
+        # 1. safe_deploy_database and merge_upstream_database never mutate source_db_file byte-for-byte
+        from skillsdb.core.db import managed_connection
         src_db = self.test_dir / "src_customizations.db"
         dst_db = self.test_dir / "dst_customizations.db"
-        shutil.copy2(self.db_path, src_db)
-        shutil.copy2(self.db_path, dst_db)
+        with managed_connection(src_db, init_schema=True) as sconn:
+            sconn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+        shutil.copy2(src_db, dst_db)
         before_sha = hashlib.sha256(src_db.read_bytes()).hexdigest()
         safe_deploy_database(src_db, dst_db)
+        merge_upstream_database(dst_db, src_db)
         after_sha = hashlib.sha256(src_db.read_bytes()).hexdigest()
         self.assertEqual(before_sha, after_sha)
 

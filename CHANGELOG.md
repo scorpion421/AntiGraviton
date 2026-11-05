@@ -5,6 +5,13 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.9] - 2026-11-05
+
+### Fixed
+- **Zero-Mutation `merge_upstream_database()` in `merger.py` (`skillsdb/updater/merger.py`)**: Extended the temporary `.upstream.<pid>.tmp` copy-before-attach pattern from `deploy.py` to `merge_upstream_database()` in `skillsdb/updater/merger.py` (with deterministic `.tmp` / `-wal` / `-shm` cleanup in `finally:`), ensuring that `skillsdb update` and unit tests calling `merge_upstream_database(target_db, repo_db)` never touch the SQLite WAL/header metadata of `database/customizations.db` in the Git working tree.
+
+---
+
 ## [2.0.8] - 2026-11-05
 
 ### Added
