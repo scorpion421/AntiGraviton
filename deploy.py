@@ -147,10 +147,9 @@ def safe_copy_file(src: Path, dst: Path) -> None:
     hook or MCP server process (WinError 1224 / PermissionError).
     """
     dst.parent.mkdir(parents=True, exist_ok=True)
-    old_dst = dst.with_suffix(dst.suffix + ".old")
-    if old_dst.exists():
+    for stale_old in dst.parent.glob(f"{dst.name}.old*"):
         try:
-            old_dst.unlink()
+            stale_old.unlink()
         except OSError:
             pass
     try:
@@ -165,6 +164,7 @@ def safe_copy_file(src: Path, dst: Path) -> None:
         os.replace(tmp_dst, dst)
         return
     except OSError:
+        old_dst = dst.with_suffix(f"{dst.suffix}.old.{os.getpid()}")
         if dst.exists():
             try:
                 os.replace(dst, old_dst)

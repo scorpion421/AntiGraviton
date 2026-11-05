@@ -315,7 +315,8 @@ def _attach_release_binary_assets(
                 method="DELETE",
                 headers={"Authorization": f"token {token}", "User-Agent": "SkillsDB-GiteaSync/1.0"},
             )
-            urllib.request.urlopen(del_req, timeout=10.0)
+            with urllib.request.urlopen(del_req, timeout=10.0):
+                pass
         boundary = f"----SkillsDBAssetBoundary{uuid.uuid4().hex}"
         body = (
             f"--{boundary}\r\n"
@@ -336,8 +337,12 @@ def _attach_release_binary_assets(
         with urllib.request.urlopen(up_req, timeout=30.0) as resp:
             if resp.status in (200, 201):
                 uploaded_names.append(asset_name)
-    except Exception:
-        pass
+    except Exception as e:
+        if hasattr(e, "close"):
+            try:
+                e.close()
+            except Exception:
+                pass
     return uploaded_names
 
 
@@ -459,7 +464,7 @@ def sync_changelog_releases(
                     target_url = f"{base_url}/api/v1/repos/{owner}/{repo_name}/releases"
                     method = "POST"
 
-                target_branch = "beta" if is_prerelease else "main"
+                target_branch = "main"
                 try:
                     br_res = subprocess.run(
                         ["git", "rev-parse", "--abbrev-ref", "HEAD"],
@@ -498,8 +503,12 @@ def sync_changelog_releases(
                         _attach_release_binary_assets(base_url, owner, repo_name, up_data.get("id"), tag, up_data.get("assets", []), token, project_root)
                         if tag not in synced_tags:
                             synced_tags.append(tag)
-        except Exception:
-            pass
+        except Exception as e:
+            if hasattr(e, "close"):
+                try:
+                    e.close()
+                except Exception:
+                    pass
 
     if sync_github and shutil.which("gh"):
         try:

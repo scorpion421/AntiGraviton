@@ -1116,7 +1116,8 @@ def publish_gitea_release(
             changed_files.append(fpath)
 
     only_agents_changed = bool(changed_files) and all(
-        f.startswith(".agents/") or f.startswith(".agents\\") or f.endswith("memory.db") for f in changed_files
+        f.lower().startswith(".agents/") or f.lower().startswith(".agents\\") or f.lower().endswith("memory.db")
+        for f in changed_files
     )
     is_clean_tree = (status_chk.returncode == 0 and not changed_files)
 
@@ -1137,7 +1138,8 @@ def publish_gitea_release(
     ) if (existing_tag_sha and head_sha and existing_tag_sha != head_sha) else None
     diff_files = [line.strip() for line in diff_chk.stdout.splitlines() if line.strip()] if diff_chk and diff_chk.returncode == 0 else []
     only_agents_diff = bool(diff_files) and all(
-        f.startswith(".agents/") or f.startswith(".agents\\") or f.endswith("memory.db") for f in diff_files
+        f.lower().startswith(".agents/") or f.lower().startswith(".agents\\") or f.lower().endswith("memory.db")
+        for f in diff_files
     )
 
     if (
@@ -1269,8 +1271,12 @@ def publish_gitea_release(
                 if r.get("tag_name") == final_tag:
                     existing_rel = r
                     break
-    except Exception:
-        pass
+    except Exception as e:
+        if hasattr(e, "close"):
+            try:
+                e.close()
+            except Exception:
+                pass
 
     is_prerelease = bool(prerelease) or ("-" in final_tag.lstrip("vV"))
     current_branch = _get_current_branch(project_root)
@@ -1298,8 +1304,12 @@ def publish_gitea_release(
                 html_url = data.get("html_url") or f"{base_url}/{user}/{target_name}/releases/tag/{final_tag}"
                 _attach_release_binary_assets(base_url, user, target_name, data.get("id"), final_tag, data.get("assets", []), token, project_root)
                 print(f"  [OK] Updated Gitea Release {final_tag}: {html_url}")
-        except Exception:
-            pass
+        except Exception as e:
+            if hasattr(e, "close"):
+                try:
+                    e.close()
+                except Exception:
+                    pass
 
     if not html_url:
         try:
@@ -1315,6 +1325,11 @@ def publish_gitea_release(
                 _attach_release_binary_assets(base_url, user, target_name, data.get("id"), final_tag, data.get("assets", []), token, project_root)
                 print(f"  [OK] Published Gitea Release {final_tag}: {html_url}")
         except Exception as e:
+            if hasattr(e, "close"):
+                try:
+                    e.close()
+                except Exception:
+                    pass
             print(f"  [WARN] Could not publish Gitea release {final_tag}: {e}")
             return None
 

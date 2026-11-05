@@ -5,6 +5,31 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.4] - 2026-11-05
+
+### Added
+- **Zero-polling `PreToolUse` guardrail for `manage_task(Action="status")` loops (`skillsdb/core/guardrails.py`, `plugin/hooks.json`, `v4.0.4`)**:
+  - Added `manage_task` to the `PreToolUse` matcher in `plugin/hooks.json` and wired `handle_pre_tool_guardrail_hook` to block repeated `manage_task(Action="status")` calls within the same wait cycle (`status_polls >= 1` since the last `USER_INPUT` / `SYSTEM_MESSAGE`), instructing the agent to end its turn and rely on automatic `Reactive Wakeup` (Rule 5).
+- **Scratch script path exemption (`_is_scratch_file_path`) in `PreToolUse` guardrail (`skillsdb/core/guardrails.py`, `v4.0.4`)**:
+  - Added `_is_scratch_file_path()` so temporary scratch scripts written to `brain/<cid>/scratch/` can reference local user profile paths without triggering false-positive `secret-leak-detection` (`Hardcoded Personal or Corporate Identifier`) blocks.
+
+### Changed
+- **Automatic 2-entry rotation for `subagent_finding_step_*` facts in `.agents/memory.db` (`skillsdb/memory/project_memory.py`, `v4.0.4`)**:
+  - Updated `_collect_project_memory_lines()` so inserting new `subagent_finding_step_*` facts automatically deprecates older `subagent_finding_step_*` rows beyond the 2 most recent ones, preventing historical subagent findings from crowding out architectural facts in the 12-fact `PreInvocation` context window.
+- **Full-path disambiguation and partial-read verification in `_was_file_region_read_in_current_epoch()` (`skillsdb/core/guardrails.py`, `v4.0.4`)**:
+  - Updated `_was_file_region_read_in_current_epoch()` to compare normalized full paths (`os.path.normcase(os.path.abspath(...))`) when paths contain directory components (so `README.md` and `plugin/README.md` never collide) and to verify line range coverage (`prev_s <= s_line and prev_e >= e_line`) for files `<= 800` lines.
+
+### Fixed
+- **Subagent 5-hour quota pool attribution (10x over-weighting fix) and main-conversation transcript selection (`skillsdb/core/quota_router.py`, `skillsdb/core/detector.py`, `v4.0.4`)**:
+  - Fixed `_scan_single_transcript_5h()` where isolated `research` subagent transcripts (which lack `<USER_SETTINGS_CHANGE>` entries) defaulted to `Gemini 4 Argon (High)` (`Pool 1A`, weight `3.5x`) instead of `Gemini 3.8 Flash (Medium)` (`Pool 1B`, weight `0.35x`), inflating 5-hour quota consumption by 10x during multi-subagent research runs.
+  - Added `_inspect_subagent_transcript_head()` and updated `measure_session_backpack()` and `detect_model_and_pool()` to skip subagent transcripts when resolving the active user conversation by modification time.
+- **Calibration anchor linear decay formula and UTC timestamp boundary comparison (`skillsdb/core/quota_router.py`, `v4.0.4`)**:
+  - Fixed `_resolve_active_calibration()` so `delta_units = max(0.0, raw_total_5h_units - base_u)` instead of `raw_total_5h_units - (base_u * decay)`, ensuring calibrated quota load decays linearly over the 5-hour window when zero new turns are executed.
+  - Normalized `cutoff_iso` to UTC `'Z'` format and compared `ts_str[:19] < cutoff_iso[:19]` in `_scan_single_transcript_5h()`.
+- **Subagent parent-prompt exclusion in `analyze_conversation_epochs_and_scope()` and zero `ResourceWarning` socket cleanup (`skillsdb/memory/project_memory.py`, `skillsdb/memory/gitea_service.py`, `skillsdb/memory/gitea_releases.py`, `skillsdb/memory/gitea_sync.py`, `skillsdb/updater/merger.py`, `tests/test_gitea_sync.py`, `v4.0.4`)**:
+  - Guarded `subagent_findings` extraction in `analyze_conversation_epochs_and_scope()` with `if user_steps:` and `s_idx > 2` so a subagent's own Step 0/1 parent prompt (`<SYSTEM_MESSAGE> ... sender=<parent-cid>`) is never saved as `subagent_finding_step_1`.
+  - Explicitly closed `urllib.error.HTTPError` sockets and `urlopen` handles across `gitea_service.py`, `gitea_releases.py`, `gitea_sync.py`, `quota_router.py`, `detector.py`, and `merger.py`, and switched `test_gitea_sync.py` to `managed_connection()`, eliminating all Python 3.14 `ResourceWarning` messages.
+
 ## [2.0.3] - 2026-11-05
 
 ### Fixed

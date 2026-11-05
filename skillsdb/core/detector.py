@@ -171,8 +171,12 @@ def check_local_endpoint(url: str = "http://localhost:11434/api/tags", timeout: 
                 data = json.loads(resp.read().decode("utf-8"))
                 models = [m.get("name") for m in data.get("models", [])]
                 return {"available": True, "models": models, "url": url}
-    except Exception:
-        pass
+    except Exception as err:
+        if hasattr(err, "close"):
+            try:
+                err.close()
+            except Exception:
+                pass
     return {"available": False, "models": [], "url": url}
 
 
@@ -363,7 +367,19 @@ def detect_model_and_pool(cid: str = None, db_path: Path = None, model_name_hint
     if not target_path and brain_dir.exists():
         try:
             transcripts = sorted(brain_dir.glob("*/.system_generated/logs/transcript.jsonl"), key=os.path.getmtime, reverse=True)
-            if transcripts:
+            for cand_t in transcripts:
+                try:
+                    with open(cand_t, "r", encoding="utf-8", errors="ignore") as hf:
+                        h_lines = [hf.readline() for _ in range(12)]
+                    has_u = any('"USER_INPUT"' in ln or '"USER_EXPLICIT"' in ln for ln in h_lines)
+                    has_sys = any('"SYSTEM_MESSAGE"' in ln and ("sender=" in ln or "<SYSTEM_MESSAGE>" in ln) for ln in h_lines)
+                    if has_sys and not has_u:
+                        continue
+                except Exception:
+                    pass
+                target_path = cand_t
+                break
+            if not target_path and transcripts:
                 target_path = transcripts[0]
         except Exception:
             pass

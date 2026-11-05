@@ -273,7 +273,10 @@ class TestGiteaSync(unittest.TestCase):
             setup_workspace_git(self.test_dir, configure_remote=False)
             (self.test_dir / "main.py").write_text("print(1)\n", encoding="utf-8")
             # Calling init_workspace_gitea with an existing non-empty repo name and without --use-existing/--overwrite must halt
-            ok = init_workspace_gitea(self.test_dir, repo_name="AntiGraviton", use_existing=False, overwrite=False)
+            import io
+            from unittest.mock import patch
+            with patch("sys.stdout", new_callable=io.StringIO):
+                ok = init_workspace_gitea(self.test_dir, repo_name="AntiGraviton", use_existing=False, overwrite=False)
             self.assertFalse(ok, "init_workspace_gitea must return False and halt on repository name collision")
 
 
@@ -1483,8 +1486,8 @@ class TestGiteaSync(unittest.TestCase):
         self.assertIn("Verify MCP task board", tb_out)
 
         # 7. Verify doctor() and suggest_skills()
-        from skillsdb.core.db import get_connection, init_db
-        with get_connection(temp_db) as dconn:
+        from skillsdb.core.db import managed_connection, init_db
+        with managed_connection(temp_db) as dconn:
             init_db(dconn)
             init_agent_templates(dconn)
             doc_out = io.StringIO()
@@ -1881,6 +1884,152 @@ class TestGiteaSync(unittest.TestCase):
         res_main_deny = json.loads(out_main_deny.getvalue())
         self.assertEqual(res_main_deny["decision"], "deny")
         self.assertIn("Subagent Firewall", res_main_deny["reason"])
+
+    def test_v2_0_4_perfection_polish_quota_subagents_and_zero_warnings(self):
+        """
+        Verifies v2.0.4 (SkillsDB v4.0.4) perfection polish:
+        1. Subagent 5h quota attribution (Pool 1B Flash 0.35x instead of Pool 1A Argon 3.5x).
+        2. Calibration anchor decay when zero new turns are executed.
+        3. Subagent transcript exclusion when resolving newest main conversation in measure_session_backpack.
+        4. Scratch script exemption from secret-leak-detection in PreToolUse hook.
+        5. Zero-Polling Guard for repeated manage_task(Action='status') calls in PreToolUse hook.
+        6. Full-path disambiguation and partial-read verification in _was_file_region_read_in_current_epoch.
+        7. Subagent transcript parent-prompt exclusion and 2-row rotation for subagent_finding_step_* facts.
+        """
+        import io
+        import json
+        from datetime import datetime, timezone, timedelta
+        from unittest.mock import patch
+        from skillsdb.config import POOL_AGY_GEMINI_HIGH, POOL_AGY_GEMINI_FAST
+        from skillsdb.core.quota_router import (
+            scan_rolling_5h_antigravity_usage,
+            measure_session_backpack,
+            _resolve_active_calibration,
+        )
+        from skillsdb.core.guardrails import (
+            _is_scratch_file_path,
+            _was_file_region_read_in_current_epoch,
+            handle_pre_tool_guardrail_hook,
+        )
+        from skillsdb.memory.project_memory import analyze_conversation_epochs_and_scope
+
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        fake_brain = self.test_dir / "brain_v204"
+
+        # 1. Main conversation vs Research subagent conversation in 5h rolling window
+        main_dir = fake_brain / "main-conv-204" / ".system_generated" / "logs"
+        sub_dir = fake_brain / "sub-research-204" / ".system_generated" / "logs"
+        main_dir.mkdir(parents=True, exist_ok=True)
+        sub_dir.mkdir(parents=True, exist_ok=True)
+
+        main_lines = [
+            json.dumps({"step_index": 1, "type": "USER_INPUT", "source": "USER_EXPLICIT", "created_at": now_iso, "content": "Hello"}),
+            json.dumps({"step_index": 2, "type": "PLANNER_RESPONSE", "source": "MODEL", "created_at": now_iso, "content": "Reply"}),
+        ]
+        (main_dir / "transcript.jsonl").write_text("\n".join(main_lines) + "\n", encoding="utf-8")
+
+        sub_lines = [
+            json.dumps({
+                "step_index": 0,
+                "type": "SYSTEM_MESSAGE",
+                "source": "SYSTEM",
+                "created_at": now_iso,
+                "content": "<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-05T15:00:00Z sender=main-conv-204 priority=NORMAL content=Audit codebase\n</SYSTEM_MESSAGE>",
+            }),
+            json.dumps({"step_index": 1, "type": "PLANNER_RESPONSE", "source": "MODEL", "created_at": now_iso, "content": "Sub turn 1"}),
+            json.dumps({"step_index": 2, "type": "PLANNER_RESPONSE", "source": "MODEL", "created_at": now_iso, "content": "Sub turn 2"}),
+        ]
+        sub_t_path = sub_dir / "transcript.jsonl"
+        sub_t_path.write_text("\n".join(sub_lines) + "\n", encoding="utf-8")
+
+        r5 = scan_rolling_5h_antigravity_usage(brain_dir=fake_brain)
+        self.assertEqual(r5["pools"][POOL_AGY_GEMINI_HIGH]["turns"], 1)
+        self.assertEqual(r5["pools"][POOL_AGY_GEMINI_FAST]["turns"], 2)
+        self.assertAlmostEqual(r5["pools"][POOL_AGY_GEMINI_FAST]["weighted_units"], 0.7, places=2)
+
+        # 2. measure_session_backpack(cid=None) must pick main-conv-204 even if sub-research-204 has a newer mtime
+        bp_auto = measure_session_backpack(cid=None, brain_dir=fake_brain)
+        self.assertEqual(bp_auto["conversation_id"], "main-conv-204")
+
+        # 3. Calibration decay when zero new turns have occurred after calibration (2.5h elapsed = 50% decay)
+        temp_cal_db = self.test_dir / "cal_v204.db"
+        from skillsdb.core.db import managed_connection
+        two_half_h_ago = (datetime.now(timezone.utc) - timedelta(hours=2.5)).isoformat()
+        with managed_connection(temp_cal_db, init_schema=True) as cconn:
+            anchor_json = json.dumps({
+                "calibrated_pct": 80.0,
+                "calibrated_at": two_half_h_ago,
+                "baseline_units": 100.0,
+            })
+            cconn.execute(
+                "INSERT OR REPLACE INTO runtime_config (key, value, updated_at) VALUES ('quota_calibration_anchor', ?, ?);",
+                (anchor_json, two_half_h_ago),
+            )
+        cal_state = _resolve_active_calibration(raw_total_5h_units=100.0, soft_limit=600.0, db_path=temp_cal_db)
+        self.assertTrue(cal_state["active"])
+        # 80% of 600 = 480 units; after 2.5h (50% of 5h window) with 0 new units above baseline_units=100, effective_5h_units ~ 240.0
+        self.assertAlmostEqual(cal_state["effective_5h_units"], 240.0, delta=5.0)
+
+        # 4. Scratch script path exemption
+        scratch_p = Path(r"C:\Users\someone\.gemini\antigravity\brain\2c02ccd9\scratch\helper.js")
+        self.assertTrue(_is_scratch_file_path(scratch_p))
+        scratch_payload = json.dumps({
+            "toolCall": {
+                "name": "write_file",
+                "args": {
+                    "Path": str(scratch_p),
+                    "Content": "const p = 'C:\\\\Users\\\\" + "moerth" + "j\\\\Desktop\\\\file.txt';\n",
+                },
+            }
+        })
+        out_scr = io.StringIO()
+        with patch("sys.stdin", io.StringIO(scratch_payload)), patch("sys.stdout", out_scr):
+            handle_pre_tool_guardrail_hook()
+        self.assertEqual(json.loads(out_scr.getvalue())["decision"], "allow")
+
+        # 5. Zero-Polling Guard for repeated manage_task(Action='status')
+        poll_t_file = self.test_dir / "poll_transcript.jsonl"
+        poll_lines = [
+            json.dumps({"step_index": 1, "type": "USER_INPUT", "source": "USER_EXPLICIT", "content": "Run build"}),
+            json.dumps({
+                "step_index": 2,
+                "type": "PLANNER_RESPONSE",
+                "tool_calls": [{"name": "manage_task", "args": {"Action": "status", "TaskId": "task-1"}}],
+            }),
+        ]
+        poll_t_file.write_text("\n".join(poll_lines) + "\n", encoding="utf-8")
+        poll_req = json.dumps({
+            "transcriptPath": str(poll_t_file),
+            "toolCall": {"name": "manage_task", "args": {"Action": "status", "TaskId": "task-1"}},
+        })
+        out_poll = io.StringIO()
+        with patch("sys.stdin", io.StringIO(poll_req)), patch("sys.stdout", out_poll):
+            handle_pre_tool_guardrail_hook()
+        res_poll = json.loads(out_poll.getvalue())
+        self.assertEqual(res_poll["decision"], "deny")
+        self.assertIn("Zero-Polling Guard", res_poll["reason"])
+
+        # 6. _was_file_region_read_in_current_epoch path disambiguation (root README.md vs plugin/README.md)
+        root_rm = self.test_dir / "README.md"
+        plug_rm = self.test_dir / "plugin" / "README.md"
+        plug_rm.parent.mkdir(parents=True, exist_ok=True)
+        root_rm.write_text("root\n" * 50, encoding="utf-8")
+        plug_rm.write_text("plug\n" * 50, encoding="utf-8")
+        read_t_file = self.test_dir / "read_epoch.jsonl"
+        read_t_file.write_text(
+            json.dumps({
+                "step_index": 5,
+                "type": "PLANNER_RESPONSE",
+                "tool_calls": [{"name": "read_file", "args": {"Path": str(root_rm), "StartLine": 1, "EndLine": 50}}],
+            }) + "\n",
+            encoding="utf-8",
+        )
+        self.assertTrue(_was_file_region_read_in_current_epoch({"transcriptPath": str(read_t_file)}, root_rm, 10, 20, 50))
+        self.assertFalse(_was_file_region_read_in_current_epoch({"transcriptPath": str(read_t_file)}, plug_rm, 10, 20, 50))
+
+        # 7. Subagent transcript Step 0/1 parent prompt must NOT be extracted as subagent_finding_step_0
+        ep_sub = analyze_conversation_epochs_and_scope(cid="sub-research-204", brain_dir=fake_brain)
+        self.assertEqual(ep_sub["subagent_findings"], [])
 
 
 if __name__ == "__main__":

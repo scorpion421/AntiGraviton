@@ -200,6 +200,20 @@ def _is_test_file_path(file_path: Path) -> bool:
         return False
 
 
+def _is_scratch_file_path(file_path: Path) -> bool:
+    """Returns True if file_path is a temporary scratch script inside a scratch/ directory."""
+    try:
+        parts_low = [p.lower() for p in file_path.parts]
+        if "scratch" in parts_low[-3:]:
+            return True
+        norm_str = str(file_path).lower().replace("/", "\\")
+        if "\\antigravity\\brain\\" in norm_str and "\\scratch\\" in norm_str:
+            return True
+        return False
+    except Exception:
+        return False
+
+
 def fix_text(text: str) -> Tuple[str, int]:
     """
     Auto-remediates guardrail violations automatically (zero friction):
@@ -601,7 +615,7 @@ def _is_subagent_context(payload: Dict[str, Any], t_path: Optional[Path] = None)
         try:
             head_lines = []
             with open(t_path, "r", encoding="utf-8", errors="ignore") as f:
-                for _ in range(8):
+                for _ in range(16):
                     line = f.readline()
                     if not line:
                         break
@@ -621,6 +635,24 @@ def _is_subagent_context(payload: Dict[str, Any], t_path: Optional[Path] = None)
     return False
 
 
+def _resolve_hook_cid_and_transcript(payload: Dict[str, Any]) -> Tuple[Optional[str], Optional[Path]]:
+    """Resolves (cid, transcript_path) from hook payload or ANTIGRAVITY_CONVERSATION_ID environment fallback."""
+    t_path_str = str(payload.get("transcriptPath") or "").strip()
+    cid = str(
+        payload.get("conversationId")
+        or payload.get("conversation_id")
+        or os.environ.get("ANTIGRAVITY_CONVERSATION_ID")
+        or ""
+    ).strip() or None
+    t_path: Optional[Path] = None
+    if t_path_str:
+        t_path = Path(t_path_str)
+    elif cid:
+        brain_override = Path(payload["brainDir"]) if payload.get("brainDir") else (resolve_user_home() / ".gemini" / "antigravity" / "brain")
+        t_path = brain_override / cid / ".system_generated" / "logs" / "transcript.jsonl"
+    return cid, t_path
+
+
 def _was_file_region_read_in_current_epoch(
     payload: Dict[str, Any],
     fpath: Path,
@@ -634,17 +666,16 @@ def _was_file_region_read_in_current_epoch(
     Uses O(1) binary tail-seek (read_jsonl_tail_lines) so multi-megabyte transcripts never add hook latency.
     """
     try:
-        t_path_str = payload.get("transcriptPath") or ""
-        cid = str(payload.get("conversationId") or "").strip()
-        t_path = Path(t_path_str) if t_path_str else (
-            resolve_user_home() / ".gemini" / "antigravity" / "brain" / cid / ".system_generated" / "logs" / "transcript.jsonl"
-            if cid else None
-        )
+        _, t_path = _resolve_hook_cid_and_transcript(payload)
         if not t_path or not t_path.exists():
             return False
 
         tail_lines = read_jsonl_tail_lines(t_path, max_bytes=393216, max_lines=120)
         fname_low = fpath.name.lower()
+        try:
+            target_norm = os.path.normcase(os.path.abspath(str(fpath)))
+        except Exception:
+            target_norm = ""
         req_mid = (s_line + e_line) // 2
 
         for rline in reversed(tail_lines):
@@ -663,12 +694,23 @@ def _was_file_region_read_in_current_epoch(
                         if not isinstance(targs, dict):
                             continue
                         prev_p = str(targs.get("Path") or targs.get("AbsolutePath") or targs.get("TargetFile") or "")
-                        if Path(prev_p.replace("\\\\", "\\")).name.lower() != fname_low:
+                        prev_clean = prev_p.replace("\\\\", "\\")
+                        prev_path_obj = Path(prev_clean)
+                        if prev_path_obj.name.lower() != fname_low:
                             continue
-                        if total_lines <= 800:
-                            return True
+                        if target_norm and len(prev_path_obj.parts) > 1:
+                            try:
+                                if os.path.normcase(os.path.abspath(prev_clean)) != target_norm:
+                                    continue
+                            except Exception:
+                                pass
                         prev_s = int(targs.get("StartLine") or 1)
-                        prev_e = int(targs.get("EndLine") or total_lines)
+                        raw_e = targs.get("EndLine")
+                        prev_e = int(raw_e) if raw_e is not None else min(total_lines, prev_s + 799)
+                        if total_lines <= 800:
+                            if prev_s <= s_line and prev_e >= e_line:
+                                return True
+                            continue
                         prev_mid = (prev_s + prev_e) // 2
                         if abs(req_mid - prev_mid) <= 250 or (prev_s <= s_line and prev_e >= e_line):
                             return True
@@ -734,7 +776,7 @@ def handle_pre_tool_guardrail_hook():
                     or any(k in role_str.lower() for k in ("research", "auditor", "scanner", "finder", "search", "explorer", "log"))
                 )
                 if not force_inherit and (req_model in ("", "inherit") or (is_coding_self and req_model in ("flash", "flash_lite"))):
-                    cid = str(payload.get("conversationId") or "").strip() or None
+                    cid, _ = _resolve_hook_cid_and_transcript(payload)
                     model_hint = payload.get("modelName") or payload.get("model")
                     db_override = Path(payload["dbPath"]) if payload.get("dbPath") else DB_PATH
                     brain_override = Path(payload["brainDir"]) if payload.get("brainDir") else None
@@ -773,6 +815,38 @@ def handle_pre_tool_guardrail_hook():
                         return
             except Exception:
                 pass
+            print(json.dumps({"decision": "allow"}))
+            return
+
+        # A.0.b Zero-Polling Guard for manage_task(Action='status') loops (Rule 5)
+        if tool_name == "manage_task" or (not tool_name and "Action" in args and "TaskId" in args):
+            act_val = str(args.get("Action") or "").strip().lower()
+            if act_val == "status":
+                try:
+                    _, t_path = _resolve_hook_cid_and_transcript(payload)
+                    if t_path and t_path.exists():
+                        tail_lines = read_jsonl_tail_lines(t_path, max_bytes=65536, max_lines=15)
+                        status_polls = 0
+                        for rline in reversed(tail_lines):
+                            if (
+                                '"USER_INPUT"' in rline
+                                or '"USER_EXPLICIT"' in rline
+                                or '"SYSTEM_MESSAGE"' in rline
+                                or "<CONTEXT_SUMMARY>" in rline
+                            ):
+                                break
+                            if '"manage_task"' in rline and '"status"' in rline.lower():
+                                status_polls += 1
+                        if status_polls >= 1:
+                            reason = (
+                                "SkillsDB Zero-Polling Guard (Rule 5): "
+                                "Never poll 'manage_task(Action=\"status\")' in a loop! "
+                                "End your turn (call no more tools) and rely on automatic Reactive Wakeup to notify you when the background task finishes."
+                            )
+                            print(json.dumps({"decision": "deny", "reason": reason}))
+                            return
+                except Exception:
+                    pass
             print(json.dumps({"decision": "allow"}))
             return
 
@@ -866,12 +940,7 @@ def handle_pre_tool_guardrail_hook():
             # (Isolated subagents such as TypeName='research' are exempt so their searches never block or affect main-context streaks)
             if _is_exploratory_search_cmd(cmd_line):
                 try:
-                    t_path_str = payload.get("transcriptPath") or ""
-                    cid = str(payload.get("conversationId") or "").strip()
-                    t_path = Path(t_path_str) if t_path_str else (
-                        resolve_user_home() / ".gemini" / "antigravity" / "brain" / cid / ".system_generated" / "logs" / "transcript.jsonl"
-                        if cid else None
-                    )
+                    _, t_path = _resolve_hook_cid_and_transcript(payload)
                     if not _is_subagent_context(payload, t_path) and t_path and t_path.exists():
                         tail_lines = read_jsonl_tail_lines(t_path, max_bytes=131072, max_lines=30)
                         search_streak = 0
@@ -935,7 +1004,7 @@ def handle_pre_tool_guardrail_hook():
 
         try:
             target_path = Path(target_file)
-            if _is_test_file_path(target_path):
+            if _is_test_file_path(target_path) or _is_scratch_file_path(target_path):
                 print(json.dumps({"decision": "allow"}))
                 return
         except Exception:

@@ -42,12 +42,12 @@ def find_repo_root() -> Path:
 
 
 def _extract_skillsdb_version_from_release(tag: str, name: str, body: str) -> str:
-    """Extracts the SkillsDB engine version (e.g. 4.0.0) from an AntiGraviton release title or body."""
+    """Extracts the SkillsDB engine version (e.g. 4.0.4) from an AntiGraviton release title or body."""
     combined = f"{name or ''}\n{body or ''}"
     m = re.search(r"SkillsDB\s+[(`'\"]*v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.\-]+)?)", combined, re.IGNORECASE)
     if m:
         return m.group(1)
-    m2 = re.search(r"\bv([34]\.\d+\.\d+(?:-[0-9A-Za-z.\-]+)?)\b", combined)
+    m2 = re.search(r"\bv(\d+\.\d+\.\d+(?:-[0-9A-Za-z.\-]+)?)\b", combined)
     if m2:
         return m2.group(1)
     return tag
@@ -79,7 +79,12 @@ def get_latest_release_info() -> dict:
                         "published_at": data.get("published_at", "")[:10],
                         "body": rel_body,
                     }
-        except Exception:
+        except Exception as e:
+            if hasattr(e, "close"):
+                try:
+                    e.close()
+                except Exception:
+                    pass
             continue
     return None
 
@@ -94,7 +99,7 @@ def check_update(quiet: bool = False) -> dict:
 
     suite_tag = info["tag"]
     latest_engine = info.get("skillsdb_version") or suite_tag
-    local_suite = globals().get("__suite_version__", "1.4.4")
+    local_suite = globals().get("__suite_version__", "2.0.4")
     repo_root = find_repo_root()
     if repo_root and (repo_root / "VERSION").exists():
         try:
@@ -116,7 +121,7 @@ def check_update(quiet: bool = False) -> dict:
 
         if p_latest_engine and p_latest_engine[0] >= 3:
             has_update = p_latest_engine > p_local_engine
-        if not has_update and p_suite_tag and p_local_suite and p_suite_tag[0] == p_local_suite[0]:
+        if not has_update and p_suite_tag and p_local_suite:
             has_update = p_suite_tag > p_local_suite
     except Exception:
         has_update = (latest_engine != __version__) and (suite_tag != local_suite)
@@ -312,7 +317,24 @@ def update_plugin(force: bool = False):
         shutil.copytree(source_plugin, target_plugin, dirs_exist_ok=True)
 
         if source_mgr.exists():
-            shutil.copy2(source_mgr, DB_DIR / "db_manager.py")
+            dst_mgr = DB_DIR / "db_manager.py"
+            try:
+                shutil.copy2(source_mgr, dst_mgr)
+            except OSError:
+                import os as _os
+                tmp_mgr = dst_mgr.with_suffix(".py.tmp")
+                old_mgr = dst_mgr.with_suffix(f".py.old.{_os.getpid()}")
+                shutil.copy2(source_mgr, tmp_mgr)
+                if dst_mgr.exists():
+                    try:
+                        _os.replace(dst_mgr, old_mgr)
+                    except OSError:
+                        pass
+                _os.replace(tmp_mgr, dst_mgr)
+                try:
+                    old_mgr.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
         # Automatically prune any legacy excluded non-workspace paths or case duplicates from runtime_config
         get_learned_workspaces(db_path=DB_PATH, prune_missing=True)

@@ -40,6 +40,11 @@ def check_gitea_health(timeout: float = 3.0, db_path: Path = DB_PATH) -> Tuple[b
                 data = json.loads(resp.read().decode("utf-8"))
                 return True, data
     except Exception as e:
+        if hasattr(e, "close"):
+            try:
+                e.close()
+            except Exception:
+                pass
         healthz_url = f"{config['url']}/api/healthz"
         try:
             h_req = urllib.request.Request(healthz_url, headers={"User-Agent": "SkillsDB-GiteaSync/1.0"})
@@ -48,8 +53,12 @@ def check_gitea_health(timeout: float = 3.0, db_path: Path = DB_PATH) -> Tuple[b
                     h_data = json.loads(h_resp.read().decode("utf-8"))
                     if h_data.get("status") == "pass":
                         return True, {"version": h_data.get("description", "online"), "status": "pass"}
-        except Exception:
-            pass
+        except Exception as he:
+            if hasattr(he, "close"):
+                try:
+                    he.close()
+                except Exception:
+                    pass
         return False, {"error": str(e)}
     return False, {"error": "Unknown status"}
 
@@ -150,8 +159,12 @@ def inspect_remote_repository(repo_name: str, db_path: Path = DB_PATH) -> Dict[s
                 result["html_url"] = data.get("html_url") or default_html
                 result["clone_url"] = _strip_credentials_from_url(data.get("clone_url"))
                 result["updated_at"] = data.get("updated_at")
-    except Exception:
-        pass
+    except Exception as e:
+        if hasattr(e, "close"):
+            try:
+                e.close()
+            except Exception:
+                pass
     return result
 
 
@@ -196,7 +209,12 @@ def ensure_remote_repository(repo_name: str, description: Optional[str] = None) 
                 if resp.status in (200, 201):
                     data = json.loads(resp.read().decode("utf-8"))
                     return _strip_credentials_from_url(data.get("clone_url"))
-        except Exception:
+        except Exception as e:
+            if hasattr(e, "close"):
+                try:
+                    e.close()
+                except Exception:
+                    pass
             continue
     return None
 
@@ -224,7 +242,12 @@ def delete_remote_repository(repo_name: str, owner: Optional[str] = None, db_pat
     try:
         with urllib.request.urlopen(req, timeout=5.0) as resp:
             return resp.status in (200, 204)
-    except Exception:
+    except Exception as e:
+        if hasattr(e, "close"):
+            try:
+                e.close()
+            except Exception:
+                pass
         return False
 
 
@@ -255,6 +278,11 @@ def list_gitea_repositories() -> List[Dict[str, Any]]:
                     repos = json.loads(resp.read().decode("utf-8"))
                     if repos:
                         return repos
-        except Exception:
+        except Exception as e:
+            if hasattr(e, "close"):
+                try:
+                    e.close()
+                except Exception:
+                    pass
             continue
     return []

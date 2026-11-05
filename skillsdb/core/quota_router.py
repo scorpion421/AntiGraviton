@@ -1,5 +1,5 @@
 """
-SkillsDB v4.0.2 (AntiGraviton Suite v2.0.2) Multi-Pool Quota Router, Golden-Ratio (61.8% / 85.0%) Ultra/Pro Control Plane,
+SkillsDB v4.0.4 (AntiGraviton Suite v2.0.4) Multi-Pool Quota Router, Golden-Ratio (61.8% / 85.0%) Ultra/Pro Control Plane,
 Effort-Weighted 5h/24h Telemetry, Cross-Workstation Heartbeat Sync, Live Calibration Anchor, Context-Backpack Detector,
 and External Gemini Context-Shield Offload Engine.
 """
@@ -177,6 +177,41 @@ def detect_external_pools(db_path: Path = DB_PATH) -> Dict[str, Any]:
     }
 
 
+def _inspect_subagent_transcript_head(
+    t_file: Path,
+    head_lines: Optional[List[str]] = None,
+) -> Tuple[bool, bool]:
+    """
+    Inspects the first 16 lines of a transcript.jsonl to determine:
+      (is_subagent_transcript, force_argon_inherit)
+    Isolated subagent transcripts begin with a parent SYSTEM_MESSAGE ('sender=') and have
+    no USER_INPUT / USER_EXPLICIT steps.
+    """
+    try:
+        if head_lines is None:
+            head_lines = []
+            with open(t_file, "r", encoding="utf-8", errors="ignore") as hf:
+                for _ in range(16):
+                    ln = hf.readline()
+                    if not ln:
+                        break
+                    head_lines.append(ln)
+        else:
+            head_lines = head_lines[:16]
+        has_user = any('"USER_INPUT"' in ln or '"USER_EXPLICIT"' in ln for ln in head_lines)
+        has_parent_sys = any(
+            '"SYSTEM_MESSAGE"' in ln and ("sender=" in ln or "<SYSTEM_MESSAGE>" in ln)
+            for ln in head_lines
+        )
+        if has_parent_sys and not has_user:
+            combined_upper = "\n".join(head_lines).upper()
+            force_inherit = any(t in combined_upper for t in ("[FORCE-INHERIT]", "[FORCE-ULTRA]"))
+            return True, force_inherit
+    except Exception:
+        pass
+    return False, False
+
+
 def _scan_single_transcript_5h(
     t_file: Path,
     cutoff_iso: str,
@@ -187,6 +222,8 @@ def _scan_single_transcript_5h(
     """
     Scans a single transcript.jsonl for 5-hour model turns using O(1) binary tail-seek
     and an in-memory (mtime_ns, size, cutoff_minute_bucket) cache.
+    Automatically attributes isolated research subagent transcripts to Pool 1B (Gemini 3.8 Flash, 0.35x)
+    instead of over-weighting them 10x as Pool 1A (Gemini 4 Argon High, 3.5x).
     """
     key = str(t_file)
     try:
@@ -210,6 +247,7 @@ def _scan_single_transcript_5h(
     f_weighted = 0.0
     f_subagents = 0
     active_spec = parse_antigravity_model_spec("Gemini 4 Argon (High)")
+    cutoff_prefix = cutoff_iso[:19]
 
     try:
         with open(t_file, "rb") as bf:
@@ -217,9 +255,14 @@ def _scan_single_transcript_5h(
                 bf.seek(fsize - max_tail_bytes, os.SEEK_SET)
                 raw = bf.read(max_tail_bytes)
                 lines = raw.decode("utf-8", errors="ignore").splitlines()[1:]
+                is_sub, force_inh = _inspect_subagent_transcript_head(t_file, None)
             else:
                 raw = bf.read()
                 lines = raw.decode("utf-8", errors="ignore").splitlines()
+                is_sub, force_inh = _inspect_subagent_transcript_head(t_file, lines)
+
+        if is_sub and not force_inh:
+            active_spec = parse_antigravity_model_spec("Gemini 3.8 Flash (Medium)")
 
         for line in lines:
             if "<USER_SETTINGS_CHANGE>" in line and "Model Selection" in line:
@@ -234,7 +277,7 @@ def _scan_single_transcript_5h(
             except Exception:
                 continue
             ts_str = str(d.get("created_at") or "")
-            if not ts_str or ts_str < cutoff_iso:
+            if not ts_str or ts_str[:19] < cutoff_prefix:
                 continue
             src = d.get("source")
             stype = d.get("type")
@@ -502,7 +545,7 @@ def _resolve_active_calibration(
 
             decay = max(0.0, (window_hours - age_hours) / window_hours)
             anchored_units = (cal_pct / 100.0) * soft_limit * decay
-            delta_units = max(0.0, raw_total_5h_units - (base_u * decay))
+            delta_units = max(0.0, raw_total_5h_units - base_u)
             effective_units = round(anchored_units + delta_units, 2)
             return {
                 "active": True,
@@ -532,7 +575,7 @@ def scan_rolling_5h_antigravity_usage(
     now_utc = datetime.now(timezone.utc)
     cutoff_dt = now_utc - timedelta(hours=window_hours)
     cutoff_ts = cutoff_dt.timestamp()
-    cutoff_iso = cutoff_dt.strftime("%Y-%m-%dT%H:%M:%S")
+    cutoff_iso = cutoff_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     cutoff_minute_bucket = int(cutoff_ts // 60)
 
     pools = {
@@ -671,6 +714,9 @@ def measure_session_backpack(cid: str = None, brain_dir: Path = None) -> Dict[st
             return default_res
     if t_file is None:
         newest_mtime = -1.0
+        fallback_sub_file: Optional[Path] = None
+        fallback_sub_cid: Optional[str] = None
+        fallback_sub_mtime = -1.0
         for folder in b_dir.iterdir():
             if not folder.is_dir() or folder.name == "tempmediaStorage":
                 continue
@@ -678,12 +724,22 @@ def measure_session_backpack(cid: str = None, brain_dir: Path = None) -> Dict[st
             if cand.exists():
                 try:
                     mt = cand.stat().st_mtime
+                    is_sub, _ = _inspect_subagent_transcript_head(cand)
+                    if is_sub:
+                        if mt > fallback_sub_mtime:
+                            fallback_sub_mtime = mt
+                            fallback_sub_file = cand
+                            fallback_sub_cid = folder.name
+                        continue
                     if mt > newest_mtime:
                         newest_mtime = mt
                         t_file = cand
                         resolved_cid = folder.name
                 except OSError:
                     continue
+        if t_file is None and fallback_sub_file is not None:
+            t_file = fallback_sub_file
+            resolved_cid = fallback_sub_cid
 
     if t_file is None or not t_file.exists():
         return default_res
@@ -1017,6 +1073,11 @@ def _call_aistudio_rest_api(prompt: str, model_name: str, api_key: str, timeout:
                         return True, text_out
         return False, "Empty response from AI Studio API"
     except Exception as err:
+        if hasattr(err, "close"):
+            try:
+                err.close()
+            except Exception:
+                pass
         return False, str(err)
 
 
@@ -1045,6 +1106,11 @@ def _call_gemini_cli_headless(prompt: str, model_name: str, gemini_bin: str, tim
             return True, raw_out
         return False, (proc.stderr or proc.stdout or f"Exit code {proc.returncode}").strip()[:300]
     except Exception as err:
+        if hasattr(err, "close"):
+            try:
+                err.close()
+            except Exception:
+                pass
         return False, str(err)
 
 

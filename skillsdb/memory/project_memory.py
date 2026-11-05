@@ -1104,26 +1104,29 @@ def analyze_conversation_epochs_and_scope(
                     break
 
     parsed_subagents = []
-    sub_re = re.compile(r"sender=([0-9a-fA-F\-]{8,})\s+priority=\S+\s+content=(.*?)(?:</SYSTEM_MESSAGE>|$)", re.DOTALL)
-    for sline in subagent_raw_lines:
-        try:
-            sd = json.loads(sline)
-            s_idx = int(sd.get("step_index") or 0)
-            scontent = str(sd.get("content") or "")
-            m_sub = sub_re.search(scontent)
-            if m_sub:
-                sender_id = m_sub.group(1)[:8]
-                body = m_sub.group(2).strip()
-                body_clean = re.sub(r"```.*?```", " ", body, flags=re.DOTALL)
-                body_clean = re.sub(r"\s+", " ", body_clean).strip()
-                if body_clean:
-                    parsed_subagents.append({
-                        "step_index": s_idx,
-                        "sender": sender_id,
-                        "summary": body_clean[:280],
-                    })
-        except Exception:
-            pass
+    if user_steps:
+        sub_re = re.compile(r"sender=([0-9a-fA-F\-]{8,})\s+priority=\S+\s+content=(.*?)(?:</SYSTEM_MESSAGE>|$)", re.DOTALL)
+        for sline in subagent_raw_lines:
+            try:
+                sd = json.loads(sline)
+                s_idx = int(sd.get("step_index") or 0)
+                if s_idx <= 2:
+                    continue
+                scontent = str(sd.get("content") or "")
+                m_sub = sub_re.search(scontent)
+                if m_sub:
+                    sender_id = m_sub.group(1)[:8]
+                    body = m_sub.group(2).strip()
+                    body_clean = re.sub(r"```.*?```", " ", body, flags=re.DOTALL)
+                    body_clean = re.sub(r"\s+", " ", body_clean).strip()
+                    if body_clean:
+                        parsed_subagents.append({
+                            "step_index": s_idx,
+                            "sender": sender_id,
+                            "summary": body_clean[:280],
+                        })
+            except Exception:
+                pass
 
     result["max_step_index"] = max_step_idx
     result["step_bucket"] = max_step_idx // 50
@@ -1322,7 +1325,9 @@ def handle_pre_invocation_hook():
                 init_project_db(conn)
                 cursor = conn.cursor()
                 now_iso_hook = datetime.now(timezone.utc).isoformat()
-                # 1. Auto-persist research subagent findings into .agents/memory.db so compactions never lose them
+                # 1. Auto-persist research subagent findings into .agents/memory.db so compactions never lose them,
+                #    while rotating older subagent_finding_step_* rows so at most 2 occupy the active 12-fact window.
+                inserted_sf = False
                 for sf in (epoch_info.get("subagent_findings") or []):
                     sf_key = f"subagent_finding_step_{sf['step_index']}"
                     cursor.execute("SELECT 1 FROM project_facts WHERE key = ?;", (sf_key,))
@@ -1337,7 +1342,19 @@ def handle_pre_invocation_hook():
                             "INSERT INTO project_memory_fts (source_table, title_or_key, content) VALUES ('fact', ?, ?);",
                             (sf_key, sf_val),
                         )
-                        conn.commit()
+                        inserted_sf = True
+                if inserted_sf:
+                    cursor.execute(
+                        "SELECT key FROM project_facts WHERE key LIKE 'subagent_finding_step_%' AND deprecated_at IS NULL ORDER BY updated_at DESC, id DESC;"
+                    )
+                    active_sf_keys = [r[0] for r in cursor.fetchall()]
+                    for stale_sf_key in active_sf_keys[2:]:
+                        cursor.execute(
+                            "UPDATE project_facts SET deprecated_at = ?, superseded_by = ? WHERE key = ?;",
+                            (now_iso_hook, active_sf_keys[0], stale_sf_key),
+                        )
+                        cursor.execute("DELETE FROM project_memory_fts WHERE source_table = 'fact' AND title_or_key = ?;", (stale_sf_key,))
+                    conn.commit()
                 # 2. Auto-checkpoint active working set before auto-compaction when steps_since_compaction >= 150
                 if epoch_info.get("steps_since_compaction", 0) >= 150 and epoch_info.get("epoch_touched_files"):
                     ws_key_fact = "auto_checkpoint_working_set"
@@ -1644,8 +1661,8 @@ def handle_pre_invocation_hook():
                 has_files = any(f for f in root_path.iterdir() if f.name not in (".agents", ".git"))
                 if has_files:
                     if not db_path.exists():
-                        conn = get_project_connection(root_path)
-                        conn.close()
+                        with managed_connection(db_path, is_project_db=True) as conn:
+                            init_project_db(conn)
                     if not _is_temp_workspace(root_path) and not (root_path / ".git" / "HEAD").exists():
                         setup_workspace_git(root_path, configure_remote=False)
             except Exception:
