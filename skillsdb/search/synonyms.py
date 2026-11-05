@@ -72,10 +72,16 @@ DEFAULT_SYNONYMS = {
     "zeitplan": "automation schedule cron sidecar timer",
     "erweiterung": "plugin customization skill hook mcp sidecar",
     "widget": "generative_ui html embed tailwind card chart",
+    "ui": "ui widget layout frontend generative_ui responsive",
+    "db": "database sql sqlite bigquery firestore schema",
+    "ci": "pipeline workflow automation test build deploy",
+    "cd": "deployment release pipeline automation hosting",
+    "ai": "agent llm model prompt gemini subagent",
 }
 
 
 _FTS5_RESERVED_WORDS = frozenset({"and", "or", "not", "near"})
+_STOPWORDS_2 = frozenset({"in", "on", "to", "of", "is", "it", "by", "at", "an", "as", "or", "zu", "im", "am", "ab", "so", "ob", "da"})
 
 
 def init_synonyms(conn: sqlite3.Connection):
@@ -117,11 +123,13 @@ def expand_query_with_synonyms(query: str, conn: sqlite3.Connection = None) -> l
     Extracts search terms from query and expands with cross-lingual synonyms.
     Returns list of sanitized alphanumeric terms ready for FTS5 'OR' conjunction.
     """
+    if isinstance(query, sqlite3.Connection):
+        query, conn = conn, query
     if not query or not isinstance(query, str):
         return []
     raw_words = [
-        w for w in re.findall(r"[a-zA-Z0-9äöüÄÖÜß_]{3,}", query.lower())
-        if w not in _FTS5_RESERVED_WORDS
+        w for w in re.findall(r"[a-zA-Z0-9äöüÄÖÜß_]{2,}", query.lower())
+        if w not in _FTS5_RESERVED_WORDS and w not in _STOPWORDS_2
     ]
     if not raw_words:
         return []

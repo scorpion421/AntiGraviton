@@ -16,6 +16,7 @@ from .project_memory import (
     mem_reconcile,
     mem_task_add,
     mem_task_update,
+    mem_task_delete,
     mem_task_list,
     mem_task_clear,
     mem_compact,
@@ -32,6 +33,8 @@ from .handoff import (
     list_handoffs,
     read_handoff,
     update_handoff,
+    accept_handoff,
+    complete_handoff,
 )
 from .agent_templates import (
     init_agent_templates,
@@ -56,6 +59,7 @@ __all__ = [
     "mem_reconcile",
     "mem_task_add",
     "mem_task_update",
+    "mem_task_delete",
     "mem_task_list",
     "mem_task_clear",
     "mem_compact",
@@ -70,6 +74,8 @@ __all__ = [
     "list_handoffs",
     "read_handoff",
     "update_handoff",
+    "accept_handoff",
+    "complete_handoff",
     "init_agent_templates",
     "list_agent_templates",
     "get_agent_template",

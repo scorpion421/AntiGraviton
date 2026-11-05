@@ -54,8 +54,9 @@ class WriterQueue:
                         break
                     except sqlite3.OperationalError as op_err:
                         try:
-                            conn.rollback()
-                        except sqlite3.Error:
+                            if conn:
+                                conn.rollback()
+                        except Exception:
                             pass
                         msg = str(op_err).lower()
                         if ("locked" in msg or "busy" in msg) and attempt < max_retries:
@@ -65,15 +66,24 @@ class WriterQueue:
                         break
                     except Exception as e:
                         try:
-                            conn.rollback()
-                        except sqlite3.Error:
+                            if conn:
+                                conn.rollback()
+                        except Exception:
                             pass
                         result_holder.append((False, e))
                         break
-            finally:
-                done_event.set()
+            except Exception as outer_e:
+                if not result_holder:
+                    result_holder.append((False, outer_e))
 
-        self.queue.put(task)
+        self.queue.put((task, done_event))
+        if not self._thread.is_alive() and not self._stop_event.is_set():
+            self._thread = threading.Thread(
+                target=self._worker,
+                daemon=True,
+                name=f"WriterQueue-{self.db_path.name}",
+            )
+            self._thread.start()
         if not done_event.wait(timeout=timeout):
             raise TimeoutError(f"Write operation on {self.db_path} timed out after {timeout}s")
 
@@ -83,62 +93,75 @@ class WriterQueue:
         return val
 
     def _worker(self):
-        try:
-            conn = get_connection(self.db_path, is_project_db=True)
-        except Exception as err:
-            while not self.queue.empty():
-                try:
-                    task = self.queue.get_nowait()
-                    try:
-                        task(None)
-                    finally:
-                        self.queue.task_done()
-                except Exception:
-                    pass
-            return
-
         while not self._stop_event.is_set() or not self.queue.empty():
             try:
-                task = self.queue.get(timeout=0.15)
-                try:
-                    task(conn)
-                finally:
-                    self.queue.task_done()
+                first_item = self.queue.get(timeout=0.15)
             except queue.Empty:
                 continue
             except Exception:
-                pass
+                continue
 
-        try:
-            if conn.in_transaction:
-                conn.commit()
-            conn.execute("PRAGMA wal_checkpoint(PASSIVE);")
-        except sqlite3.Error:
-            pass
-        finally:
+            batch = [first_item]
+            while True:
+                try:
+                    batch.append(self.queue.get_nowait())
+                except queue.Empty:
+                    break
+
+            conn = None
             try:
-                conn.close()
-            except sqlite3.Error:
-                pass
+                try:
+                    conn = get_connection(self.db_path, is_project_db=True)
+                except Exception:
+                    conn = None
+
+                try:
+                    for task_fn, _ev in batch:
+                        task_fn(conn)
+
+                    if conn is not None:
+                        try:
+                            if conn.in_transaction:
+                                conn.commit()
+                            conn.execute("PRAGMA wal_checkpoint(PASSIVE);")
+                        except sqlite3.Error:
+                            pass
+                finally:
+                    if conn is not None:
+                        try:
+                            conn.close()
+                        except sqlite3.Error:
+                            pass
+            finally:
+                for _task_fn, ev in batch:
+                    try:
+                        self.queue.task_done()
+                    except Exception:
+                        pass
+                    ev.set()
 
     def stop(self):
         self._stop_event.set()
         if self._thread.is_alive():
             self._thread.join(timeout=3.0)
+        key = os.path.normcase(os.path.abspath(str(self.db_path)))
+        with _LOCK:
+            if _QUEUES.get(key) is self:
+                _QUEUES.pop(key, None)
 
 
 def get_writer_queue(db_path: Path) -> WriterQueue:
     """Returns the singleton WriterQueue for the specified database path."""
-    key = os.path.abspath(str(db_path))
+    key = os.path.normcase(os.path.abspath(str(db_path)))
     with _LOCK:
         if key not in _QUEUES or not _QUEUES[key]._thread.is_alive():
-            _QUEUES[key] = WriterQueue(Path(key))
+            _QUEUES[key] = WriterQueue(Path(db_path))
         return _QUEUES[key]
 
 
 def stop_writer_queue(db_path: Path):
     """Stops the WriterQueue for the specified database path and releases connections."""
-    key = os.path.abspath(str(db_path))
+    key = os.path.normcase(os.path.abspath(str(db_path)))
     with _LOCK:
         wq = _QUEUES.pop(key, None)
     if wq:
@@ -200,7 +223,10 @@ def flush_journals(project_root: Path, conn: sqlite3.Connection) -> int:
                 for line in f:
                     if not line.strip():
                         continue
-                    rec = json.loads(line)
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
+                        continue
                     etype = rec.get("type")
                     data = rec.get("data", {})
                     if etype == "fact":
@@ -226,6 +252,10 @@ def flush_journals(project_root: Path, conn: sqlite3.Connection) -> int:
                         dtitle = data.get("title")
                         dcontent = data.get("content")
                         cursor.execute(
+                            "UPDATE project_decisions SET is_active = 0 WHERE LOWER(title) = LOWER(?) AND is_active = 1;",
+                            (dtitle or "",),
+                        )
+                        cursor.execute(
                             """
                             INSERT INTO project_decisions (title, content, category, is_active, created_at, updated_at)
                             VALUES (?, ?, ?, 1, ?, ?);
@@ -238,6 +268,7 @@ def flush_journals(project_root: Path, conn: sqlite3.Connection) -> int:
                                 data.get("now", ""),
                             ),
                         )
+                        cursor.execute("DELETE FROM project_memory_fts WHERE source_table = 'decision' AND LOWER(title_or_key) = LOWER(?);", (dtitle or "",))
                         cursor.execute(
                             """
                             INSERT INTO project_memory_fts (source_table, title_or_key, content)

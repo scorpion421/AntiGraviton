@@ -95,16 +95,19 @@ def extract_skill_sections(content: str) -> list[dict]:
 
 def fetch_single_skill(skill_name: str, db_path: Path = DB_PATH, summary: bool = False, section: str = None) -> dict:
     """Thread-safe single skill reader for parallel executors."""
+    if not skill_name or not str(skill_name).strip("_% "):
+        return {"name": skill_name, "found": False, "content": None, "token_estimate": 0, "tokens": 0}
+    esc = str(skill_name).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     conn = get_thread_connection(db_path)
     try:
         cursor = conn.cursor()
         cursor.execute("""
         SELECT name, plugin_name, category, description, content, token_estimate
         FROM skills
-        WHERE name = ? OR name LIKE ?
+        WHERE is_active = 1 AND (name = ? OR name LIKE ? ESCAPE '\\')
         ORDER BY CASE WHEN name = ? THEN 0 ELSE 1 END
         LIMIT 1;
-        """, (skill_name, f"%{skill_name}%", skill_name))
+        """, (skill_name, f"%{esc}%", skill_name))
         row = cursor.fetchone()
     finally:
         conn.close()
@@ -141,18 +144,18 @@ def get_skills_parallel(skill_names: list[str], max_workers: int = None, as_json
     """Retrieves multiple skills concurrently using ThreadPoolExecutor under SQLite WAL mode."""
     workers = max_workers if (max_workers is not None and max_workers > 0) else resolve_optimal_workers(db_path)
     unique_names = list(dict.fromkeys(skill_names))
-    results = []
+    indexed_results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(unique_names) or 1, workers)) as executor:
-        future_to_name = {executor.submit(fetch_single_skill, name, db_path, summary): name for name in unique_names}
-        for future in concurrent.futures.as_completed(future_to_name):
+        future_to_info = {executor.submit(fetch_single_skill, name, db_path, summary): (idx, name) for idx, name in enumerate(unique_names)}
+        for future in concurrent.futures.as_completed(future_to_info):
+            idx, name = future_to_info[future]
             try:
-                results.append(future.result())
+                indexed_results.append((idx, future.result()))
             except Exception as e:
-                name = future_to_name[future]
-                results.append({"name": name, "found": False, "error": str(e), "token_estimate": 0, "tokens": 0, "content": None})
+                indexed_results.append((idx, {"name": name, "found": False, "error": str(e), "token_estimate": 0, "tokens": 0, "content": None}))
 
-    name_order = {name: i for i, name in enumerate(unique_names)}
-    results.sort(key=lambda r: name_order.get(r.get("name"), 999))
+    indexed_results.sort(key=lambda pair: pair[0])
+    results = [pair[1] for pair in indexed_results]
 
     if as_json:
         print(json.dumps(results, indent=2))
@@ -186,7 +189,7 @@ def search_single_query(query: str, db_path: Path = DB_PATH, limit: int = 4) -> 
         SELECT s.name, s.plugin_name, s.category, s.description, s.token_estimate, rank
         FROM skills_fts f
         JOIN skills s ON f.rowid = s.id
-        WHERE skills_fts MATCH ?
+        WHERE skills_fts MATCH ? AND s.is_active = 1
         ORDER BY rank
         LIMIT ?;
         """, (fts_query, limit))
@@ -234,14 +237,18 @@ def get_cluster(domain: str, max_workers: int = None, as_json: bool = False, sum
     """Retrieves all pre-indexed skills belonging to a domain cluster concurrently in a single call."""
     dom_clean = domain.strip().lower()
     if dom_clean not in SKILL_CLUSTERS:
-        print(f"Error: Unknown skill cluster '{domain}'. Available clusters: {', '.join(SKILL_CLUSTERS.keys())}")
-        return
+        if as_json:
+            print("[]")
+        else:
+            print(f"Error: Unknown skill cluster '{domain}'. Available clusters: {', '.join(SKILL_CLUSTERS.keys())}")
+        return []
 
     workers = max_workers if (max_workers is not None and max_workers > 0) else resolve_optimal_workers(db_path)
     tier_banner = "Ultra Concurrency" if workers >= 16 else f"Pro Concurrency ({workers} threads)"
     cluster_skills = SKILL_CLUSTERS[dom_clean]
-    print(f"[{tier_banner}] Prefetching complete '{dom_clean}' cluster ({len(cluster_skills)} skills: {', '.join(cluster_skills)})...\n")
-    get_skills_parallel(cluster_skills, max_workers=workers, as_json=as_json, summary=summary, db_path=db_path)
+    if not as_json:
+        print(f"[{tier_banner}] Prefetching complete '{dom_clean}' cluster ({len(cluster_skills)} skills: {', '.join(cluster_skills)})...\n")
+    return get_skills_parallel(cluster_skills, max_workers=workers, as_json=as_json, summary=summary, db_path=db_path)
 
 
 def benchmark_concurrency(num_queries: int = 20, max_workers: int = None, db_path: Path = DB_PATH):

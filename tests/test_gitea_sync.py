@@ -2225,6 +2225,170 @@ class TestGiteaSync(unittest.TestCase):
             cli_mod.main()
             mock_ctx.assert_called_once()
 
+    def test_v2_0_7_dual_instance_red_team_round_1_hardening(self):
+        """Verifies all 18 edge cases discovered during Dual-Instance Red-Team Round 1 fuzzing."""
+        import io
+        import json
+        from unittest.mock import patch
+        from skillsdb.core.db import managed_connection
+        from skillsdb.core.detector import parse_antigravity_model_spec
+        from skillsdb.core.guardrails import (
+            _was_file_inspected_before_edit,
+            handle_pre_tool_guardrail_hook,
+            guardrail_pre_tool_hook,
+        )
+        from skillsdb.core.fim import slice_fim, slice_fim_symbol
+        from skillsdb.core.concurrency import get_cluster, get_skills_parallel
+        from skillsdb.memory.project_memory import (
+            get_project_connection,
+            mem_save_fact,
+            mem_save_snapshot,
+            mem_prune,
+            mem_search,
+            mem_save_decision,
+            mem_task_add,
+            mem_task_delete,
+            mem_task_list,
+        )
+        from skillsdb.memory.handoff import create_handoff, accept_handoff, complete_handoff, read_handoff
+        from skillsdb.memory.gitea_releases import parse_keep_a_changelog
+        from skillsdb.search.fts import detect_cwd_hints
+        from skillsdb.search.synonyms import expand_query_with_synonyms
+        from skillsdb.updater.merger import sync_database, _extract_description, parse_skill_frontmatter
+
+        # 1. WriterQueue idle connection release on Windows (zero [WinError 32] on TemporaryDirectory cleanup)
+        with tempfile.TemporaryDirectory() as tmp_proj:
+            tmp_p = Path(tmp_proj)
+            pconn = get_project_connection(tmp_p)
+            try:
+                mem_save_fact(pconn, "test_key", "test_val", db_path=tmp_p / ".agents" / "memory.db")
+            finally:
+                pconn.close()
+        # Reaching here without PermissionError [WinError 32] proves WriterQueue released the DB handle immediately
+
+        # 2. detect_cwd_hints ignores parent path segments like 'AppData' and inspects only leaf + markers
+        fake_appdata = self.test_dir / "AppData" / "Local" / "Temp" / "neutral_workspace"
+        fake_appdata.mkdir(parents=True, exist_ok=True)
+        self.assertEqual(detect_cwd_hints(fake_appdata), [])
+        flutter_dir = self.test_dir / "AppData" / "Local" / "Temp" / "my_app"
+        flutter_dir.mkdir(parents=True, exist_ok=True)
+        (flutter_dir / "pubspec.yaml").write_text("name: my_app\n", encoding="utf-8")
+        self.assertIn("flutter", detect_cwd_hints(flutter_dir))
+
+        # 3. _was_file_inspected_before_edit disambiguates identical basenames & scopes ast-map
+        t_path = self.test_dir / "disambig_epoch.jsonl"
+        root_readme = self.test_dir / "README.md"
+        sub_dir = self.test_dir / "plugin"
+        sub_dir.mkdir(parents=True, exist_ok=True)
+        sub_readme = sub_dir / "README.md"
+        other_py = self.test_dir / "other_mod.py"
+        target_py = self.test_dir / "target_mod.py"
+        for p in (root_readme, sub_readme, other_py, target_py):
+            p.write_text("\n".join(f"# line {i}" for i in range(300)) + "\n", encoding="utf-8")
+
+        t_path.write_text(
+            "\n".join([
+                json.dumps({"step_index": 1, "source": "USER_EXPLICIT", "type": "USER_INPUT", "content": "Edit files"}),
+                json.dumps({
+                    "step_index": 2,
+                    "source": "MODEL",
+                    "type": "PLANNER_RESPONSE",
+                    "tool_calls": [
+                        {"name": "read_file", "args": {"Path": str(root_readme)}},
+                        {"name": "run_command", "args": {"CommandLine": "skillsdb ast-map other_mod.py"}},
+                    ],
+                }),
+            ]) + "\n",
+            encoding="utf-8",
+        )
+        self.assertTrue(_was_file_inspected_before_edit(t_path, root_readme))
+        self.assertFalse(_was_file_inspected_before_edit(t_path, sub_readme))
+        self.assertTrue(_was_file_inspected_before_edit(t_path, other_py))
+        self.assertFalse(_was_file_inspected_before_edit(t_path, target_py))
+
+        # 4. WaitMsBeforeAsync=500 auto-upgraded to 10000 for non-daemon run_command
+        self.assertIs(guardrail_pre_tool_hook, handle_pre_tool_guardrail_hook)
+        wait_req = json.dumps({
+            "toolName": "run_command",
+            "toolInput": {"CommandLine": "python -V", "WaitMsBeforeAsync": 500, "IsDaemon": False},
+        })
+        out_wait = io.StringIO()
+        with patch("sys.stdin", io.StringIO(wait_req)), patch("sys.stdout", out_wait):
+            handle_pre_tool_guardrail_hook()
+        res_wait = json.loads(out_wait.getvalue())
+        self.assertEqual(res_wait["decision"], "allow")
+        self.assertEqual(res_wait.get("overwrite", {}).get("WaitMsBeforeAsync"), 10000)
+
+        # 5. FIM Class.method resolution on non-Python files & decorator inclusion in Python
+        ts_file = self.test_dir / "service.ts"
+        ts_file.write_text(
+            "export class ClassA {\n  run() {\n    return 'A';\n  }\n}\n\nexport class ClassB {\n  run() {\n    return 'B';\n  }\n}\n",
+            encoding="utf-8",
+        )
+        fim_ts = slice_fim_symbol(ts_file, "ClassB.run", prefix_lines=2, suffix_lines=2)
+        self.assertEqual(fim_ts["target_line"], 8)
+        self.assertIn("total_lines", fim_ts)
+        self.assertEqual(fim_ts["total_lines"], fim_ts["total_file_lines"])
+
+        dec_py = self.test_dir / "decorated.py"
+        dec_py.write_text(
+            "# header\n@dec_one\n@dec_two\n@dec_three\ndef my_handler(x):\n    return x + 1\n",
+            encoding="utf-8",
+        )
+        fim_dec = slice_fim_symbol(dec_py, "my_handler", prefix_lines=1, suffix_lines=2)
+        self.assertIn("@dec_one", fim_dec["prefix_code"])
+
+        # 6. mem_prune cleans up FTS ghost entries & mem_save_decision supersedes duplicate titles
+        pconn = get_project_connection(self.test_dir)
+        try:
+            for i in range(4):
+                mem_save_snapshot(pconn, f"UniquePruneGhostToken_{i}", auto_commit=False)
+            mem_prune(pconn, max_snapshots=1, max_age_days=30)
+            fts_ghost = pconn.execute(
+                "SELECT count(*) FROM project_memory_fts WHERE content MATCH '\"UniquePruneGhostToken_0\"';"
+            ).fetchone()[0]
+            self.assertEqual(fts_ghost, 0)
+
+            mem_save_decision(pconn, "Auth Strategy", "Use JWT v1", "security")
+            mem_save_decision(pconn, "Auth Strategy", "Use OAuth2 PKCE v2", "security")
+            active_decs = pconn.execute(
+                "SELECT content FROM project_decisions WHERE title = 'Auth Strategy' AND is_active = 1;"
+            ).fetchall()
+            self.assertEqual(len(active_decs), 1)
+            self.assertEqual(active_decs[0][0], "Use OAuth2 PKCE v2")
+
+            # 7. mem_task_delete & handoff accept/complete convenience helpers
+            t_id = mem_task_add(pconn, "Temporary Red-Team Task")
+            ho = create_handoff(t_id, "Auditor", project_root=self.test_dir)
+            self.assertTrue(accept_handoff(ho["id"], project_root=self.test_dir))
+            self.assertEqual(read_handoff(ho["id"], project_root=self.test_dir)["status"], "accepted")
+            self.assertTrue(complete_handoff(ho["id"], project_root=self.test_dir))
+            self.assertEqual(read_handoff(ho["id"], project_root=self.test_dir)["status"], "completed")
+            self.assertTrue(mem_task_delete(pconn, t_id))
+        finally:
+            pconn.close()
+
+        # 8. 2-character technical synonyms ('ui', 'db') & pure JSON output in get_cluster(as_json=True)
+        with managed_connection(self.db_path) as cconn:
+            expanded = expand_query_with_synonyms(cconn, "ui db in to")
+        self.assertIn("database", expanded)
+        self.assertNotIn("in", expanded)
+        buf_cluster = io.StringIO()
+        with patch("sys.stdout", buf_cluster):
+            c_res = get_cluster("flutter", max_workers=2, as_json=True, summary=True, db_path=self.db_path)
+        parsed_cluster = json.loads(buf_cluster.getvalue())
+        self.assertIsInstance(parsed_cluster, list)
+        self.assertEqual(len(c_res), len(parsed_cluster))
+
+        # 9. parse_keep_a_changelog with str path & [vX.Y.Z] header + _extract_description alias + model spec guard
+        cl_file = self.test_dir / "CHANGELOG_V.md"
+        cl_file.write_text("# Changelog\n\n## [v1.2.3] - 2026-11-05\n\n### Added\n- Feature X.\n", encoding="utf-8")
+        cl_parsed = parse_keep_a_changelog(str(cl_file))
+        self.assertEqual(cl_parsed[0]["version"], "1.2.3")
+        self.assertIs(_extract_description, parse_skill_frontmatter)
+        self.assertIsNone(parse_antigravity_model_spec("gemini-2.5-flash"))
+        self.assertIsNotNone(parse_antigravity_model_spec("gemini-3.8-flash"))
+
 
 if __name__ == "__main__":
     unittest.main()

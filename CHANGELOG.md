@@ -5,6 +5,38 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.7] - 2026-11-05
+
+### Added
+- **CLI & Python task deletion and handoff lifecycle shortcuts (`skillsdb/memory/project_memory.py`, `skillsdb/memory/handoff.py`, `skillsdb/cli.py`, `v4.0.7`)**:
+  - Added `mem_task_delete(conn, task_id, db_path=None)` and CLI subcommand `skillsdb mem-task-delete <id>` (alias `mem-delete-task`) for surgical task removal.
+  - Added `accept_handoff(handoff_id, project_root=None)` and `complete_handoff(handoff_id, project_root=None)` plus CLI subcommands `skillsdb handoff accept <id>` and `skillsdb handoff complete <id>`.
+  - Exported `guardrail_pre_tool_hook` alias in `skillsdb/core/guardrails.py` and `_extract_description` alias in `skillsdb/updater/merger.py`.
+
+### Changed
+- **Upgraded `WaitMsBeforeAsync` synchronous threshold across all non-daemon commands (`skillsdb/core/guardrails.py`, `v4.0.7`)**:
+  - Relaxed the `PreToolUse` `WaitMsBeforeAsync` auto-upgrade range from `1000 <= wait_int < 10000` to `0 < wait_int < 10000` whenever `IsDaemon` is `False`, preventing `WaitMsBeforeAsync=500` on normal commands from prematurely backgrounding 1-second scripts into multi-turn wait loops.
+- **2-character technical token expansion in `expand_query_with_synonyms()` and pure JSON output in `get_cluster()` (`skillsdb/search/synonyms.py`, `skillsdb/core/concurrency.py`, `v4.0.7`)**:
+  - Lowered the tokenizer threshold in `expand_query_with_synonyms()` from `{3,}` to `{2,}` (matching `build_safe_fts_query()`) and added 2-character domain synonyms (`"ui"`, `"db"`, `"ci"`, `"cd"`, `"ai"`).
+  - Suppressed the human-readable stdout banner in `get_cluster()` when `as_json=True` and preserved input skill ordering in `get_skills_parallel()`.
+
+### Fixed
+- **Windows `[WinError 32]` SQLite connection release and case-normalized queue keys in `WriterQueue` (`skillsdb/memory/writer_queue.py`, `v4.0.7`)**:
+  - Fixed a Windows file-locking race condition where `WriterQueue._worker()` held an open SQLite connection to `.agents/memory.db` while idle or signaled `done_event` before `conn.close()` completed, causing `PermissionError: [WinError 32]` when temporary workspace directories were cleaned up immediately after `mem_save_fact` or `mem_task_add`. `WriterQueue._worker()` now drains each active batch, checkpoints (`PASSIVE`), closes `conn` in `finally:`, and signals `done_event` only after the file handle is released.
+  - Normalized `_QUEUES` keys with `os.path.normcase(os.path.abspath(...))`, added automatic dead-worker recovery in `execute_write()`, and isolated line-level `json.loads()` in `flush_journals()`.
+- **Ancestor marker discovery, system-path noise exclusion, and SQL `LIKE` wildcard escaping (`skillsdb/search/fts.py`, `skillsdb/core/concurrency.py`, `v4.0.7`)**:
+  - Fixed `detect_cwd_hints()` matching `"data"` inside Windows system paths (`C:\Users\...\AppData\Local\Temp\...`) by excluding system folder names (`appdata`, `local`, `roaming`, `temp`, `users`) while inspecting up to 3 ancestor directories for project markers (`pubspec.yaml`, `dbt_project.yml`, `Dockerfile`, `package.json`, `firebase.json`).
+  - Added `_escape_sql_like()` (`ESCAPE '\'`) and `is_active = 1` filtering across `get_skill()`, `get_rule()`, `suggest_skills()`, `search()`, `fetch_single_skill()`, and `search_single_query()`.
+- **Path disambiguation, scoped `ast-map` verification, and user-prompt model-hijack prevention (`skillsdb/core/guardrails.py`, `skillsdb/core/detector.py`, `v4.0.7`)**:
+  - Fixed `_was_file_inspected_before_edit()` so identical basenames in different directories (`README.md` vs. `plugin/README.md`) are compared by normalized path, `skillsdb ast-map` commands are checked per `CommandLine` segment, `USER_INPUT` lines are ignored, and `write_file` / `write_to_file` on existing `> 250`-line files is also guarded.
+  - Updated `detect_model_and_pool()` in `detector.py` to skip `USER_INPUT` lines during transcript header scanning and restricted `parse_antigravity_model_spec()` so external `gemini-2.5-flash` strings are not misclassified as `gemini-3.8-flash`.
+- **Multi-language `Class.method` resolution and `@decorator` prefix window inclusion in `slice_fim_symbol()` (`skillsdb/core/fim.py`, `v4.0.7`)**:
+  - Added two-stage `ClassName.method_name` resolution to the regex fallback in `slice_fim_symbol()` for non-Python files (`.ts`, `.kt`, `.dart`, `.cs`, `.go`, `.rs`) and syntax-broken Python files, automatically expanded `prefix_lines` when `symbol_start_line < match_line` so leading `@decorator` lines are never clipped, and included `"total_lines"` alongside `"total_file_lines"`.
+- **FTS5 ghost cleanup in `mem_prune()`, duplicate-title superseding in `mem_save_decision()`, `[vX.Y.Z]` changelog parsing, and stale WAL cleanup in `sync_database()` (`skillsdb/memory/project_memory.py`, `skillsdb/memory/gitea_releases.py`, `skillsdb/updater/merger.py`, `v4.0.7`)**:
+  - Synchronized `project_memory_fts` during `mem_prune()` so pruned snapshots never remain as ghost FTS5 hits in `mem_search()`.
+  - Updated `mem_save_decision()` to supersede existing active decisions with the same `title` (`is_active = 0`) and replace their FTS entry instead of creating duplicate active rows.
+  - Coerced `changelog_path = Path(changelog_path)` and accepted optional `[vX.Y.Z]` tag prefixes in `parse_keep_a_changelog()`, and unlinked stale `-wal`/`-shm` files before copying in `sync_database(conn, "pull")`.
+
 ## [2.0.6] - 2026-11-05
 
 ### Added

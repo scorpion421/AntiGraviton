@@ -721,7 +721,7 @@ def _was_file_region_read_in_current_epoch(
     return False
 
 
-def _was_file_inspected_before_edit(payload: Dict[str, Any], fpath: Path) -> bool:
+def _was_file_inspected_before_edit(payload: Any, fpath: Path) -> bool:
     """
     Returns True if fpath (> 250 lines) was already read ('read_file' / 'view_file'),
     AST-mapped ('ast-map' / 'skillsdb_ast_map'), FIM-sliced ('fim' / 'skillsdb_fim_slice'),
@@ -730,6 +730,8 @@ def _was_file_inspected_before_edit(payload: Dict[str, Any], fpath: Path) -> boo
     If no transcript exists in payload, returns True so standalone unit tests are unaffected.
     """
     try:
+        if isinstance(payload, (str, Path)):
+            payload = {"transcriptPath": str(payload)}
         _, t_path = _resolve_hook_cid_and_transcript(payload)
         if not t_path or not t_path.exists():
             return True
@@ -741,6 +743,21 @@ def _was_file_inspected_before_edit(payload: Dict[str, Any], fpath: Path) -> boo
             return True
 
         fname_low = fpath.name.lower()
+        bs = chr(92)
+        fpath_norm = os.path.normcase(os.path.abspath(str(fpath))).replace("/", bs)
+        parent_low = fpath.parent.name.lower() if fpath.parent else ""
+        path_arg_re = re.compile(r'"(?:Path|TargetFile|AbsolutePath|path|file_path|file|target_file)"\s*:\s*"([^"]+)"')
+        cmd_arg_re = re.compile(r'"(?:CommandLine|command)"\s*:\s*"((?:\\.|[^"\\])*)"')
+
+        def _path_matches_target(candidate_str: str) -> bool:
+            c_clean = candidate_str.replace(bs + bs, bs).replace("/", bs).strip()
+            if Path(c_clean).name.lower() != fname_low:
+                return False
+            if bs not in c_clean:
+                return True
+            c_norm = os.path.normcase(os.path.abspath(c_clean)).replace("/", bs)
+            return c_norm == fpath_norm or fpath_norm.endswith(bs + c_clean.lstrip(bs).lower())
+
         has_valid_epoch_step = False
         for rline in reversed(tail_lines):
             if "<CONTEXT_SUMMARY>" in rline:
@@ -748,14 +765,35 @@ def _was_file_inspected_before_edit(payload: Dict[str, Any], fpath: Path) -> boo
             rlow = rline.lower()
             if '"user_input"' in rlow or '"user_explicit"' in rlow or '"planner_response"' in rlow:
                 has_valid_epoch_step = True
+            # Never treat plain user prompt text as a tool inspection of the file
+            if ('"user_input"' in rlow or '"user_explicit"' in rlow) and '"planner_response"' not in rlow:
+                continue
             if "ast-map" in rlow or "skillsdb_ast_map" in rlow:
-                return True
+                cmd_segments = [m.lower() for m in cmd_arg_re.findall(rline)]
+                ast_segments = [s for s in cmd_segments if "ast-map" in s]
+                if not ast_segments and ("ast-map" in rlow or "skillsdb_ast_map" in rlow):
+                    ast_segments = [rlow]
+                for aseg in ast_segments:
+                    if fname_low in aseg:
+                        # Check if a directory-qualified path was given in ast-map
+                        dir_tokens = re.findall(r"[\w.\-/\\]+" + re.escape(fname_low), aseg)
+                        if dir_tokens and any(("/" in dt or bs in dt) for dt in dir_tokens):
+                            if any(_path_matches_target(dt) for dt in dir_tokens):
+                                return True
+                        else:
+                            return True
+                    elif not re.search(r"\b[\w\-]+\.(?:py|ts|tsx|js|jsx|kt|kts|dart|cs|go|rs|java|cpp|c|h|ps1|md)\b", aseg):
+                        return True
+                    elif parent_low and parent_low in aseg and ("*" in aseg or f"{parent_low}/" in aseg or f"{parent_low}\\" in aseg):
+                        return True
             if fname_low in rlow and any(
                 kw in rlow
                 for kw in (
                     "read_file",
                     "view_file",
-                    "fim",
+                    "fim slice",
+                    "fim-slice",
+                    "skillsdb_fim_slice",
                     "gemini-digest",
                     "gemini_digest",
                     "edit_file",
@@ -765,7 +803,13 @@ def _was_file_inspected_before_edit(payload: Dict[str, Any], fpath: Path) -> boo
                     "multi_replace_file_content",
                 )
             ):
-                return True
+                # Disambiguate files with identical basenames in different directories (e.g. README.md vs plugin/README.md)
+                matched_paths = path_arg_re.findall(rline)
+                if matched_paths:
+                    if any(_path_matches_target(mp) for mp in matched_paths):
+                        return True
+                else:
+                    return True
         if not has_valid_epoch_step:
             return True
         return False
@@ -1060,7 +1104,7 @@ def handle_pre_tool_guardrail_hook():
                     wait_val = args.get("WaitMsBeforeAsync")
                     if wait_val is not None:
                         wait_int = int(wait_val)
-                        if 1000 <= wait_int < 10000:
+                        if 0 < wait_int < 10000:
                             out_val = "10000" if isinstance(wait_val, str) else 10000
                             print(json.dumps({
                                 "decision": "allow",
@@ -1071,7 +1115,7 @@ def handle_pre_tool_guardrail_hook():
                     pass
 
         # B. AST-First & Read-Before-Edit Guard for files > 250 lines (Rule 5 / Rule 7)
-        if tool_name in ("edit_file", "replace_file_content", "multi_replace_file_content") and target_file != "<tool_input>":
+        if tool_name in ("edit_file", "replace_file_content", "multi_replace_file_content", "write_file", "write_to_file") and target_file != "<tool_input>":
             try:
                 edit_fpath = Path(target_file)
                 if (
@@ -1127,3 +1171,6 @@ def handle_pre_tool_guardrail_hook():
         pass
 
     print(json.dumps({"decision": "allow"}))
+
+
+guardrail_pre_tool_hook = handle_pre_tool_guardrail_hook

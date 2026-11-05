@@ -94,15 +94,18 @@ def slice_fim(
     return {
         "file": str(fpath),
         "target_line": (t_idx + 1) if total_lines > 0 else 0,
-        "prefix_start_line": (prefix_start + 1) if total_lines > 0 else 0,
-        "prefix_end_line": max(prefix_start + 1, t_idx) if total_lines > 0 else 0,
-        "suffix_start_line": min(suffix_end, t_idx + 2) if total_lines > 0 else 0,
-        "suffix_end_line": suffix_end,
+        "prefix_start_line": (prefix_start + 1) if (total_lines > 0 and t_idx > 0 and prefix_chunk) else 0,
+        "prefix_end_line": max(prefix_start + 1, t_idx) if (total_lines > 0 and t_idx > 0 and prefix_chunk) else 0,
+        "suffix_start_line": min(suffix_end, t_idx + 2) if (total_lines > 0 and (t_idx + 1) < suffix_end and suffix_chunk) else 0,
+        "suffix_end_line": suffix_end if (total_lines > 0 and (t_idx + 1) < suffix_end and suffix_chunk) else 0,
         "total_file_lines": total_lines,
+        "total_lines": total_lines,
         "prefix": prefix_chunk,
+        "prefix_code": prefix_chunk,
         "middle": target_line_content,
         "target_line_content": target_line_content,
         "suffix": suffix_chunk,
+        "suffix_code": suffix_chunk,
         "full_file_tokens": full_tokens,
         "sliced_tokens": sliced_tokens,
         "tokens_saved": tokens_saved,
@@ -167,6 +170,24 @@ def slice_fim_symbol(
         except Exception:
             pass
 
+    if match_line is None and "." in symbol_name:
+        target_cls, target_member = symbol_name.split(".", 1)
+        cls_pat = re.compile(rf"\b(?:class|struct|interface|enum|impl|object|extension)\s+{re.escape(target_cls)}\b")
+        next_cls_pat = re.compile(r"^\s*(?:export\s+|public\s+|private\s+|internal\s+|abstract\s+|final\s+)*(?:class|struct|interface|enum|impl|object)\s+\w+")
+        mem_pat = re.compile(rf"\b{re.escape(target_member)}\s*(?:\(|=|:|<)")
+        in_target_cls = False
+        for idx, line in enumerate(all_lines, 1):
+            if not in_target_cls:
+                if cls_pat.search(line):
+                    in_target_cls = True
+            else:
+                if next_cls_pat.search(line) and not cls_pat.search(line):
+                    in_target_cls = False
+                    continue
+                if mem_pat.search(line) or re.search(rf"\b{re.escape(target_member)}\b", line):
+                    match_line = idx
+                    break
+
     if match_line is None:
         # Search for def, async def, class, func, fn, fun, struct, enum, const, let, var symbol patterns
         pat = re.compile(rf"\b(?:(?:async\s+)?def|class|function|func|fn|fun|struct|enum|var|let|const|val|interface|type)\s+{re.escape(symbol_name)}\b")
@@ -185,7 +206,11 @@ def slice_fim_symbol(
     if match_line is None:
         raise ValueError(f"Symbol '{symbol_name}' not found in {file_path}")
 
-    res = slice_fim(fpath, match_line, prefix_lines=prefix_lines, suffix_lines=suffix_lines)
+    effective_prefix = prefix_lines
+    if symbol_start_line is not None and symbol_start_line < match_line:
+        effective_prefix = max(prefix_lines, (match_line - symbol_start_line) + max(0, prefix_lines))
+
+    res = slice_fim(fpath, match_line, prefix_lines=effective_prefix, suffix_lines=suffix_lines)
     res["symbol"] = symbol_name
     if symbol_start_line is not None:
         res["symbol_start_line"] = symbol_start_line

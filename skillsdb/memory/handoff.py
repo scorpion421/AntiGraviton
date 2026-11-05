@@ -217,7 +217,14 @@ def read_handoff(handoff_id: str, project_root: Optional[Path] = None) -> Option
 
 def update_handoff(handoff_id: str, status: str, project_root: Optional[Path] = None) -> bool:
     """Updates the lifecycle status of a handoff (pending, accepted, completed, rejected)."""
-    status_clean = status.lower()
+    status_aliases = {
+        "in_progress": "accepted",
+        "active": "accepted",
+        "done": "completed",
+        "cancelled": "rejected",
+        "canceled": "rejected",
+    }
+    status_clean = status_aliases.get((status or "").strip().lower(), (status or "").strip().lower())
     if status_clean not in ("pending", "accepted", "completed", "rejected"):
         print(f"Error: Invalid handoff status '{status}'. Allowed: pending, accepted, completed, rejected")
         return False
@@ -239,3 +246,13 @@ def update_handoff(handoff_id: str, status: str, project_root: Optional[Path] = 
         return changed
     finally:
         conn.close()
+
+
+def accept_handoff(handoff_id: str, project_root: Optional[Path] = None) -> bool:
+    """Marks a pending handoff as accepted."""
+    return update_handoff(handoff_id, "accepted", project_root=project_root)
+
+
+def complete_handoff(handoff_id: str, project_root: Optional[Path] = None) -> bool:
+    """Marks a handoff as completed."""
+    return update_handoff(handoff_id, "completed", project_root=project_root)

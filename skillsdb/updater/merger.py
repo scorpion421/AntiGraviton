@@ -375,6 +375,9 @@ def parse_skill_frontmatter(content: str) -> tuple[str, str]:
     return name, description
 
 
+_extract_description = parse_skill_frontmatter
+
+
 def compile_skill_directory_content(skill_folder: Path, default_plugin: str = "builtin") -> tuple[str, str, str]:
     """
     Reads SKILL.md from skill_folder and appends any bundled sub-documentation
@@ -582,6 +585,11 @@ def sync_database(conn: sqlite3.Connection, direction: str, remote_path_str: str
             bak_path = DB_PATH.with_suffix(f".bak_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
             shutil.copy2(DB_PATH, bak_path)
             print(f"Created local backup at: {bak_path}")
+        for suffix in ("-wal", "-shm"):
+            try:
+                Path(f"{DB_PATH}{suffix}").unlink(missing_ok=True)
+            except OSError:
+                pass
         shutil.copy2(remote_path, DB_PATH)
         print(f"Successfully pulled database from network share:\n{remote_path} -> {DB_PATH}")
 

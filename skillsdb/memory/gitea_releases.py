@@ -27,6 +27,7 @@ def parse_keep_a_changelog(changelog_path: Path) -> List[Dict[str, str]]:
     Parses a CHANGELOG.md formatted according to Keep a Changelog 1.1.0 (https://keepachangelog.com/en/1.1.0/).
     Returns a list of dicts (newest first): [{'version': '1.0.6', 'tag': 'v1.0.6', 'date': '2026-10-19', 'body': '...'}].
     """
+    changelog_path = Path(changelog_path)
     if not changelog_path.exists():
         return []
     try:
@@ -39,7 +40,7 @@ def parse_keep_a_changelog(changelog_path: Path) -> List[Dict[str, str]]:
     current_date: str = ""
     current_lines: List[str] = []
 
-    ver_re = re.compile(r"^## \[(\d+\.\d+\.\d+(?:-[0-9A-Za-z.\-]+)?)\](?: - (\d{4}-\d{2}-\d{2}))?\s*$")
+    ver_re = re.compile(r"^## \[[vV]?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.\-]+)?)\](?: - (\d{4}-\d{2}-\d{2}))?\s*$")
     link_ref_re = re.compile(r"^\[[^\]]+\]:\s*https?://")
 
     def _flush():

@@ -16,6 +16,8 @@ from .merger import (
     learn_rule,
     sync_database,
     doctor,
+    parse_skill_frontmatter,
+    _extract_description,
 )
 
 __all__ = [
@@ -32,4 +34,6 @@ __all__ = [
     "learn_rule",
     "sync_database",
     "doctor",
+    "parse_skill_frontmatter",
+    "_extract_description",
 ]

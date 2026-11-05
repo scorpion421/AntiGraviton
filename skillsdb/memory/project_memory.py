@@ -275,11 +275,13 @@ def mem_save_decision(
     if target_path and target_path.is_file():
         wq = get_writer_queue(target_path)
         def _write(cur):
+            cur.execute("UPDATE project_decisions SET is_active = 0, updated_at = ? WHERE title = ? AND is_active = 1;", (now_iso, title))
             cur.execute("""
             INSERT INTO project_decisions (title, content, category, is_active, created_at, updated_at)
             VALUES (?, ?, ?, 1, ?, ?);
             """, (title, full_content, category, now_iso, now_iso))
             row_id = cur.lastrowid
+            cur.execute("DELETE FROM project_memory_fts WHERE source_table = 'decision' AND title_or_key = ?;", (title,))
             cur.execute("""
             INSERT INTO project_memory_fts (source_table, title_or_key, content)
             VALUES ('decision', ?, ?);
@@ -290,11 +292,13 @@ def mem_save_decision(
         return
 
     cursor = conn.cursor()
+    cursor.execute("UPDATE project_decisions SET is_active = 0, updated_at = ? WHERE title = ? AND is_active = 1;", (now_iso, title))
     cursor.execute("""
     INSERT INTO project_decisions (title, content, category, is_active, created_at, updated_at)
     VALUES (?, ?, ?, 1, ?, ?);
     """, (title, full_content, category, now_iso, now_iso))
     row_id = cursor.lastrowid
+    cursor.execute("DELETE FROM project_memory_fts WHERE source_table = 'decision' AND title_or_key = ?;", (title,))
     cursor.execute("""
     INSERT INTO project_memory_fts (source_table, title_or_key, content)
     VALUES ('decision', ?, ?);
@@ -723,6 +727,32 @@ def mem_task_clear(conn: sqlite3.Connection, only_completed: bool = True, db_pat
     print(f"Cleared {deleted} {target_str} from project task board.")
 
 
+def mem_task_delete(conn: sqlite3.Connection, task_id: int, db_path: Path = None) -> bool:
+    """Deletes a single task by ID and removes its entry from project_memory_fts."""
+    target_path = _resolve_db_file(conn, db_path)
+    if conn and conn.in_transaction:
+        conn.commit()
+    if target_path and target_path.is_file():
+        wq = get_writer_queue(target_path)
+        def _write(cur):
+            cur.execute("DELETE FROM project_tasks WHERE id = ?;", (task_id,))
+            deleted_rows = cur.rowcount
+            cur.execute("DELETE FROM project_memory_fts WHERE source_table = 'task' AND title_or_key LIKE ?;", (f"Task #{task_id}:%",))
+            return deleted_rows > 0
+        deleted = wq.execute_write(_write)
+    else:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM project_tasks WHERE id = ?;", (task_id,))
+        deleted = cursor.rowcount > 0
+        cursor.execute("DELETE FROM project_memory_fts WHERE source_table = 'task' AND title_or_key LIKE ?;", (f"Task #{task_id}:%",))
+        conn.commit()
+    if deleted:
+        print(f"Task #{task_id} deleted from project task board.")
+    else:
+        print(f"Error: Task ID {task_id} not found.")
+    return deleted
+
+
 def mem_compact(conn: sqlite3.Connection, summary: str = None, next_steps: str = None, archive_completed: bool = True, project_root: Path = None, db_path: Path = None, silent: bool = False, auto_commit: bool = True):
     """Compacts episodic project memory into a distilled snapshot and vacuums DB."""
     root = project_root or find_project_root()
@@ -918,6 +948,23 @@ def mem_prune(conn: sqlite3.Connection, max_snapshots: int = 10, max_age_days: i
         excess_ids = all_remaining[max_snapshots:]
         cursor.executemany("DELETE FROM session_snapshots WHERE id = ?;", [(eid,) for eid in excess_ids])
         pruned_expired += len(excess_ids)
+
+    if pruned_orphans > 0 or pruned_expired > 0:
+        cursor.execute("DELETE FROM project_memory_fts WHERE source_table = 'snapshot';")
+        cursor.execute("SELECT conversation_id, summary, next_steps, files_touched, commit_hash FROM session_snapshots ORDER BY id ASC;")
+        for rem in cursor.fetchall():
+            rem_cid = rem["conversation_id"] or "default"
+            parts = [rem["summary"] or ""]
+            if rem["next_steps"]:
+                parts.append(rem["next_steps"])
+            if rem["files_touched"]:
+                parts.append(rem["files_touched"])
+            if rem["commit_hash"]:
+                parts.append(rem["commit_hash"][:7])
+            cursor.execute(
+                "INSERT INTO project_memory_fts (source_table, title_or_key, content) VALUES ('snapshot', ?, ?);",
+                (rem_cid, " ".join(p for p in parts if p)),
+            )
 
     conn.commit()
     cursor.execute("PRAGMA incremental_vacuum;")

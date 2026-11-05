@@ -42,6 +42,8 @@ from .memory.handoff import (
     list_handoffs,
     read_handoff,
     update_handoff,
+    accept_handoff,
+    complete_handoff,
 )
 from .memory.agent_templates import (
     init_agent_templates,
@@ -87,6 +89,7 @@ from .memory.project_memory import (
     mem_reconcile,
     mem_task_add,
     mem_task_update,
+    mem_task_delete,
     mem_task_list,
     mem_task_clear,
     mem_compact,
@@ -259,6 +262,14 @@ def build_parser() -> argparse.ArgumentParser:
     ho_update.add_argument("status", choices=["pending", "accepted", "completed", "rejected"], help="New status")
     ho_update.add_argument("--project", default=None, help="Project root directory (optional)")
 
+    ho_accept = ho_sub.add_parser("accept", help="Mark a handoff as accepted")
+    ho_accept.add_argument("id", help="Handoff ID")
+    ho_accept.add_argument("--project", default=None, help="Project root directory (optional)")
+
+    ho_complete = ho_sub.add_parser("complete", help="Mark a handoff as completed")
+    ho_complete.add_argument("id", help="Handoff ID")
+    ho_complete.add_argument("--project", default=None, help="Project root directory (optional)")
+
     # Project Memory Commands
     mem_init_parser = subparsers.add_parser("mem-init", help="Initialize project memory database (.agents/memory.db)")
     mem_init_parser.add_argument("--project", default=None, help="Project root directory (optional)")
@@ -321,6 +332,10 @@ def build_parser() -> argparse.ArgumentParser:
     mem_task_clear_parser = subparsers.add_parser("mem-task-clear", aliases=["mem-clear-tasks"], help="Clear completed tasks from task board")
     mem_task_clear_parser.add_argument("--all", action="store_true", help="Clear all tasks, not just completed")
     mem_task_clear_parser.add_argument("--project", default=None, help="Project root directory (optional)")
+
+    mem_task_del_parser = subparsers.add_parser("mem-task-delete", aliases=["mem-delete-task"], help="Delete a specific task by ID from the project task board")
+    mem_task_del_parser.add_argument("id", type=int, help="Task ID to delete")
+    mem_task_del_parser.add_argument("--project", default=None, help="Project root directory (optional)")
 
     mem_compact_parser = subparsers.add_parser("mem-compact", help="Compact episodic project memory and vacuum database")
     mem_compact_parser.add_argument("--summary", default=None, help="Optional custom summary for compacted snapshot")
@@ -641,7 +656,18 @@ def main(argv: list[str] = None):
                 print(f"Failed to update handoff '{args.id}'.")
                 sys.exit(1)
             return
-        print("Usage: skillsdb handoff {create,list,read,update} ...")
+
+        elif args.ho_action in ("accept", "complete"):
+            target_status = "accepted" if args.ho_action == "accept" else "completed"
+            fn = accept_handoff if args.ho_action == "accept" else complete_handoff
+            ok = fn(args.id, project_root=proj_p)
+            if ok:
+                print(f"Handoff '{args.id}' updated -> [{target_status.upper()}]")
+            else:
+                print(f"Failed to update handoff '{args.id}'.")
+                sys.exit(1)
+            return
+        print("Usage: skillsdb handoff {create,list,read,update,accept,complete} ...")
         return
 
     # Route Gitea commands
@@ -780,6 +806,8 @@ def main(argv: list[str] = None):
                 mem_task_list(pconn, status=args.status, as_json=args.json)
             elif args.command in ("mem-task-clear", "mem-clear-tasks"):
                 mem_task_clear(pconn, only_completed=not getattr(args, "all", False))
+            elif args.command in ("mem-task-delete", "mem-delete-task"):
+                mem_task_delete(pconn, args.id)
             elif args.command == "mem-compact":
                 mem_compact(pconn, summary=args.summary, next_steps=args.next_steps, archive_completed=not getattr(args, "keep_completed", False), project_root=proj_root)
             elif args.command in ("mem-get-context", "context"):

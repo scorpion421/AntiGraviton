@@ -3,6 +3,7 @@ Full-Text Search (FTS5) queries, skill suggestions, rules retrieval, and exports
 """
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 from ..config import TIER_ULTRA, estimate_tokens
@@ -11,25 +12,54 @@ from ..core.concurrency import extract_skill_sections
 from .synonyms import expand_query_with_synonyms, build_safe_fts_query
 
 
+_SYSTEM_PATH_NOISE = frozenset({
+    "appdata", "local", "roaming", "temp", "tmp", "users", "home", "var", "opt", "programdata", "windows",
+})
+
+
+def _escape_sql_like(term: str) -> str:
+    return (term or "").replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def detect_cwd_hints(cwd_path: Path = None) -> list[str]:
-    """Detects domain hints from current working directory path and project markers."""
+    """Detects domain hints from the active workspace leaf/parent directory names and explicit project marker files."""
     cwd = (cwd_path or Path.cwd()).resolve()
     hints = []
-    path_str = str(cwd).lower()
-    parts = [p.lower() for p in cwd.parts]
-    if "flutter" in path_str or "lib" in parts or (cwd / "pubspec.yaml").exists():
+    check_dirs = [cwd, *list(cwd.parents)[:3]]
+    dir_tokens: set[str] = set()
+    for idx, d in enumerate(check_dirs[:3]):
+        dname = d.name.lower()
+        if not dname or dname in _SYSTEM_PATH_NOISE:
+            continue
+        toks = set(re.findall(r"[a-z0-9]+", dname))
+        if toks & _SYSTEM_PATH_NOISE:
+            continue
+        if idx <= 2:
+            dir_tokens.update(toks)
+
+    def _has_marker(*names: str) -> bool:
+        return any((d / n).exists() for d in check_dirs for n in names)
+
+    if "flutter" in dir_tokens or "dart" in dir_tokens or _has_marker("pubspec.yaml"):
         hints.extend(["flutter", "dart", "widget"])
-    if "data" in path_str or "sql" in parts or "bigquery" in path_str or (cwd / "dbt_project.yml").exists():
+    if (
+        "bigquery" in dir_tokens
+        or "sql" in dir_tokens
+        or "dbt" in dir_tokens
+        or "analytics" in dir_tokens
+        or "data" in dir_tokens
+        or _has_marker("dbt_project.yml")
+    ):
         hints.extend(["bigquery", "sql", "data", "dbt"])
-    if "docker" in path_str or (cwd / "Dockerfile").exists() or (cwd / "compose.yaml").exists():
+    if "docker" in dir_tokens or _has_marker("Dockerfile", "compose.yaml", "docker-compose.yml"):
         hints.extend(["docker", "container"])
-    if "android" in path_str or (cwd / "build.gradle").exists() or (cwd / "build.gradle.kts").exists():
+    if "android" in dir_tokens or "kotlin" in dir_tokens or _has_marker("build.gradle", "build.gradle.kts"):
         hints.extend(["android", "kotlin", "gradle"])
-    if "web" in path_str or "frontend" in parts or (cwd / "package.json").exists():
+    if "web" in dir_tokens or "frontend" in dir_tokens or _has_marker("package.json", "tsconfig.json"):
         hints.extend(["web", "ui", "frontend"])
-    if "firebase" in path_str or (cwd / "firebase.json").exists():
+    if "firebase" in dir_tokens or "firestore" in dir_tokens or _has_marker("firebase.json", ".firebaserc"):
         hints.extend(["firebase", "firestore"])
-    if "security" in path_str or "admin" in path_str:
+    if "security" in dir_tokens or "admin" in dir_tokens:
         hints.extend(["admin", "security"])
     return list(dict.fromkeys(hints))
 
@@ -65,7 +95,7 @@ def suggest_skills(conn: sqlite3.Connection, task_description: str, limit: int =
     SELECT s.name, s.plugin_name, s.category, s.description, s.token_estimate, rank
     FROM skills_fts f
     JOIN skills s ON f.rowid = s.id
-    WHERE skills_fts MATCH ?
+    WHERE skills_fts MATCH ? AND s.is_active = 1
     ORDER BY rank
     LIMIT ?;
     """, (fts_query, limit))
@@ -122,7 +152,7 @@ def search(conn: sqlite3.Connection, query: str):
     SELECT r.key, r.name, r.category, r.summary, r.token_estimate
     FROM rules_fts f
     JOIN rules r ON f.rowid = r.id
-    WHERE rules_fts MATCH ?
+    WHERE rules_fts MATCH ? AND r.is_active = 1
     ORDER BY rank
     LIMIT 5;
     """, (fts_query,))
@@ -139,7 +169,7 @@ def search(conn: sqlite3.Connection, query: str):
     SELECT s.name, s.plugin_name, s.description, s.token_estimate
     FROM skills_fts f
     JOIN skills s ON f.rowid = s.id
-    WHERE skills_fts MATCH ?
+    WHERE skills_fts MATCH ? AND s.is_active = 1
     ORDER BY rank
     LIMIT 10;
     """, (fts_query,))
@@ -156,10 +186,14 @@ def search(conn: sqlite3.Connection, query: str):
 
 def get_skill(conn: sqlite3.Connection, name: str, summary: bool = False, section: str = None):
     """Retrieves a skill, skill summary outline, or targeted micro-skill section."""
+    if not name or not str(name).strip("_% "):
+        print(f"Skill '{name}' not found in database.")
+        return
     cursor = conn.cursor()
+    esc = _escape_sql_like(name)
     cursor.execute(
-        "SELECT * FROM skills WHERE name = ? OR name LIKE ? ORDER BY CASE WHEN name = ? THEN 0 ELSE 1 END LIMIT 1;",
-        (name, f"%{name}%", name),
+        "SELECT * FROM skills WHERE is_active = 1 AND (name = ? OR name LIKE ? ESCAPE '\\') ORDER BY CASE WHEN name = ? THEN 0 ELSE 1 END LIMIT 1;",
+        (name, f"%{esc}%", name),
     )
     skill = cursor.fetchone()
     if not skill:
@@ -233,10 +267,14 @@ def get_active_rules(conn: sqlite3.Connection):
 
 def get_rule(conn: sqlite3.Connection, key: str):
     """Outputs a specific rule by key or name."""
+    if not key or not str(key).strip("_% "):
+        print(f"Rule '{key}' not found in database.")
+        return
     cursor = conn.cursor()
+    esc = _escape_sql_like(key)
     cursor.execute(
-        "SELECT * FROM rules WHERE key = ? OR name LIKE ? ORDER BY CASE WHEN key = ? THEN 0 ELSE 1 END LIMIT 1;",
-        (key, f"%{key}%", key),
+        "SELECT * FROM rules WHERE is_active = 1 AND (key = ? OR name LIKE ? ESCAPE '\\') ORDER BY CASE WHEN key = ? THEN 0 ELSE 1 END LIMIT 1;",
+        (key, f"%{esc}%", key),
     )
     rule = cursor.fetchone()
     if not rule:

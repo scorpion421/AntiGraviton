@@ -122,7 +122,7 @@ def parse_antigravity_model_spec(text: str, effort_override: str = None) -> dict
 
     if any(k in low for k in ("argon", "gemini 4", "gemini-4")):
         family_key = "gemini-4-argon"
-    elif any(k in low for k in ("3.8 flash", "3.8-flash", "gemini 3.8", "gemini-3.8", "gemini flash", "gemini-flash")) or re.search(r"\bgemini[- ]\d+(?:\.\d+)?[- ]flash\b", low):
+    elif any(k in low for k in ("3.8 flash", "3.8-flash", "gemini 3.8", "gemini-3.8", "gemini flash", "gemini-flash")) or re.search(r"\bgemini[- ]3(?:\.\d+)?[- ]flash\b", low):
         family_key = "gemini-3.8-flash"
     elif any(k in low for k in ("claude opus", "claude-opus", "opus 5.5", "opus-5.5", "opus 5")):
         family_key = "claude-opus-5.5"
@@ -428,6 +428,8 @@ def detect_model_and_pool(cid: str = None, db_path: Path = None, model_name_hint
                 head_lines = [f.readline() for _ in range(15)]
             for line in head_lines:
                 if not line.strip() or "invoke_subagent" in line or "flash_lite" in line:
+                    continue
+                if ('"USER_INPUT"' in line or '"USER_EXPLICIT"' in line) and "<USER_SETTINGS_CHANGE>" not in line:
                     continue
                 spec = parse_antigravity_model_spec(line, effort_override=cfg_effort or None)
                 if spec:

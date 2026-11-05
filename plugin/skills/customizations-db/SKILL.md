@@ -89,6 +89,7 @@ Each project maintains its own isolated SQLite memory database with FTS5 search 
   skillsdb mem-task-add "<title>" --priority high --status in_progress
   skillsdb mem-task-list [--status in_progress|pending|completed]
   skillsdb mem-task-update <id> --status completed
+  skillsdb mem-task-delete <id>
   skillsdb mem-task-clear
   ```
 * **Autonomous context compaction**:
@@ -147,6 +148,8 @@ SkillsDB v4.0.0 governs `Ultra` (16 parallel reader threads) and `Pro` (8 parall
   skillsdb agent list
   skillsdb agent get lead_architect
   skillsdb handoff create --task <task_id> --role "Security Auditor" --notes "<instructions>"
+  skillsdb handoff accept <handoff_id>
+  skillsdb handoff complete <handoff_id>
   ```
 * **High-concurrency batch skill retrieval and multi-query FTS5 search (16 threads on Ultra, 8 on Pro)**:
   ```powershell
