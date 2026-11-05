@@ -721,6 +721,58 @@ def _was_file_region_read_in_current_epoch(
     return False
 
 
+def _was_file_inspected_before_edit(payload: Dict[str, Any], fpath: Path) -> bool:
+    """
+    Returns True if fpath (> 250 lines) was already read ('read_file' / 'view_file'),
+    AST-mapped ('ast-map' / 'skillsdb_ast_map'), FIM-sliced ('fim' / 'skillsdb_fim_slice'),
+    digested ('gemini-digest' / 'skillsdb_gemini_digest'), or previously edited/written
+    in the current uncompacted conversation epoch (since the last <CONTEXT_SUMMARY>).
+    If no transcript exists in payload, returns True so standalone unit tests are unaffected.
+    """
+    try:
+        _, t_path = _resolve_hook_cid_and_transcript(payload)
+        if not t_path or not t_path.exists():
+            return True
+        if _is_subagent_context(payload, t_path):
+            return True
+
+        tail_lines = read_jsonl_tail_lines(t_path, max_bytes=524288, max_lines=150)
+        if not tail_lines:
+            return True
+
+        fname_low = fpath.name.lower()
+        has_valid_epoch_step = False
+        for rline in reversed(tail_lines):
+            if "<CONTEXT_SUMMARY>" in rline:
+                break
+            rlow = rline.lower()
+            if '"user_input"' in rlow or '"user_explicit"' in rlow or '"planner_response"' in rlow:
+                has_valid_epoch_step = True
+            if "ast-map" in rlow or "skillsdb_ast_map" in rlow:
+                return True
+            if fname_low in rlow and any(
+                kw in rlow
+                for kw in (
+                    "read_file",
+                    "view_file",
+                    "fim",
+                    "gemini-digest",
+                    "gemini_digest",
+                    "edit_file",
+                    "write_file",
+                    "write_to_file",
+                    "replace_file_content",
+                    "multi_replace_file_content",
+                )
+            ):
+                return True
+        if not has_valid_epoch_step:
+            return True
+        return False
+    except Exception:
+        return True
+
+
 def handle_pre_tool_guardrail_hook():
     """
     Handles Antigravity PreToolUse lifecycle hook.
@@ -740,11 +792,27 @@ def handle_pre_tool_guardrail_hook():
             print(json.dumps({"decision": "allow"}))
             return
 
-        tool_call = payload.get("toolCall")
+        tool_call = payload.get("toolCall") or payload.get("tool_call")
         if not isinstance(tool_call, dict):
             tool_call = {}
-        tool_name = str(tool_call.get("name") or payload.get("tool_name") or "").strip().lower()
-        raw_args = tool_call.get("args") or tool_call.get("arguments") or payload.get("tool_input") or {}
+        tool_name = str(
+            tool_call.get("name")
+            or tool_call.get("toolName")
+            or payload.get("tool_name")
+            or payload.get("toolName")
+            or payload.get("name")
+            or ""
+        ).strip().lower()
+        raw_args = (
+            tool_call.get("args")
+            or tool_call.get("arguments")
+            or tool_call.get("toolInput")
+            or payload.get("tool_input")
+            or payload.get("toolInput")
+            or payload.get("args")
+            or payload.get("arguments")
+            or {}
+        )
         if isinstance(raw_args, str):
             try:
                 raw_args = json.loads(raw_args)
@@ -1001,6 +1069,29 @@ def handle_pre_tool_guardrail_hook():
                             return
                 except Exception:
                     pass
+
+        # B. AST-First & Read-Before-Edit Guard for files > 250 lines (Rule 5 / Rule 7)
+        if tool_name in ("edit_file", "replace_file_content", "multi_replace_file_content") and target_file != "<tool_input>":
+            try:
+                edit_fpath = Path(target_file)
+                if (
+                    not _is_scratch_file_path(edit_fpath)
+                    and edit_fpath.exists()
+                    and edit_fpath.is_file()
+                    and edit_fpath.suffix.lower() not in SKIP_EXTENSIONS
+                    and edit_fpath.stat().st_size <= 2_500_000
+                ):
+                    edit_total_lines = len(edit_fpath.read_text(encoding="utf-8", errors="ignore").splitlines())
+                    if edit_total_lines > 250 and not _was_file_inspected_before_edit(payload, edit_fpath):
+                        reason = (
+                            f"SkillsDB AST-First & Read-Before-Edit Guard (Rule 5 / Rule 7): "
+                            f"File '{edit_fpath.name}' has {edit_total_lines} lines (> 250 lines) and has not been read or AST-mapped in the current conversation epoch. "
+                            f"Run 'skillsdb ast-map \"{edit_fpath.name}\"' or 'read_file' on the target region before calling {tool_name}."
+                        )
+                        print(json.dumps({"decision": "deny", "reason": reason}))
+                        return
+            except Exception:
+                pass
 
         try:
             target_path = Path(target_file)

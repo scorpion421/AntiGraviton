@@ -273,19 +273,25 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> str:
             }, indent=2)
 
         elif name == "skillsdb_fim_slice":
-            fpath = Path(args.get("file_path", ""))
+            raw_fpath = str(args.get("file_path") or args.get("file") or args.get("path") or "").strip()
+            if not raw_fpath:
+                return "Error: Specify 'file_path' (or 'file' / 'path') to slice."
+            fpath = Path(raw_fpath)
             line_num = args.get("line")
             sym = args.get("symbol")
-            if sym:
-                res = slice_fim_symbol(fpath, sym)
-            elif line_num is not None:
-                res = slice_fim(fpath, int(line_num))
-            else:
-                return "Error: Specify either 'line' or 'symbol' to slice."
-            return format_fim_block(res)
+            try:
+                if sym:
+                    res = slice_fim_symbol(fpath, sym)
+                elif line_num is not None:
+                    res = slice_fim(fpath, int(line_num))
+                else:
+                    return "Error: Specify either 'line' or 'symbol' to slice."
+                return format_fim_block(res)
+            except (FileNotFoundError, ValueError, OSError) as exc:
+                return f"Error: {exc}"
 
         elif name == "skillsdb_agent_template":
-            aid = args.get("agent_id")
+            aid = args.get("agent_id") or args.get("id")
             if args.get("list_all") or not aid:
                 tmpls = list_agent_templates(conn)
                 lines = ["=== AVAILABLE AGENT TEMPLATES ==="]
@@ -306,7 +312,8 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> str:
             return f.getvalue()
 
         elif name == "skillsdb_gitea_sync":
-            proj_path = Path(args.get("project_path", "."))
+            proj_raw = args.get("project_path") or args.get("project") or args.get("cwd") or "."
+            proj_path = Path(proj_raw)
             msg = args.get("message", "Synchronize workspace via MCP")
             res = save_code_commit(proj_path, message=msg, push=True)
             return json.dumps(res, indent=2)
@@ -315,25 +322,28 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> str:
             return json.dumps(compute_routing_decision(), indent=2)
 
         elif name == "skillsdb_gemini_digest":
-            proj_p = Path(args["project_path"]) if args.get("project_path") else None
+            proj_raw = args.get("project_path") or args.get("project") or args.get("cwd")
+            proj_p = Path(proj_raw) if proj_raw else None
             res = execute_gemini_digest(
                 files=args.get("files") or [],
                 query=args.get("query") or "Summarize key findings and line numbers.",
                 execution_tier=args.get("tier") or "auto",
                 preferred_pool=args.get("pool") or "auto",
                 include_git_diff=bool(args.get("git_diff", False)),
-                save_fact_key=args.get("save_fact_key"),
+                save_fact_key=args.get("save_fact_key") or args.get("save_fact"),
                 project_root=proj_p,
             )
             return json.dumps(res, indent=2)
 
         elif name == "skillsdb_ast_map":
-            proj_p = Path(args["project_path"]) if args.get("project_path") else None
+            proj_raw = args.get("project_path") or args.get("project") or args.get("cwd")
+            proj_p = Path(proj_raw) if proj_raw else None
+            sym_filter = args.get("symbol_filter") or args.get("filter") or args.get("query")
             res = execute_ast_map(
                 files=args.get("files") or [],
-                symbol_filter=args.get("symbol_filter"),
+                symbol_filter=sym_filter,
                 include_private=bool(args.get("include_private", True)),
-                save_fact_key=args.get("save_fact_key"),
+                save_fact_key=args.get("save_fact_key") or args.get("save_fact"),
                 project_root=proj_p,
             )
             return json.dumps(res, indent=2)
@@ -342,7 +352,8 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> str:
             import io
             from contextlib import redirect_stdout
             from ..memory.project_memory import find_project_root, get_project_connection, mem_get_context
-            proj_p = Path(args["project_path"]) if args.get("project_path") else find_project_root()
+            proj_raw = args.get("project_path") or args.get("project") or args.get("cwd")
+            proj_p = Path(proj_raw) if proj_raw else find_project_root()
             pconn = get_project_connection(proj_p)
             try:
                 f = io.StringIO()
@@ -362,8 +373,11 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> str:
                 mem_task_update,
                 mem_task_list,
             )
-            proj_p = Path(args["project_path"]) if args.get("project_path") else find_project_root()
+            proj_raw = args.get("project_path") or args.get("project") or args.get("cwd")
+            proj_p = Path(proj_raw) if proj_raw else find_project_root()
             action = (args.get("action") or "list").strip().lower()
+            tid = args.get("task_id") if args.get("task_id") is not None else args.get("id")
+            desc_val = args.get("description") or args.get("desc") or ""
             pconn = get_project_connection(proj_p)
             try:
                 f = io.StringIO()
@@ -372,17 +386,18 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> str:
                         mem_task_add(
                             pconn,
                             args["title"],
-                            description=args.get("description", ""),
+                            description=desc_val,
                             priority=args.get("priority", "med"),
                             status=args.get("status", "pending"),
                         )
-                    elif action == "update" and args.get("task_id") is not None:
+                    elif action == "update" and tid is not None:
                         mem_task_update(
                             pconn,
-                            int(args["task_id"]),
+                            int(tid),
                             status=args.get("status"),
                             priority=args.get("priority"),
                             title=args.get("title"),
+                            description=desc_val if ("description" in args or "desc" in args) else None,
                         )
                     else:
                         mem_task_list(pconn, status=args.get("status"), as_json=True)
@@ -391,7 +406,8 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> str:
                 pconn.close()
 
         elif name == "skillsdb_gemini_handover":
-            proj_p = Path(args["project_path"]) if args.get("project_path") else None
+            proj_raw = args.get("project_path") or args.get("project") or args.get("cwd")
+            proj_p = Path(proj_raw) if proj_raw else None
             res = create_web_handover(
                 topic=args.get("topic") or "Architectural research",
                 files=args.get("files"),
@@ -401,7 +417,8 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> str:
             return json.dumps(res, indent=2)
 
         elif name == "skillsdb_gemini_ingest":
-            proj_p = Path(args["project_path"]) if args.get("project_path") else None
+            proj_raw = args.get("project_path") or args.get("project") or args.get("cwd")
+            proj_p = Path(proj_raw) if proj_raw else None
             res = ingest_web_response(
                 raw_text=args.get("text"),
                 fact_key=args.get("fact_key") or "gemini_web_research_finding",
@@ -489,8 +506,11 @@ def run_mcp_server():
                 }
             elif method == "tools/call":
                 tool_name = params.get("name", "")
-                tool_args = params.get("arguments") or {}
+                tool_args = params.get("arguments") or params.get("args") or {}
                 result_text = handle_tool_call(tool_name, tool_args)
+                is_err = isinstance(result_text, str) and (
+                    result_text.startswith("Error:") or result_text.startswith("Unknown tool:")
+                )
                 resp = {
                     "jsonrpc": "2.0",
                     "id": req_id,
@@ -500,7 +520,8 @@ def run_mcp_server():
                                 "type": "text",
                                 "text": result_text
                             }
-                        ]
+                        ],
+                        "isError": is_err,
                     }
                 }
             else:

@@ -5,6 +5,22 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.6] - 2026-11-05
+
+### Added
+- **AST-First & Read-Before-Edit `PreToolUse` guardrail for files `> 250` lines (`skillsdb/core/guardrails.py`, `v4.0.6`)**:
+  - Added `_was_file_inspected_before_edit()` and wired `handle_pre_tool_guardrail_hook()` to verify that existing files exceeding `250` lines have been inspected via `read_file`, `view_file`, `skillsdb ast-map`, `skillsdb fim slice`, or `skillsdb gemini-digest` in the current uncompacted conversation epoch before allowing `edit_file`, `replace_file_content`, or `multi_replace_file_content` (Rule 5 / Rule 7).
+- **CLI `skillsdb context` subparser alias (`skillsdb/cli.py`, `v4.0.6`)**:
+  - Added `context` as a direct CLI alias for `skillsdb mem-get-context`, aligning the CLI command with the `skillsdb_context` MCP tool.
+
+### Changed
+- **CamelCase and snake_case hook payload support in `handle_pre_tool_guardrail_hook()` (`skillsdb/core/guardrails.py`, `v4.0.6`)**:
+  - Added top-level and nested CamelCase/snake_case field resolution (`toolCall` / `tool_call`, `toolName` / `tool_name` / `name`, `toolInput` / `tool_input` / `args` / `arguments`) so `PreToolUse` hooks accept all payload conventions seamlessly.
+- **MCP tool parameter alias ergonomics and standard `isError` responses (`skillsdb/platform/mcp_server.py`, `v4.0.6`)**:
+  - Added seamless CLI-style parameter aliases across `handle_tool_call()`: `file` and `path` on `skillsdb_fim_slice` (with graceful `FileNotFoundError` / `ValueError` handling and standard MCP `isError: True` responses instead of unhandled `-32603` exceptions); `project` and `cwd` across `skillsdb_gitea_sync`, `skillsdb_gemini_digest`, `skillsdb_ast_map`, `skillsdb_context`, `skillsdb_task_board`, `skillsdb_gemini_handover`, and `skillsdb_gemini_ingest`; `filter` and `query` on `skillsdb_ast_map`; and `id` / `desc` on `skillsdb_task_board` and `skillsdb_agent_template`.
+- **Top-level convenience keys in `compute_routing_decision()` and default parameters in `_scan_single_transcript_5h()` (`skillsdb/core/quota_router.py`, `v4.0.6`)**:
+  - Made `cutoff_iso`, `cutoff_minute_bucket`, and `settings_re` optional in `_scan_single_transcript_5h()` (supporting both ISO strings and Unix float timestamps, and returning `p1a_turns`, `p1b_turns`, `p1b_weighted`, and `models` summary fields), and added top-level `pool_1a`, `pool_1b`, and `routing` convenience dictionaries to `compute_routing_decision()`.
+
 ## [2.0.5] - 2026-11-05
 
 ### Added

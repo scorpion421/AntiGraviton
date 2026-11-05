@@ -328,7 +328,7 @@ def build_parser() -> argparse.ArgumentParser:
     mem_compact_parser.add_argument("--keep-completed", action="store_true", help="Do not prune completed tasks during compaction")
     mem_compact_parser.add_argument("--project", default=None, help="Project root directory (optional)")
 
-    mem_ctx_parser = subparsers.add_parser("mem-get-context", help="Retrieve compact project context")
+    mem_ctx_parser = subparsers.add_parser("mem-get-context", aliases=["context"], help="Retrieve compact project context")
     mem_ctx_parser.add_argument("--project", default=None, help="Project root directory (optional)")
 
     mem_srch_parser = subparsers.add_parser("mem-search", help="Search project memory")
@@ -734,7 +734,7 @@ def main(argv: list[str] = None):
         return
 
     # Route project memory commands directly to project database
-    if args.command and args.command.startswith("mem-"):
+    if args.command and (args.command.startswith("mem-") or args.command == "context"):
         proj_root = Path(args.project) if getattr(args, "project", None) else find_project_root()
         if args.command == "mem-init":
             mem_init(proj_root)
@@ -782,7 +782,7 @@ def main(argv: list[str] = None):
                 mem_task_clear(pconn, only_completed=not getattr(args, "all", False))
             elif args.command == "mem-compact":
                 mem_compact(pconn, summary=args.summary, next_steps=args.next_steps, archive_completed=not getattr(args, "keep_completed", False), project_root=proj_root)
-            elif args.command == "mem-get-context":
+            elif args.command in ("mem-get-context", "context"):
                 mem_get_context(pconn, project_root=proj_root)
             elif args.command == "mem-search":
                 mem_search(pconn, args.query)

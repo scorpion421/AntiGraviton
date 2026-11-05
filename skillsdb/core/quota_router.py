@@ -212,11 +212,16 @@ def _inspect_subagent_transcript_head(
     return False, False
 
 
+_DEFAULT_SETTINGS_RE = re.compile(
+    r"<USER_SETTINGS_CHANGE>(?:\\n|\s)*The user changed (?:the )?setting (?:\\[\"'`]|[\"'`])?Model Selection(?:\\[\"'`]|[\"'`])? from [^<]+? to ([^\n<\\]+?)\.(?=\s|\\n|<|\"|$)"
+)
+
+
 def _scan_single_transcript_5h(
     t_file: Path,
-    cutoff_iso: str,
-    cutoff_minute_bucket: int,
-    settings_re: re.Pattern,
+    cutoff_iso: Any = None,
+    cutoff_minute_bucket: Optional[int] = None,
+    settings_re: Optional[re.Pattern] = None,
     max_tail_bytes: int = 3145728,
 ) -> Dict[str, Any]:
     """
@@ -225,13 +230,42 @@ def _scan_single_transcript_5h(
     Automatically attributes isolated research subagent transcripts to Pool 1B (Gemini 3.8 Flash, 0.35x)
     instead of over-weighting them 10x as Pool 1A (Gemini 4 Argon High, 3.5x).
     """
+    if cutoff_iso is None:
+        cutoff_dt = datetime.now(timezone.utc) - timedelta(hours=5.0)
+        cutoff_ts = cutoff_dt.timestamp()
+        cutoff_iso_str = cutoff_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    elif isinstance(cutoff_iso, (int, float)):
+        cutoff_ts = float(cutoff_iso)
+        cutoff_iso_str = datetime.fromtimestamp(cutoff_ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    else:
+        cutoff_iso_str = str(cutoff_iso)
+        try:
+            cutoff_ts = datetime.fromisoformat(cutoff_iso_str.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            cutoff_ts = (datetime.now(timezone.utc) - timedelta(hours=5.0)).timestamp()
+
+    if cutoff_minute_bucket is None:
+        cutoff_minute_bucket = int(cutoff_ts // 60)
+    if settings_re is None:
+        settings_re = _DEFAULT_SETTINGS_RE
+
     key = str(t_file)
     try:
-        st = t_file.stat()
+        st = Path(t_file).stat()
         mtime_ns = st.st_mtime_ns
         fsize = st.st_size
     except OSError:
-        return {"turns": 0, "weighted_units": 0.0, "subagent_spawns": 0, "pools": {}}
+        return {
+            "turns": 0,
+            "weighted_units": 0.0,
+            "subagent_spawns": 0,
+            "p1a_turns": 0,
+            "p1a_weighted": 0.0,
+            "p1b_turns": 0,
+            "p1b_weighted": 0.0,
+            "models": {},
+            "pools": {},
+        }
 
     cached = _TRANSCRIPT_5H_CACHE.get(key)
     if cached and cached[0] == mtime_ns and cached[1] == fsize and cached[2] == cutoff_minute_bucket:
@@ -247,7 +281,7 @@ def _scan_single_transcript_5h(
     f_weighted = 0.0
     f_subagents = 0
     active_spec = parse_antigravity_model_spec("Gemini 4 Argon (High)")
-    cutoff_prefix = cutoff_iso[:19]
+    cutoff_prefix = cutoff_iso_str[:19]
 
     try:
         with open(t_file, "rb") as bf:
@@ -307,10 +341,20 @@ def _scan_single_transcript_5h(
     except Exception:
         pass
 
+    flat_models: Dict[str, int] = {}
+    for pdata in file_pools.values():
+        for mlbl, cnt in pdata["models"].items():
+            flat_models[mlbl] = flat_models.get(mlbl, 0) + cnt
+
     res = {
         "turns": f_turns,
         "weighted_units": f_weighted,
         "subagent_spawns": f_subagents,
+        "p1a_turns": file_pools[POOL_AGY_GEMINI_HIGH]["turns"],
+        "p1a_weighted": file_pools[POOL_AGY_GEMINI_HIGH]["weighted_units"],
+        "p1b_turns": file_pools[POOL_AGY_GEMINI_FAST]["turns"],
+        "p1b_weighted": file_pools[POOL_AGY_GEMINI_FAST]["weighted_units"],
+        "models": flat_models,
         "pools": file_pools,
     }
     if len(_TRANSCRIPT_5H_CACHE) > 64:
@@ -979,6 +1023,9 @@ def compute_routing_decision(
             )
         degradation_advice = " | ".join(steps_advice)
 
+    p1a_data = rolling_5h["pools"].get(POOL_AGY_GEMINI_HIGH, {"turns": 0, "weighted_units": 0.0})
+    p1b_data = rolling_5h["pools"].get(POOL_AGY_GEMINI_FAST, {"turns": 0, "weighted_units": 0.0})
+
     return {
         "state": state,
         "account_tier": account_tier,
@@ -994,6 +1041,23 @@ def compute_routing_decision(
         "load_pct_5h": load_pct,
         "soft_limit_5h_units": soft_limit,
         "pool_5h_units": pool_5h_units,
+        "pool_1a": {
+            "turns_5h": p1a_data["turns"],
+            "weighted_units_5h": p1a_data["weighted_units"],
+            "effective_pct": load_pct,
+        },
+        "pool_1b": {
+            "turns_5h": p1b_data["turns"],
+            "weighted_units_5h": p1b_data["weighted_units"],
+            "subagent_spawns": rolling_5h["subagent_spawns"],
+            "subagent_flash_rewrites": ledger_24h["subagent_24h_rewrites"],
+        },
+        "routing": {
+            "mode": effective_mode,
+            "digest_line_threshold": digest_line_threshold,
+            "subagent_research_model": subagent_research_model,
+            "subagent_general_model": subagent_general_model,
+        },
         "ledger_24h": ledger_24h,
         "cli_daily_limit": budget["cli_daily_limit"],
         "aistudio_daily_limit": budget["aistudio_daily_limit"],

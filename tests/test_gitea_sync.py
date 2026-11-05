@@ -2111,6 +2111,120 @@ class TestGiteaSync(unittest.TestCase):
             self.assertTrue(kwargs.get("show_savings"))
             self.assertEqual(kwargs.get("target_date"), today_utc)
 
+    def test_v2_0_6_live_cross_instance_stress_test_hardening(self):
+        """
+        Verifies v2.0.6 (SkillsDB v4.0.6) live cross-instance stress-test improvements:
+        1. MCP parameter aliases (file/path on skillsdb_fim_slice, project on skillsdb_task_board/context/ast_map,
+           filter on skillsdb_ast_map) and graceful error return when file_path is missing.
+        2. AST-First & Read-Before-Edit PreToolUse guard denies edit_file on > 250-line files when uninspected
+           in the current epoch, and allows edit_file once read_file or ast-map is recorded in the epoch.
+        3. _scan_single_transcript_5h optional defaults + float cutoff support, and compute_routing_decision
+           top-level convenience dicts (pool_1a, pool_1b, routing).
+        4. CLI 'skillsdb context' alias routes to mem_get_context().
+        """
+        import io
+        import json
+        import time
+        from unittest.mock import patch
+        from skillsdb.platform.mcp_server import handle_tool_call
+        from skillsdb.core.guardrails import handle_pre_tool_guardrail_hook
+        from skillsdb.core.quota_router import _scan_single_transcript_5h, compute_routing_decision
+        import skillsdb.cli as cli_mod
+
+        # 1. MCP parameter aliases & graceful skillsdb_fim_slice error handling
+        sample_py = self.test_dir / "alias_target.py"
+        sample_py.write_text(
+            "\n".join([f"def func_{i}(x: int) -> int:\n    return x + {i}\n" for i in range(100)]),
+            encoding="utf-8",
+        )
+        fim_out = handle_tool_call("skillsdb_fim_slice", {"file": str(sample_py), "symbol": "func_10"})
+        self.assertIn("def func_10", fim_out)
+        fim_err = handle_tool_call("skillsdb_fim_slice", {"symbol": "func_10"})
+        self.assertTrue(fim_err.startswith("Error:"))
+
+        ast_out = json.loads(
+            handle_tool_call("skillsdb_ast_map", {"files": [str(sample_py)], "filter": "func_42", "project": str(self.test_dir)})
+        )
+        self.assertTrue(ast_out["success"])
+        self.assertIn("def func_42", ast_out["contract_map"])
+
+        tb_out = handle_tool_call(
+            "skillsdb_task_board",
+            {"action": "add", "title": "Alias Task", "desc": "Via desc alias", "project": str(self.test_dir)},
+        )
+        self.assertIn("Alias Task", tb_out)
+
+        # 2. AST-First & Read-Before-Edit PreToolUse guard on > 250-line file
+        epoch_t = self.test_dir / "epoch_guard.jsonl"
+        epoch_t.write_text(
+            json.dumps({"step_index": 1, "source": "USER_EXPLICIT", "type": "USER_INPUT", "content": "Edit alias_target.py"}) + "\n",
+            encoding="utf-8",
+        )
+        edit_req = json.dumps({
+            "transcriptPath": str(epoch_t),
+            "toolCall": {
+                "name": "edit_file",
+                "args": {
+                    "Path": str(sample_py),
+                    "Target": "def func_10(x: int) -> int:",
+                    "Replacement": "def func_10(x: int) -> int:\n    # updated",
+                },
+            },
+        })
+        out_deny = io.StringIO()
+        with patch("sys.stdin", io.StringIO(edit_req)), patch("sys.stdout", out_deny):
+            handle_pre_tool_guardrail_hook()
+        res_deny = json.loads(out_deny.getvalue())
+        self.assertEqual(res_deny["decision"], "deny")
+        self.assertIn("AST-First & Read-Before-Edit Guard", res_deny["reason"])
+
+        # Append an ast-map inspection step and verify edit_file is now allowed
+        with open(epoch_t, "a", encoding="utf-8") as f:
+            f.write(
+                json.dumps({
+                    "step_index": 2,
+                    "source": "MODEL",
+                    "type": "PLANNER_RESPONSE",
+                    "tool_calls": [{"name": "run_command", "args": {"CommandLine": f"skillsdb ast-map {sample_py.name}"}}],
+                }) + "\n"
+            )
+        out_allow = io.StringIO()
+        with patch("sys.stdin", io.StringIO(edit_req)), patch("sys.stdout", out_allow):
+            handle_pre_tool_guardrail_hook()
+        res_allow = json.loads(out_allow.getvalue())
+        self.assertEqual(res_allow["decision"], "allow")
+
+        # Verify top-level CamelCase hook payload (toolName / toolInput)
+        camel_req = json.dumps({
+            "toolName": "invoke_subagent",
+            "toolInput": {"TypeName": "research", "Role": "Scanner", "Prompt": "Scan files", "Model": "inherit"},
+            "dbPath": str(self.db_path),
+            "brainDir": str(self.test_dir),
+        })
+        out_camel = io.StringIO()
+        with patch("sys.stdin", io.StringIO(camel_req)), patch("sys.stdout", out_camel):
+            handle_pre_tool_guardrail_hook()
+        res_camel = json.loads(out_camel.getvalue())
+        self.assertEqual(res_camel["decision"], "allow")
+        self.assertEqual(res_camel.get("overwrite", {}).get("Model"), "flash")
+
+        # 3. _scan_single_transcript_5h with float timestamp & optional args + compute_routing_decision convenience dicts
+        scan_res = _scan_single_transcript_5h(epoch_t, time.time() - 3600)
+        self.assertIn("p1a_turns", scan_res)
+        self.assertIn("p1b_turns", scan_res)
+        self.assertIn("models", scan_res)
+
+        q_dec = compute_routing_decision(db_path=self.db_path, brain_dir=self.test_dir)
+        self.assertIn("pool_1a", q_dec)
+        self.assertIn("pool_1b", q_dec)
+        self.assertIn("routing", q_dec)
+        self.assertEqual(q_dec["routing"]["subagent_research_model"], "flash")
+
+        # 4. CLI 'skillsdb context' alias
+        with patch.object(cli_mod, "mem_get_context") as mock_ctx, patch("sys.argv", ["skillsdb", "context", "--project", str(self.test_dir)]):
+            cli_mod.main()
+            mock_ctx.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
