@@ -2031,6 +2031,86 @@ class TestGiteaSync(unittest.TestCase):
         ep_sub = analyze_conversation_epochs_and_scope(cid="sub-research-204", brain_dir=fake_brain)
         self.assertEqual(ep_sub["subagent_findings"], [])
 
+    def test_v2_0_5_second_stage_audit_mcp_cli_db_and_doc_sync(self):
+        """
+        Verifies v2.0.5 (SkillsDB v4.0.5) second-stage deep verification fixes:
+        1. Central database/customizations.db contains Rule 7 (adaptive-model-concurrency-quota-routing).
+        2. MCP TOOLS_REGISTRY and handle_tool_call expose and wire all parameters for skillsdb_gemini_digest,
+           skillsdb_ast_map, and skillsdb_task_board.
+        3. CLI 'skillsdb stats --today' resolves today's UTC date string and passes it to stats().
+        """
+        import json
+        from datetime import datetime, timezone
+        from unittest.mock import patch
+        from skillsdb.core.db import managed_connection
+        from skillsdb.platform.mcp_server import TOOLS_REGISTRY, handle_tool_call
+        import skillsdb.cli as cli_mod
+
+        # 1. Verify Rule 7 exists and is active in repository database/customizations.db
+        repo_db = Path(__file__).resolve().parent.parent / "database" / "customizations.db"
+        with managed_connection(repo_db) as rconn:
+            row = rconn.execute(
+                "SELECT key, name, category, is_active FROM rules WHERE key = 'adaptive-model-concurrency-quota-routing';"
+            ).fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row["is_active"], 1)
+            self.assertEqual(row["category"], "performance")
+
+        # 2. Verify MCP TOOLS_REGISTRY schemas and handle_tool_call parameter pass-through
+        tool_map = {t["name"]: t["inputSchema"]["properties"] for t in TOOLS_REGISTRY}
+        for k in ("files", "query", "tier", "pool", "git_diff", "save_fact_key", "project_path"):
+            self.assertIn(k, tool_map["skillsdb_gemini_digest"])
+        for k in ("files", "symbol_filter", "include_private", "save_fact_key", "project_path"):
+            self.assertIn(k, tool_map["skillsdb_ast_map"])
+        for k in ("action", "title", "description", "task_id", "status", "priority", "project_path"):
+            self.assertIn(k, tool_map["skillsdb_task_board"])
+
+        sample_py = self.test_dir / "mcp_mod.py"
+        sample_py.write_text(
+            "def _private_helper(x: int) -> int:\n    return x + 1\n\ndef public_api(y: int) -> int:\n    return _private_helper(y)\n",
+            encoding="utf-8",
+        )
+        ast_no_priv = json.loads(
+            handle_tool_call(
+                "skillsdb_ast_map",
+                {
+                    "files": [str(sample_py)],
+                    "include_private": False,
+                    "save_fact_key": "mcp_ast_public_only",
+                    "project_path": str(self.test_dir),
+                },
+            )
+        )
+        self.assertTrue(ast_no_priv["success"])
+        self.assertIn("def public_api", ast_no_priv["contract_map"])
+        self.assertNotIn("_private_helper", ast_no_priv["contract_map"])
+
+        dig_local = json.loads(
+            handle_tool_call(
+                "skillsdb_gemini_digest",
+                {
+                    "files": [str(sample_py)],
+                    "query": "Find public_api",
+                    "tier": "pro",
+                    "pool": "local",
+                    "save_fact_key": "mcp_digest_fact",
+                    "project_path": str(self.test_dir),
+                },
+            )
+        )
+        self.assertTrue(dig_local["success"])
+        self.assertEqual(dig_local["pool_used"], "local_deterministic")
+        self.assertEqual(dig_local["saved_fact_key"], "mcp_digest_fact")
+
+        # 3. Verify CLI 'skillsdb stats --today' passes today's UTC date to stats()
+        today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        with patch.object(cli_mod, "stats") as mock_stats, patch("sys.argv", ["skillsdb", "stats", "--today", "--savings"]):
+            cli_mod.main()
+            mock_stats.assert_called_once()
+            _, kwargs = mock_stats.call_args
+            self.assertTrue(kwargs.get("show_savings"))
+            self.assertEqual(kwargs.get("target_date"), today_utc)
+
 
 if __name__ == "__main__":
     unittest.main()

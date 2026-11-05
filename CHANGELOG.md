@@ -5,6 +5,22 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.5] - 2026-11-05
+
+### Added
+- **Global Rule 7 (`adaptive-model-concurrency-quota-routing`) persisted in `database/customizations.db` (`v4.0.5`)**:
+  - Added the official `adaptive-model-concurrency-quota-routing` rule entry (`category = 'performance'`, `scope = 'global'`) to `database/customizations.db` and rebuilt `rules_fts`, ensuring 100% parity between all 7 global rule sections in `plugin/rules/AGENTS.md` and `skillsdb get-active-rules` / `skillsdb_get_rules`.
+
+### Changed
+- **Complete MCP `inputSchema` & parameter pass-through for `skillsdb_gemini_digest`, `skillsdb_ast_map`, and `skillsdb_task_board` (`skillsdb/platform/mcp_server.py`, `v4.0.5`)**:
+  - Exposed `pool`, `git_diff`, `save_fact_key`, and `project_path` on `skillsdb_gemini_digest`; `include_private` and `project_path` on `skillsdb_ast_map`; and `description` on `skillsdb_task_board` in `TOOLS_REGISTRY`, and wired all parameters through `handle_tool_call()`.
+- **Synchronized `README.md` Section 5 architecture tree and `build.py` version replacement patterns (`README.md`, `plugin/README.md`, `build.py`, `v4.0.5`)**:
+  - Updated the ASCII repository tree in `README.md` Section 5 to list the exact 21 modular files in `skillsdb/`, and expanded `sync_project_versions()` in `build.py` to keep inline version badges and capability labels in `README.md` and `plugin/README.md` synchronized automatically on every build.
+
+### Fixed
+- **CLI `skillsdb stats --today` UTC date filter wiring (`skillsdb/cli.py`, `v4.0.5`)**:
+  - Wired the `--today` flag in `skillsdb stats` (`skillsdb/cli.py:840`) to resolve `datetime.now(timezone.utc).strftime("%Y-%m-%d")` when `--date` is omitted, matching the CLI parser specification.
+
 ## [2.0.4] - 2026-11-05
 
 ### Added

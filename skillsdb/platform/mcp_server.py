@@ -135,7 +135,11 @@ TOOLS_REGISTRY = [
             "properties": {
                 "files": {"type": "array", "items": {"type": "string"}, "description": "File paths or globs to digest"},
                 "query": {"type": "string", "description": "Analysis question or extraction instruction"},
-                "tier": {"type": "string", "description": "Execution tier: auto, ultra, or pro"}
+                "tier": {"type": "string", "description": "Execution tier: auto, ultra, or pro"},
+                "pool": {"type": "string", "description": "Preferred pool: auto, api, cli, or local"},
+                "git_diff": {"type": "boolean", "description": "If true, includes git diff HEAD in the digest"},
+                "save_fact_key": {"type": "string", "description": "Optional fact key to persist in .agents/memory.db"},
+                "project_path": {"type": "string", "description": "Optional project root directory"}
             },
             "required": ["query"]
         }
@@ -148,7 +152,9 @@ TOOLS_REGISTRY = [
             "properties": {
                 "files": {"type": "array", "items": {"type": "string"}, "description": "File paths or globs to map"},
                 "symbol_filter": {"type": "string", "description": "Optional substring filter for class/function names"},
-                "save_fact_key": {"type": "string", "description": "Optional fact key to persist in .agents/memory.db"}
+                "include_private": {"type": "boolean", "description": "Include private helper functions/methods (default: true)"},
+                "save_fact_key": {"type": "string", "description": "Optional fact key to persist in .agents/memory.db"},
+                "project_path": {"type": "string", "description": "Optional project root directory"}
             },
             "required": ["files"]
         }
@@ -171,6 +177,7 @@ TOOLS_REGISTRY = [
             "properties": {
                 "action": {"type": "string", "description": "Action: list, add, or update (default: list)"},
                 "title": {"type": "string", "description": "Task title (when action is add or update)"},
+                "description": {"type": "string", "description": "Optional task description (when action is add)"},
                 "task_id": {"type": "integer", "description": "Task ID (when action is update)"},
                 "status": {"type": "string", "description": "Status filter or new status: pending, in_progress, completed, blocked"},
                 "priority": {"type": "string", "description": "Priority: low, med, high, critical"},
@@ -308,10 +315,15 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> str:
             return json.dumps(compute_routing_decision(), indent=2)
 
         elif name == "skillsdb_gemini_digest":
+            proj_p = Path(args["project_path"]) if args.get("project_path") else None
             res = execute_gemini_digest(
                 files=args.get("files") or [],
                 query=args.get("query") or "Summarize key findings and line numbers.",
                 execution_tier=args.get("tier") or "auto",
+                preferred_pool=args.get("pool") or "auto",
+                include_git_diff=bool(args.get("git_diff", False)),
+                save_fact_key=args.get("save_fact_key"),
+                project_root=proj_p,
             )
             return json.dumps(res, indent=2)
 
@@ -320,6 +332,7 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> str:
             res = execute_ast_map(
                 files=args.get("files") or [],
                 symbol_filter=args.get("symbol_filter"),
+                include_private=bool(args.get("include_private", True)),
                 save_fact_key=args.get("save_fact_key"),
                 project_root=proj_p,
             )

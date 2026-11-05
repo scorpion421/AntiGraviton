@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SkillsDB v3.0 Build & Bundler Script
+SkillsDB v4.0 Build & Bundler Script
 Compiles the modular skillsdb/ Python package into a 100% backward-compatible,
 standalone single-file script: database/db_manager.py.
 """
@@ -125,6 +125,10 @@ def sync_project_versions(repo_root: Path, suite_ver: str, eng_ver: str) -> None
                 rf"AntiGraviton `v{semver_pat}` \(`SkillsDB v{semver_pat}`\)",
                 f"AntiGraviton `v{suite_ver}` (`SkillsDB v{eng_ver}`)",
             ),
+            (
+                rf"AST contract mapper \(`v{semver_pat}`\)",
+                f"AST contract mapper (`v{eng_ver}`)",
+            ),
         ],
     )
 
@@ -138,6 +142,8 @@ def sync_project_versions(repo_root: Path, suite_ver: str, eng_ver: str) -> None
             (rf"\*\*SkillsDB \(`v{semver_pat}`\)\*\*", f"**SkillsDB (`v{eng_ver}`)**"),
             (rf"\*\*SkillsDB context and memory engine \(`v{semver_pat}`\)\*\*", f"**SkillsDB context and memory engine (`v{eng_ver}`)**"),
             (rf"\| AntiGraviton suite \(`v{semver_pat}`\) \|", f"| AntiGraviton suite (`v{suite_ver}`) |"),
+            (rf"weekly quota \(`v{semver_pat}`\)\*\*", f"weekly quota (`v{suite_ver}`)**"),
+            (rf"How AntiGraviton `v{semver_pat}` \(`SkillsDB v{semver_pat}`\) fixes it", f"How AntiGraviton `v{suite_ver}` (`SkillsDB v{eng_ver}`) fixes it"),
             (rf"# SemVer 2\.0\.0 suite release version \({semver_pat}\)", f"# SemVer 2.0.0 suite release version ({suite_ver})"),
             (rf"# Modular Python package source \(v{semver_pat}\)", f"# Modular Python package source (v{eng_ver})"),
         ],

@@ -6,6 +6,7 @@ import os
 import sys
 import json
 import argparse
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import SKILL_CLUSTERS, DB_PATH
@@ -837,7 +838,10 @@ def main(argv: list[str] = None):
         elif args.command == "list":
             list_all(conn)
         elif args.command == "stats":
-            stats(conn, show_savings=getattr(args, "savings", False), target_date=getattr(args, "date", None))
+            resolved_date = getattr(args, "date", None) or (
+                datetime.now(timezone.utc).strftime("%Y-%m-%d") if getattr(args, "today", False) else None
+            )
+            stats(conn, show_savings=getattr(args, "savings", False), target_date=resolved_date)
         elif args.command == "export-skill":
             export_skill(conn, args.name, args.target)
         elif args.command == "profile":
