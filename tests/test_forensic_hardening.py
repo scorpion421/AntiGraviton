@@ -357,16 +357,50 @@ class TestForensicHardeningV143(unittest.TestCase):
                 with open(tfile, "a", encoding="utf-8") as f:
                     f.write("\n".join(lines_drift) + "\n")
 
-                # Hook Call 4 in same Epoch 2 at step 165: triggers mid-session drift guard!
+                # Hook Call 4 in same Epoch 2 at step 165 (no CHECKPOINT yet): zero-overhead (empty injectSteps)
                 sys.stdin = io.StringIO(json.dumps(payload))
                 out4 = io.StringIO()
                 sys.stdout = out4
                 handle_pre_invocation_hook()
-                res4 = json.loads(out4.getvalue()); self.assertEqual(res4.get("injectSteps"), []); msg4 = "[SKILLSDB TURN-ECONOMY & DRIFT GUARD (Step 165)] NO SALAMI-SLICING"
-                self.assertEqual(len(res4.get("injectSteps", [])), 0)
-                pass
-                self.assertIn("[SKILLSDB TURN-ECONOMY & DRIFT GUARD (Step 165)]", msg4)
-                self.assertIn("NO SALAMI-SLICING", msg4)
+                res4 = json.loads(out4.getvalue())
+                self.assertEqual(res4.get("injectSteps"), [])
+
+                # Save a fact in ws_active/.agents/memory.db and append a CHECKPOINT step to transcript.jsonl
+                ws_conn = get_project_connection(ws_active)
+                try:
+                    mem_save_fact(ws_conn, "benchmark_offset", "e3.smali:L250")
+                finally:
+                    stop_all_writer_queues()
+                    ws_conn.close()
+                lines_ckpt = [
+                    json.dumps({
+                        "step_index": 170,
+                        "type": "CHECKPOINT",
+                        "created_at": "2026-10-28T13:35:00Z",
+                        "content": "# Resuming from a compaction\nContext was compacted.",
+                    }),
+                ]
+                with open(tfile, "a", encoding="utf-8") as f:
+                    f.write("\n".join(lines_ckpt) + "\n")
+
+                # Hook Call 5 immediately after CHECKPOINT: re-hydrates .agents/memory.db strictly once!
+                sys.stdin = io.StringIO(json.dumps(payload))
+                out5 = io.StringIO()
+                sys.stdout = out5
+                handle_pre_invocation_hook()
+                res5 = json.loads(out5.getvalue())
+                self.assertEqual(len(res5.get("injectSteps", [])), 1)
+                msg5 = res5["injectSteps"][0]["ephemeralMessage"]
+                self.assertIn("Auto-Hydrated Post-Compaction from .agents/memory.db", msg5)
+                self.assertIn("benchmark_offset", msg5)
+
+                # Hook Call 6 on next turn (no new CHECKPOINT): deduplicated again (empty injectSteps)
+                sys.stdin = io.StringIO(json.dumps(payload))
+                out6 = io.StringIO()
+                sys.stdout = out6
+                handle_pre_invocation_hook()
+                res6 = json.loads(out6.getvalue())
+                self.assertEqual(res6.get("injectSteps"), [])
 
 
                 # Verify date-scoped vs cumulative savings calculation
@@ -374,7 +408,7 @@ class TestForensicHardeningV143(unittest.TestCase):
                 self.assertIsNotNone(sav)
                 self.assertEqual(sav["model_turns"], 2)
                 self.assertEqual(sav["day_model_turns"], 1)
-                self.assertEqual(sav["day_steps"], 3)
+                self.assertEqual(sav["day_steps"], 4)
                 self.assertGreater(sav["tokens_saved_per_turn"], 1000)
                 self.assertGreater(sav["reduction_pct"], 90.0)
                 self.assertIn("user_turns", sav)
@@ -433,6 +467,13 @@ class TestForensicHardeningV143(unittest.TestCase):
                 "        return bool(token)\n\n"
                 "def compute_checksum(data: bytes) -> int:\n"
                 "    return len(data)\n",
+                encoding="utf-8",
+            )
+            ps_src = ws / "deploy_helper.ps1"
+            ps_src.write_text(
+                "function Invoke-CleanBuild($TargetDir) {\n"
+                "    Write-Host $TargetDir\n"
+                "}\n",
                 encoding="utf-8",
             )
             conn = get_project_connection(ws)

@@ -5,6 +5,17 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.4] - 2026-11-07
+
+### Fixed
+- **Checkpoint-synchronized post-compaction memory re-hydration (`skillsdb/memory/project_memory.py`, `v4.1.4`)**:
+  - Audited against the 4,346-step benchmark transcript (`ab05cd72-aa2b-4ffd-b0a7-dfce798a8295`, 31 `CHECKPOINT` compactions) and fixed `analyze_conversation_epochs_and_scope()` to detect `"type": "CHECKPOINT"` steps in `transcript.jsonl` (in addition to `<CONTEXT_SUMMARY>`) and track `checkpoint_count` and `last_checkpoint_step`.
+  - Updated `handle_pre_invocation_hook()` to re-hydrate `=== PROJECT MEMORY CONTEXT (Auto-Hydrated Post-Compaction from .agents/memory.db) ===` strictly once immediately after a `CHECKPOINT` compaction event while keeping all uncompacted Turn-2+ turns at `0` injected tokens (`{"injectSteps": []}`). This guarantees 100% `.agents/memory.db` retention across compactions while eliminating the `78%` redundant mid-window re-injections observed in the benchmark.
+- **Multi-language symbol indexing for non-Python files (`skillsdb/memory/project_memory.py`, `v4.1.4`)**:
+  - Fixed `_extract_file_symbols_for_index()` to invoke `_extract_generic_regex_contracts()` directly on non-Python source files (`.ps1`, `.ts`, `.js`, `.cs`, `.go`, `.rs`, `.kt`, `.java`), preventing `TypeError: 'WindowsPath' object is not iterable` during `skillsdb mem-index` / `skillsdb locate`.
+
+---
+
 ## [2.1.3] - 2026-11-07
 
 ### Added
