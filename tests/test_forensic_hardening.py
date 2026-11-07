@@ -377,6 +377,12 @@ class TestForensicHardeningV143(unittest.TestCase):
                 self.assertEqual(sav["day_steps"], 3)
                 self.assertGreater(sav["tokens_saved_per_turn"], 1000)
                 self.assertGreater(sav["reduction_pct"], 90.0)
+                self.assertIn("user_turns", sav)
+                self.assertIn("turns_per_user", sav)
+                self.assertIn("ephemeral_injections", sav)
+                self.assertIn("ephemeral_tokens", sav)
+                self.assertIn("net_tokens_saved", sav)
+                self.assertIn("kv_cache_hit_pct", sav)
             finally:
                 sys.stdin, sys.stdout = old_stdin, old_stdout
 

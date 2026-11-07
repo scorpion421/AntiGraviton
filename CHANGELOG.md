@@ -5,6 +5,24 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.2] - 2026-11-07
+
+### Changed
+- **Engineering apology and post-mortem on the background Agent Control Plane (`v1.9.x` - `v2.0.9` -> `v2.1.2`)**:
+  - **Sincere apology for abnormal token and background hook consumption**: We owe a direct and sincere apology for the abnormal token burn, extra intermediate turns, and hook latency introduced by the experimental Agent Control Plane in `v1.9.x` through `v2.0.9`. Significant time and tokens were invested into an automated background steering layer that ultimately produced the exact opposite of optimization: higher load and turn multiplication instead of savings.
+  - **What the original design idea was (the intent)**: The goal was to build a proactive background safety net around the LLM via `PreInvocation` and `PreToolUse` hooks that would automatically compute 5-hour multi-pool quota routing (`Pool 1A/1B/1C`), inject dynamic Turn-2+ Drift-Guard reminders and mid-session database re-hydrations, and enforce an `AST-First & Read-Before-Edit` gate on `edit_file`.
+  - **Why it failed in practice (root cause)**:
+    1. **Architectural contradiction ("Push" vs. "Pull")**: SkillsDB saves `98.1%` of static prompt bloat because it is a strict **Pull** architecture (`customizations.db` and `.agents/memory.db` queried on demand). The Agent Control Plane inverted this back into a continuous background **Push** engine that competed with the host IDE's native agent loop.
+    2. **Subprocess cold-starts and transcript regex scanning**: Intercepting `read_file`, `view_file`, `run_command`, `invoke_subagent`, and `manage_task` in `PreToolUse` spawned a Python subprocess on almost every tool call and scanned multi-megabyte `transcript.jsonl` files with regexes (compounded by catastrophic backtracking in `cmd_arg_re`).
+    3. **Prompt tail mutation and `EPHEMERAL_MESSAGE` overhead**: Dynamic Turn-2+ `PreInvocation` injections (`[SKILLSDB MULTI-POOL QUOTA ROUTER]`, Drift-Guard warnings, and mid-session DB re-hydrations) injected extra tokens and disturbed prompt caching.
+    4. **Turn multiplication misreported as savings**: Blocking `edit_file` calls when an earlier `read_file` or `ast-map` had scrolled outside the 180-line transcript tail forced the LLM into 2-3 extra corrective turns per edit, while the legacy `skillsdb stats` calculation naively multiplied `model_turns * 19,900` and misreported turn inflation as higher savings.
+  - **Measured empirical recovery (`v2.1.0` - `v2.1.2`)**: Stripping the background Agent Control Plane back to the pure SkillsDB core reduced real uncached input token consumption by **`-50.9%`** (`10,283 -> 5,046` uncached input tokens/turn), dropped Turn-2+ hook injection overhead from **`87 -> 0` tokens/turn**, and reduced background-task wakeup rates from **`8% -> 0%`**.
+- **Hardened empirical change-impact and overhead scan (`skillsdb/memory/project_memory.py`, `v4.1.2`)**:
+  - Upgraded `calculate_transcript_savings()` and `stats()` to extract real empirical LLM token and control-plane telemetry directly from `transcript.jsonl` (`user_turns`, `turns_per_user`, `uncached_input_tokens`, `cache_read_tokens`, `kv_cache_hit_pct`, `cache_busts`, `ephemeral_injections`, `ephemeral_tokens`, `backgrounded_tasks`, `net_tokens_saved`, and before/after window delta comparisons).
+  - Hardened `analyze_conversation_epochs_and_scope()` and `calculate_transcript_savings()` to inspect JSON line headers (`line[:320]` / `line[:600]`) rather than truncating transcripts at `64 KB` or running `json.loads()` on multi-kilobyte `GENERIC` tool outputs.
+
+---
+
 ## [2.1.1] - 2026-11-07
 
 ### Fixed

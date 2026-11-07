@@ -1,7 +1,7 @@
-# AntiGraviton complete suite (`v2.1.1`)
+# AntiGraviton complete suite (`v2.1.2`)
 
-[![Version](https://img.shields.io/badge/version-2.1.1-blue.svg)](CHANGELOG.md)
-[![SkillsDB](https://img.shields.io/badge/SkillsDB-v4.1.1-007ec6.svg)](skillsdb/)
+[![Version](https://img.shields.io/badge/version-2.1.2-blue.svg)](CHANGELOG.md)
+[![SkillsDB](https://img.shields.io/badge/SkillsDB-v4.1.2-007ec6.svg)](skillsdb/)
 [![Gitea Service](https://img.shields.io/badge/Gitea_Service-v1.1.2-green.svg)](gitea-service/)
 [![Tests](https://img.shields.io/badge/tests-102%2F102%20passing-brightgreen.svg)](tests/)
 [![Antigravity](https://img.shields.io/badge/compatible-Google%20Antigravity%202.0-orange.svg)](https://deepmind.google/)
@@ -10,7 +10,7 @@
 [![License](https://img.shields.io/badge/license-AGPLv3_%2B_Commons_Clause-blue.svg)](LICENSE)
 
 **Turnkey agentic development environment for Google Antigravity IDE**  
-*Combining **SkillsDB (`v4.1.1`)** + **Antigravity Gitea Windows service (`v1.1.2`)** in a single one-command distribution.*
+*Combining **SkillsDB (`v4.1.2`)** + **Antigravity Gitea Windows service (`v1.1.2`)** in a single one-command distribution.*
 
 ---
 
@@ -33,7 +33,7 @@
 
 It bundles two tightly integrated systems into a single repository and installer:
 
-1. **SkillsDB context and memory engine (`v4.1.1`)**:
+1. **SkillsDB context and memory engine (`v4.1.2`)**:
    - **Multi-pool Golden-Ratio (`61.8%` / `85.0%`) agent control plane**: Governs `Ultra` (16 parallel reader threads) and `Pro` (8 parallel reader threads) coding subscriptions across all 4 quota pools (`Pool 1A: Gemini 4 Argon [Fast|Med|High]`, `Pool 1B: Gemini 3.8 Flash [Fast|Med|High]`, `Pool 1C: Claude Opus/Sonnet 5.5 [Fast|Med|High]`, `Pool 1D: GPT-OSS 120B [Medium]`, `Pool 2: @google/gemini-cli`, `Pool 3: AI Studio REST`, `Pool 4: gemini.google.com`), keeping 100% of code generation on `Gemini 4 Argon` (or `Claude 5.5`) while routing `research` subagents to `Flash` at zero extra turns via `PreToolUse` overwrite. Includes live 5-hour server-percentage calibration (`--calibrate-pct` / `--reset-calibration`), context-size turn weighting (`1.0x..1.35x`), and cross-workstation heartbeat sync (`quota_workstation_heartbeats`).
    - **Decorator-aware AST contract mapper (`skillsdb ast-map`), surgical FIM slicer (`skillsdb fim slice`), and Context-Shield (`skillsdb gemini-digest`)**: Extracts exact class, method, and function signatures with `[Lstart-Lend]` line boundaries across Python (including `@decorator` spans, conditional `if`/`try`/`with` top-level blocks, and `ClassName.method_name` resolution) and 9 additional languages (TypeScript/JavaScript, PowerShell, Go, Rust, C#, Java, Kotlin, Dart, and SQL via `_find_block_end_line`) at ~95-98% token compression in ~50-70ms before editing, offloads large log/diff digests, and keeps hook latency `< 5-30 ms` on multi-megabyte transcripts via `O(1)` binary `SEEK_END` tail-seeks (`read_jsonl_tail_lines`).
    - **On-demand micro-skill routing and 15-tool `stdio` MCP server (`skillsdb mcp-serve`)**: Replaces static plugin prompt bloat (~35,000 tokens/turn) with a compact (~450 token) routing directive, Antigravity `v2.28.0+` Turn-1 prompt pre-routing, surgical SQLite FTS5 micro-skill retrieval (`--summary`, `--section`), and a zero-dependency 15-tool `stdio` MCP server.
@@ -48,11 +48,11 @@ It bundles two tightly integrated systems into a single repository and installer
 
 ## 2. Measured impact in daily development
 
-| Metric | Standard Antigravity setup | AntiGraviton suite (`v2.1.1`) | Real-world improvement |
+| Metric | Standard Antigravity setup | AntiGraviton suite (`v2.1.2`) | Real-world improvement |
 | :--- | :--- | :--- | :--- |
 | **System and plugin context load** | ~35,000 tokens / turn | **~1,500 tokens / turn** | **~95% lower base overhead** |
 | **Token consumption (60-turn session, benchmarked on Gemini 4 Argon High)** | ~3.39M input tokens | **~0.83M input tokens** | **~75.5% total token savings (4x session capacity)** |
-| **Marathon deep-analysis sessions (9h / 1,249 turns / 3,175 steps)** | ~99% weekly quota (raw IDE) / 33% (`v1.4.2`) | **~10-12% weekly quota (`v2.1.1`)** | **Golden-Ratio 4-pool control plane, 800-line read budget, subagent firewall & 50-step `memory.db` re-hydration** |
+| **Marathon deep-analysis sessions (9h / 1,249 turns / 3,175 steps)** | ~99% weekly quota (raw IDE) / 33% (`v1.4.2`) | **~10-12% weekly quota (`v2.1.2`)** | **Golden-Ratio 4-pool control plane, 800-line read budget, subagent firewall & 50-step `memory.db` re-hydration** |
 | **Pre-edit symbol and signature discovery (`skillsdb ast-map` & `fim slice`)** | Full-file reads (`500-2,000` lines / call) | **~95-98% token compression in ~50 ms** | **Exact `[Lstart-Lend]` spans across Python (decorator-aware) & 9 languages without full-file reads** |
 | **Subagent routing and 5-hour rolling quota control (`quota_router.py`)** | `Model="inherit"` burns `Pool 1A` (`Argon High`, `3.5x`) on research | **0-turn `PreToolUse` `research -> flash` rewrite (`Pool 1B`, `0.35x`)** | **100% `Argon` / `Claude 5.5` for coding, `-90%` subagent quota weight, live `--calibrate-pct` & cross-PC heartbeat sync** |
 | **Hook latency on multi-MB transcripts (`> 2.4 MB` / `2,000+` steps)** | Sequential full-file JSONL scan (`200-500 ms` / step) | **`< 5-30 ms` via `O(1)` binary `SEEK_END` + stat cache** | **Zero hook slowdown in marathon sessions (`read_jsonl_tail_lines`, `_BACKPACK_CACHE`, `_TRANSCRIPT_5H_CACHE`)** |
@@ -113,7 +113,7 @@ Beyond providing persistent project memory and automated Gitea backups, **AntiGr
   1. By default, Antigravity's `invoke_subagent` tool sets `Model` to `"inherit"`. When the main coding agent runs on `Gemini 4 Argon High` (`3.5x` quota weight in `Pool 1A`), every read-only `research` subagent inherits `Argon High` unless explicitly overridden, rapidly draining the 5-hour rolling quota window on file searches.
   2. Before editing a class or function in a large file (`> 250` lines), models frequently read hundreds of unrelated lines just to locate method signatures and line numbers, and when switching between Home and Enterprise workstations, local transcript counters have no awareness of server-side quota consumed on the other machine.
   3. As a session grows past 1,500-2,500 steps (`> 2.4 MB` `transcript.jsonl`), scanning the full JSONL transcript on every `PreToolUse` and `PreInvocation` hook call introduces cumulative I/O latency.
-* **How AntiGraviton `v2.1.1` (`SkillsDB v4.1.1`) fixes it**:
+* **How AntiGraviton `v2.1.2` (`SkillsDB v4.1.2`) fixes it**:
   - **Golden-Ratio (`61.8%` / `85.0%`) 4-pool control plane & 0-turn `PreToolUse` subagent router**: Automatically intercepts `invoke_subagent(TypeName="research")` in `PreToolUse` and rewrites `Model="inherit"` to `Model="flash"` (`Pool 1B`, `0.35x` weight) at zero extra turns while keeping 100% of code generation (`write_file`, `edit_file`, `TypeName="self"`) on `Gemini 4 Argon` (or `Claude 5.5`). Returned `[SUBAGENT REPORT]` file paths and line offsets are automatically persisted into `.agents/memory.db` on `PreInvocation`.
   - **Live 5-hour quota calibration & cross-workstation heartbeat sync**: Combines context-size turn weighting (`1.0x..1.35x`), manual server-percentage anchoring (`skillsdb quota-status --calibrate-pct <0..100>` with linear 5-hour decay), and cross-workstation heartbeat merging (`runtime_config.quota_workstation_heartbeats` via `skillsdb sync`).
   - **Decorator-aware AST contract mapper (`ast-map`), surgical FIM (`fim slice`), and Context-Shield (`gemini-digest`)**: Extracts `[Lstart-Lend]` symbol contracts across Python (including `@decorator` lines, `if`/`try`/`with` top-level blocks, and `ClassName.method_name` resolution) and 9 additional languages (`_find_block_end_line` for TS/JS, PowerShell, Go, Rust, C#, Java, Kotlin, Dart, and SQL) at `95-98%` token compression in `~50 ms`, enforced by an AST-first `PreToolUse` check on files `> 250` lines.
@@ -155,7 +155,7 @@ powershell -ExecutionPolicy Bypass -File .\install-antigraviton.ps1
 ```text
 AntiGraviton/
 |-- LICENSE                        # GNU AGPL v3.0 + Commons Clause v1.0 (no commercial resale)
-|-- VERSION                        # SemVer 2.0.0 suite release version (2.1.1)
+|-- VERSION                        # SemVer 2.0.0 suite release version (2.1.2)
 |-- CHANGELOG.md                   # SemVer release history
 |-- README.md                      # Suite documentation
 |-- install-antigraviton.ps1       # Unified 1-command installer (SkillsDB + Gitea + Auto-Token)
@@ -166,7 +166,7 @@ AntiGraviton/
 |   `-- skills/
 |       `-- install-antigraviton/
 |           `-- SKILL.md           # Antigravity IDE 1-prompt onboarding skill
-|-- skillsdb/                      # Modular Python package source (v4.1.1)
+|-- skillsdb/                      # Modular Python package source (v4.1.2)
 |   |-- config.py                  # Paths, constants, and O(1) JSONL binary tail-seek
 |   |-- cli.py                     # Unified CLI entrypoint & subcommands
 |   |-- core/                      # Control plane, DB schema, AST/FIM, quota router & guardrails
