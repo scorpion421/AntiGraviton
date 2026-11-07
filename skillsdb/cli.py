@@ -96,6 +96,9 @@ from .memory.project_memory import (
     mem_get_context,
     mem_search,
     mem_prune,
+    mem_index_symbols,
+    mem_locate_symbol,
+    mem_batch,
     analyze_conversation_epochs_and_scope,
     handle_pre_invocation_hook,
     stats,
@@ -354,6 +357,33 @@ def build_parser() -> argparse.ArgumentParser:
     mem_prune_parser.add_argument("--max-snapshots", type=int, default=10, help="Maximum snapshots to keep")
     mem_prune_parser.add_argument("--max-age", type=int, default=30, help="Max age in days")
     mem_prune_parser.add_argument("--project", default=None, help="Project root directory (optional)")
+
+    mem_idx_parser = subparsers.add_parser("mem-index", aliases=["index-symbols"], help="Incrementally index workspace symbols and [start_line, end_line] offsets into .agents/memory.db")
+    mem_idx_parser.add_argument("--force", action="store_true", help="Force full re-index of all source files")
+    mem_idx_parser.add_argument("--project", default=None, help="Project root directory (optional)")
+
+    mem_loc_parser = subparsers.add_parser("locate", aliases=["mem-locate"], help="Locate exact file paths and [start_line, end_line] offsets for a symbol or Class.method")
+    mem_loc_parser.add_argument("query", help="Symbol, function, class, or Class.method name to locate")
+    mem_loc_parser.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
+    mem_loc_parser.add_argument("--no-index", action="store_true", help="Skip automatic incremental mtime index refresh")
+    mem_loc_parser.add_argument("--json", action="store_true", help="Output results as JSON")
+    mem_loc_parser.add_argument("--project", default=None, help="Project root directory (optional)")
+
+    mem_batch_parser = subparsers.add_parser("mem-batch", aliases=["batch"], help="Execute multiple project memory operations (facts, decisions, tasks, snapshot, symbol locate) in a single Python process")
+    mem_batch_parser.add_argument("--fact", dest="facts", action="append", default=[], help="Fact in 'key=value' format (repeatable)")
+    mem_batch_parser.add_argument("--decision", dest="decisions", action="append", default=[], help="Decision in 'Title::Content' format (repeatable)")
+    mem_batch_parser.add_argument("--task-add", dest="tasks_add", action="append", default=[], help="New task title to add as in_progress (repeatable)")
+    mem_batch_parser.add_argument("--task-in-progress", dest="tasks_in_progress", type=int, action="append", default=[], help="Task ID to mark in_progress (repeatable)")
+    mem_batch_parser.add_argument("--task-done", dest="tasks_done", type=int, action="append", default=[], help="Task ID to mark completed (repeatable)")
+    mem_batch_parser.add_argument("--task-delete", dest="tasks_delete", type=int, action="append", default=[], help="Task ID to delete (repeatable)")
+    mem_batch_parser.add_argument("--snapshot", default=None, help="Milestone snapshot summary to save")
+    mem_batch_parser.add_argument("--next-steps", default=None, help="Optional next steps for snapshot")
+    mem_batch_parser.add_argument("--files", default=None, help="Optional files touched for snapshot")
+    mem_batch_parser.add_argument("--commit", action="store_true", help="Auto-commit and push snapshot to Gitea")
+    mem_batch_parser.add_argument("--locate", dest="locate_queries", action="append", default=[], help="Symbol name to locate in the same batch call (repeatable)")
+    mem_batch_parser.add_argument("--context", action="store_true", help="Also output compact project context")
+    mem_batch_parser.add_argument("--json", action="store_true", help="Output batch summary as JSON")
+    mem_batch_parser.add_argument("--project", default=None, help="Project root directory (optional)")
 
     # Model Profile & Multi-Pool Quota Router Commands
     profile_parser = subparsers.add_parser("profile", help="View or configure model tier, account quota tier (ultra/pro), effort level (fast/medium/high), and routing mode")
@@ -760,7 +790,7 @@ def main(argv: list[str] = None):
         return
 
     # Route project memory commands directly to project database
-    if args.command and (args.command.startswith("mem-") or args.command == "context"):
+    if args.command and (args.command.startswith("mem-") or args.command in ("context", "locate", "batch", "index-symbols")):
         proj_root = Path(os.path.abspath(str(args.project))) if getattr(args, "project", None) else find_project_root()
         if args.command == "mem-init":
             mem_init(proj_root)
@@ -816,6 +846,35 @@ def main(argv: list[str] = None):
                 mem_search(pconn, args.query)
             elif args.command == "mem-prune":
                 mem_prune(pconn, max_snapshots=args.max_snapshots, max_age_days=args.max_age)
+            elif args.command in ("mem-index", "index-symbols"):
+                mem_index_symbols(pconn, project_root=proj_root, force=getattr(args, "force", False))
+            elif args.command in ("locate", "mem-locate"):
+                mem_locate_symbol(
+                    pconn,
+                    args.query,
+                    project_root=proj_root,
+                    auto_index=not getattr(args, "no_index", False),
+                    as_json=getattr(args, "json", False),
+                    limit=getattr(args, "limit", 20),
+                )
+            elif args.command in ("mem-batch", "batch"):
+                mem_batch(
+                    pconn,
+                    facts=getattr(args, "facts", None),
+                    decisions=getattr(args, "decisions", None),
+                    tasks_add=getattr(args, "tasks_add", None),
+                    tasks_done=getattr(args, "tasks_done", None),
+                    tasks_in_progress=getattr(args, "tasks_in_progress", None),
+                    tasks_delete=getattr(args, "tasks_delete", None),
+                    snapshot=getattr(args, "snapshot", None),
+                    next_steps=getattr(args, "next_steps", None),
+                    files_touched=getattr(args, "files", None),
+                    auto_commit=getattr(args, "commit", False),
+                    locate_queries=getattr(args, "locate_queries", None),
+                    show_context=getattr(args, "context", False),
+                    project_root=proj_root,
+                    as_json=getattr(args, "json", False),
+                )
         finally:
             stop_all_writer_queues()
             pconn.close()

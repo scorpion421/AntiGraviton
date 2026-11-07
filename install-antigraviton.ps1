@@ -1,13 +1,13 @@
 <#
 .SYNOPSIS
-    Unified One-Command Installer for the AntiGraviton Complete Suite (v2.1.2).
+    Unified One-Command Installer for the AntiGraviton Complete Suite (v2.1.3).
 
 .DESCRIPTION
     Deploys the complete AntiGraviton environment for Google Antigravity IDE across
     all three target scenarios (Enterprise AD/UNC, Desktop with scheduled backup, and Laptop/Secondary Drive):
     0. Automatic PowerShell 7 (pwsh) & Python 3 runtime bootstrap + IDE/Windows Terminal default shell configuration
     1. Non-destructive upgrade preservation of existing runtime_config, Gitea tokens, learned workspaces, and user-learned rules
-    2. SkillsDB Context & Memory Engine (v4.1.2) + customizations-db Plugin + UTF-8 manifest deployment
+    2. SkillsDB Context & Memory Engine (v4.1.3) + customizations-db Plugin + UTF-8 manifest deployment
     3. Antigravity Gitea Local Windows Service (v1.1.2) with 3-tier elevation handling (direct admin, optional DPAPI, or UAC),
        secondary drive NTFS ACL setup, SCM auto-recovery, non-elevated start/stop permissions, and optional 03:00 backup task
     4. Zero-touch local Gitea Admin user (with optional explicit password) & API Token provisioning into SkillsDB
@@ -100,7 +100,7 @@ if ($Standalone) {
 
 $suiteRoot = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
 $versionFile = Join-Path $suiteRoot "VERSION"
-$suiteVersion = if (Test-Path $versionFile) { (Get-Content $versionFile -Raw).Trim() } else { "2.1.2" }
+$suiteVersion = if (Test-Path $versionFile) { (Get-Content $versionFile -Raw).Trim() } else { "2.1.3" }
 $userHome = if ($env:USERPROFILE) { $env:USERPROFILE } else { [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::UserProfile) }
 $geminiDir = Join-Path $userHome ".gemini"
 $targetDbPath = Join-Path $geminiDir "database\customizations.db"
@@ -142,7 +142,7 @@ if (-not $pwshCmd) {
         }
     }
 }
-$preferredShellExe = if ($pwshCmd) { $pwshCmd.Source } else { "2.1.2" }
+$preferredShellExe = if ($pwshCmd) { $pwshCmd.Source } else { "2.1.3" }
 if ($pwshCmd) {
     $pwshVer = (& $preferredShellExe --version 2>$null | Out-String).Trim()
     Write-Host "      Active PowerShell 7 binary: $preferredShellExe ($pwshVer)" -ForegroundColor Green
@@ -273,7 +273,7 @@ except Exception as e:
 # ---------------------------------------------------------------------------
 # STEP 2: Deploy SkillsDB Core & Antigravity Plugin
 # ---------------------------------------------------------------------------
-Write-Host "[2/5] Deploying SkillsDB Engine (v4.1.2) and customizations-db Plugin..."
+Write-Host "[2/5] Deploying SkillsDB Engine (v4.1.3) and customizations-db Plugin..."
 $deployPy = Join-Path $suiteRoot "deploy.py"
 $deployPs1 = Join-Path $suiteRoot "deploy.ps1"
 
@@ -559,7 +559,7 @@ print(f"{bool(t_val)}|{u_val}|{e_val}")
 "@
 $cfgOut = ($checkConfigPy | & python - $targetDbPath | Out-String).Trim()
 $cfgParts = $cfgOut -split '\|', 3
-$hasToken = if ($cfgParts.Count -ge 1) { $cfgParts[0] } else { "2.1.2" }
+$hasToken = if ($cfgParts.Count -ge 1) { $cfgParts[0] } else { "2.1.3" }
 $existingGiteaUser = if ($cfgParts.Count -ge 2) { $cfgParts[1] } else { "" }
 $existingEnabled = if ($cfgParts.Count -ge 3) { $cfgParts[2] } else { "" }
 $preservedActiveGitea = $false
@@ -695,7 +695,7 @@ Write-Host "============================================================" -Foreg
 Write-Host "AntiGraviton Complete Suite v$suiteVersion is active!" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host "1. Active Core Capabilities:" -ForegroundColor Green
-Write-Host "   - SkillsDB Engine (v4.1.2): ~95% token reduction via on-demand FTS5 micro-skills"
+Write-Host "   - SkillsDB Engine (v4.1.3): ~95% token reduction via on-demand FTS5 micro-skills"
 Write-Host "   - Episodic Project Memory : .agents/memory.db (decisions, facts, tasks, snapshots)"
 if ($SkipGiteaService -and -not $preservedActiveGitea) {
     Write-Host "   - Local Gitea Service     : Skipped (Standalone SkillsDB-Only Mode)"

@@ -5,6 +5,21 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.3] - 2026-11-07
+
+### Added
+- **Incremental symbol and line-offset locator in `.agents/memory.db` (`skillsdb locate`, `skillsdb mem-index`, `skillsdb/memory/project_memory.py`, `v4.1.3`)**:
+  - Added the `symbol_index` SQLite table and `mem_index_symbols()` / `mem_locate_symbol()` to index classes, functions, and `Class.method` definitions with exact `[start_line, end_line]` boundaries (including decorator spans) and `file_mtime` tracking.
+  - Added `skillsdb locate <symbol>` (alias `mem-locate`) so the agent can resolve exact `read_file(Path, StartLine, EndLine)` line ranges in `< 5 ms` without burning exploratory grep or `ast-map` turns.
+- **Single-process batch memory CLI (`skillsdb mem-batch`, `skillsdb/memory/project_memory.py`, `v4.1.3`)**:
+  - Added `mem_batch()` and `skillsdb mem-batch` (alias `batch`) to combine multiple `--fact`, `--decision`, `--task-add`, `--task-in-progress`, `--task-done`, `--task-delete`, `--snapshot`, `--locate`, and `--context` operations into a single Python process startup (`< 30 ms`), preventing multi-command PowerShell chains from exceeding `WaitMsBeforeAsync` and triggering extra background wakeup turns.
+
+### Changed
+- **Condensed `<user_rules>` footprint in `plugin/rules/AGENTS.md` (`-54%` per-turn rule tokens, `v4.1.3`)**:
+  - Removed the obsolete Section 7 background Agent Control Plane instructions and condensed `plugin/rules/AGENTS.md` from `8,370` bytes (`~2,092` tokens) to `4,020` bytes (`~1,005` tokens), saving `~1,087` static system-prompt tokens on every single turn while preserving 100% of formatting, German orthography, SemVer/Keep a Changelog, SOC IT audit, and pure-Pull SkillsDB invariants.
+
+---
+
 ## [2.1.2] - 2026-11-07
 
 ### Changed

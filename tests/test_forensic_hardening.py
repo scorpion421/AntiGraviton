@@ -420,8 +420,53 @@ class TestForensicHardeningV143(unittest.TestCase):
         preadme = (repo_root / "plugin" / "README.md").read_text(encoding="utf-8")
         self.assertIn(f"AntiGraviton `v{__suite_version__}` (`SkillsDB v{__version__}`)", preadme)
         self.assertNotIn("http://localhost:3000/MickyFoley/AntiGraviton", preadme)
-        self.assertNotIn("http://localhost:3000/MickyFoley/AntiGraviton", preadme)
 
+    def test_v2_1_3_mem_batch_and_symbol_locator(self):
+        from skillsdb.memory.project_memory import mem_batch, mem_locate_symbol
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp)
+            (ws / ".agents").mkdir(parents=True, exist_ok=True)
+            src = ws / "service.py"
+            src.write_text(
+                "class AuthEngine:\n"
+                "    def verify_token(self, token: str) -> bool:\n"
+                "        return bool(token)\n\n"
+                "def compute_checksum(data: bytes) -> int:\n"
+                "    return len(data)\n",
+                encoding="utf-8",
+            )
+            conn = get_project_connection(ws)
+            try:
+                res = mem_batch(
+                    conn,
+                    facts=["api_port=8080", "env=prod"],
+                    decisions=["Token Auth::Use HMAC tokens"],
+                    tasks_add=["Implement AuthEngine"],
+                    snapshot="Initial service scaffold",
+                    locate_queries=["AuthEngine.verify_token"],
+                    project_root=ws,
+                )
+                self.assertEqual(res["facts_saved"], ["api_port", "env"])
+                self.assertEqual(res["decisions_saved"], ["Token Auth"])
+                self.assertEqual(len(res["tasks_added"]), 1)
+                self.assertTrue(res["snapshot_saved"])
+                matches = res["located"].get("AuthEngine.verify_token", [])
+                self.assertEqual(len(matches), 1)
+                self.assertEqual(matches[0]["start_line"], 2)
+                self.assertEqual(matches[0]["end_line"], 3)
+
+                tid = res["tasks_added"][0]
+                res2 = mem_batch(conn, tasks_done=[tid], tasks_delete=[tid], project_root=ws)
+                self.assertEqual(res2["tasks_completed"], [tid])
+                self.assertEqual(res2["tasks_deleted"], [tid])
+
+                fn_matches = mem_locate_symbol(conn, "compute_checksum", project_root=ws, as_json=False)
+                self.assertEqual(len(fn_matches), 1)
+                self.assertEqual(fn_matches[0]["start_line"], 5)
+                self.assertEqual(fn_matches[0]["end_line"], 6)
+            finally:
+                stop_all_writer_queues()
+                conn.close()
 
 if __name__ == "__main__":
     unittest.main()
