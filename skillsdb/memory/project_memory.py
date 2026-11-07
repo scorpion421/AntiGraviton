@@ -1659,7 +1659,7 @@ def handle_pre_invocation_hook():
         "   - Cluster-Fix & Chained Pipelines: When a bug pattern is found, check the entire project for all occurrences of that bug class before rebuilding, and chain build/test/verify into one command ('build && test && verify').",
         "   - Zero-Polling & Local Indexing: Use WaitMsBeforeAsync=5000-10000 for fast commands; when a task backgrounds, NEVER poll 'manage_task status' (wait for automatic Reactive Wakeup). For codebases > 300 files requiring >= 3 analysis rounds, build a local SQLite index in scratch/ instead of repeated brute-force file scans.\n"
     ]
-    lines.append("\n".join(guardrail_lines[:5] + [guardrail_lines[18]]))
+    lines.append("\n".join(guardrail_lines[:5] + [guardrail_lines[17]]))
 
     # 0.5 Temporal Epoch Slicing & Cross-Project Isolation Anchor
     today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")

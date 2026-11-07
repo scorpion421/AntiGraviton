@@ -5,6 +5,13 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.1] - 2026-11-07
+
+### Fixed
+- **Compact Turn-1 section header alignment (`skillsdb/memory/project_memory.py`, `v4.1.1`)**: Included `guardrail_lines[17]` (`4. TURN-ECONOMY, PARALLEL BATCHING & DIAGNOSTIC PROTOCOL (MANDATORY):`) in the compact Turn-1 invariant pointer so all 102/102 unit tests pass while preserving the `-550` token Turn-1 footprint reduction.
+
+---
+
 ## [2.1.0] - 2026-11-07
 
 ### Changed
