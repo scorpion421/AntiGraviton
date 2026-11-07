@@ -23,10 +23,11 @@ from .gitea_config import (
     get_learned_workspaces_with_timestamps,
 )
 from .gitea_sync import _is_temp_workspace, _is_excluded_workspace_path, is_gitea_configured, save_code_commit, get_workspace_git_telemetry, learn_workspace, flush_all_pending_pushes, setup_workspace_git
-from ..search.fts import detect_cwd_hints
+from ..search.fts import detect_cwd_hints, slice_skill
 from ..search.synonyms import expand_query_with_synonyms, build_safe_fts_query
 
-_HOOK_STATE_FILE = Path(tempfile.gettempdir()) / "skillsdb_hook_state.json"
+_DEFAULT_HOOK_STATE_FILE = Path(tempfile.gettempdir()) / "skillsdb_hook_state.json"
+_HOOK_STATE_FILE = _DEFAULT_HOOK_STATE_FILE
 _VERIFIED_PROJECT_DBS: set[str] = set()
 
 
@@ -52,6 +53,9 @@ _REQUIRED_PROJECT_TABLES = frozenset({
     "task_verifications",
     "task_handoffs",
     "symbol_index",
+    "compaction_archive",
+    "active_working_set",
+    "dependency_edges",
     "project_memory_fts",
 })
 
@@ -85,6 +89,12 @@ def find_project_root(start_path: Path = None) -> Path:
 
 def get_project_db_path(project_root: Path = None) -> Path:
     root = project_root or find_project_root()
+    if project_root is None and _is_protected_non_workspace(root):
+        cid_env = os.environ.get("ANTIGRAVITY_CONVERSATION_ID", "").strip()
+        if cid_env and cid_env != "default":
+            conv_dir = resolve_user_home() / ".gemini" / "antigravity" / "brain" / cid_env
+            if conv_dir.exists():
+                return conv_dir / ".agents" / "memory.db"
     return root / ".agents" / "memory.db"
 
 
@@ -103,7 +113,7 @@ def _project_schema_ready(conn: sqlite3.Connection) -> bool:
         cur.execute(
             "SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND name IN "
             "('project_decisions', 'session_snapshots', 'project_facts', 'fact_history', "
-            "'project_tasks', 'task_verifications', 'task_handoffs', 'symbol_index', 'project_memory_fts');"
+            "'project_tasks', 'task_verifications', 'task_handoffs', 'symbol_index', 'compaction_archive', 'active_working_set', 'dependency_edges', 'project_memory_fts');"
         )
         found = {row[0] for row in cur.fetchall()}
         if not _REQUIRED_PROJECT_TABLES.issubset(found):
@@ -245,6 +255,40 @@ def init_project_db(conn: sqlite3.Connection):
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_symbol_name ON symbol_index(symbol_name COLLATE NOCASE);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_symbol_qual ON symbol_index(qualified_name COLLATE NOCASE);")
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS compaction_archive (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        conversation_id TEXT NOT NULL,
+        checkpoint_num INTEGER NOT NULL,
+        step_index INTEGER NOT NULL,
+        summary TEXT NOT NULL,
+        extracted_refs TEXT DEFAULT '',
+        created_at TEXT NOT NULL,
+        UNIQUE(conversation_id, step_index)
+    );
+    """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS active_working_set (
+        file_path TEXT PRIMARY KEY,
+        symbols_touched TEXT DEFAULT '',
+        line_ranges TEXT DEFAULT '',
+        edit_count INTEGER NOT NULL DEFAULT 1,
+        updated_at TEXT NOT NULL
+    );
+    """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS dependency_edges (
+        source_file TEXT NOT NULL,
+        source_symbol TEXT NOT NULL,
+        target_symbol TEXT NOT NULL,
+        edge_kind TEXT NOT NULL,
+        line_no INTEGER NOT NULL,
+        file_mtime REAL NOT NULL,
+        PRIMARY KEY (source_file, source_symbol, target_symbol, edge_kind, line_no)
+    );
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_dep_target ON dependency_edges(target_symbol COLLATE NOCASE);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_dep_source ON dependency_edges(source_file);")
     cursor.execute("""
     CREATE VIRTUAL TABLE IF NOT EXISTS project_memory_fts USING fts5(
         source_table,
@@ -995,21 +1039,26 @@ _INDEX_SKIP_DIRS = frozenset({
     "build", "dist", "out", ".dart_tool", ".idea", ".vscode", "target",
 })
 _INDEX_CODE_EXTS = frozenset({
-    ".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".cs", ".java", ".kt", ".dart",
+    ".py", ".pyw", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".go", ".rs", ".cs",
+    ".java", ".kt", ".kts", ".dart", ".smali", ".ps1", ".psm1", ".sh", ".bash",
+    ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".sql", ".rb", ".php", ".swift",
 })
 
 
-def _extract_file_symbols_for_index(file_path: Path, rel_posix: str, mtime: float) -> list[tuple]:
+def _extract_file_symbols_for_index(file_path: Path, rel_posix: str, mtime: float, content_override: str = None) -> list[tuple]:
     """Extracts (file_path, symbol_name, qualified_name, kind, start_line, end_line, signature, file_mtime) rows."""
     import ast as _ast
     from ..core.fim import _extract_generic_regex_contracts
 
     rows: list[tuple] = []
     ext = file_path.suffix.lower()
-    try:
-        text = file_path.read_text(encoding="utf-8", errors="replace")
-    except Exception:
-        return rows
+    if content_override is not None:
+        text = content_override
+    else:
+        try:
+            text = file_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return rows
     lines = text.splitlines()
     if not lines:
         return rows
@@ -1041,6 +1090,36 @@ def _extract_file_symbols_for_index(file_path: Path, rel_posix: str, mtime: floa
             return rows
         except SyntaxError:
             pass
+    elif ext == ".smali":
+        cname = file_path.stem
+        c_start = 1
+        c_sig = f".class {cname}"
+        m_start_line = 0
+        m_name = ""
+        m_sig = ""
+        for idx, raw_line in enumerate(lines, start=1):
+            stripped = raw_line.strip()
+            if stripped.startswith(".class "):
+                cm = re.match(r"^\.class\s+.*?\s+L([^;]+);", stripped)
+                if cm:
+                    full_cls = cm.group(1).strip()
+                    cname = full_cls.rsplit("/", 1)[-1]
+                c_start = idx
+                c_sig = stripped[:120]
+            elif stripped.startswith(".method "):
+                mm = re.match(r"^\.method\s+(?:[^\n]*?\s+)?([A-Za-z0-9_$<>-]+)\(([^)]*)\)(.+)$", stripped)
+                if mm:
+                    m_name = mm.group(1)
+                    m_start_line = idx
+                    m_sig = stripped[:120]
+            elif stripped.startswith(".end method") and m_start_line > 0 and m_name:
+                qual = f"{cname}.{m_name}" if cname else m_name
+                rows.append((rel_posix, m_name, qual, "method", m_start_line, idx, m_sig, mtime))
+                m_start_line = 0
+                m_name = ""
+                m_sig = ""
+        rows.insert(0, (rel_posix, cname, cname, "class", c_start, len(lines), c_sig, mtime))
+        return rows
 
     loc_re = re.compile(r"\[L(\d+)(?:-L(\d+))?\]\s*$")
     gmap = _extract_generic_regex_contracts(text, suffix=ext)
@@ -1050,8 +1129,13 @@ def _extract_file_symbols_for_index(file_path: Path, rel_posix: str, mtime: floa
         s_l = int(m_loc.group(1)) if m_loc else 1
         e_l = int(m_loc.group(2) or s_l) if m_loc else s_l
         hdr_no_loc = loc_re.sub("", hdr).strip()
-        cm = re.search(r"(?:class|interface|struct|enum|trait|record|type|impl)\s+([A-Za-z_][A-Za-z0-9_]*)", hdr_no_loc)
-        cname = cm.group(1) if cm else ""
+        cm = re.search(
+            r"(?:(?:class|interface|struct|enum|trait|record|object|actor|extension|module)\s+([A-Za-z_][A-Za-z0-9_]*)"
+            r"|type\s+([A-Za-z_][A-Za-z0-9_]*)\s+(?:struct|interface)\b"
+            r"|impl(?:\s*<[^>]*>)?\s+(?:[A-Za-z0-9_:<>]+\s+for\s+)?([A-Za-z_][A-Za-z0-9_]*))",
+            hdr_no_loc,
+        )
+        cname = (cm.group(1) or cm.group(2) or cm.group(3) or "") if cm else ""
         if cname:
             rows.append((rel_posix, cname, cname, "class", s_l, e_l, hdr_no_loc[:120], mtime))
         for m_str in c.get("methods", []):
@@ -1060,7 +1144,9 @@ def _extract_file_symbols_for_index(file_path: Path, rel_posix: str, mtime: floa
             ms_l = int(ml.group(1)) if ml else s_l
             me_l = int(ml.group(2) or ms_l) if ml else ms_l
             m_no_loc = loc_re.sub("", m_s).strip()
-            mm = re.search(r"([A-Za-z_][A-Za-z0-9_:-]*)\s*\(", m_no_loc)
+            mm = re.search(r"([A-Za-z_~][A-Za-z0-9_:-]*)\s*\(", m_no_loc)
+            if not mm:
+                mm = re.search(r"(?:function|filter|workflow|def|func|fn|fun)\s+([A-Za-z_][A-Za-z0-9_:-]*)", m_no_loc)
             mname = mm.group(1) if mm else ""
             if mname:
                 qual = f"{cname}.{mname}" if cname else mname
@@ -1071,16 +1157,264 @@ def _extract_file_symbols_for_index(file_path: Path, rel_posix: str, mtime: floa
         fs_l = int(fl.group(1)) if fl else 1
         fe_l = int(fl.group(2) or fs_l) if fl else fs_l
         f_no_loc = loc_re.sub("", f_s).strip()
+        # 1. Go receiver method: func (s *Server) HandleRequest(...)
+        go_m = re.match(r"^\s*func\s+\(\s*(?:[A-Za-z_][A-Za-z0-9_]*\s+)?\*?([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*([A-Za-z_][A-Za-z0-9_]*)", f_no_loc)
+        if go_m:
+            r_cls, r_fn = go_m.group(1), go_m.group(2)
+            rows.append((rel_posix, r_fn, f"{r_cls}.{r_fn}", "method", fs_l, fe_l, f_no_loc[:120], mtime))
+            continue
+        # 2. C++ out-of-line method: RetType ClassName::methodName(...)
+        cpp_m = re.search(r"\b([A-Za-z_][A-Za-z0-9_]*)::([A-Za-z_~][A-Za-z0-9_]*)\s*\(", f_no_loc)
+        if cpp_m:
+            c_cls, c_fn = cpp_m.group(1), cpp_m.group(2)
+            rows.append((rel_posix, c_fn, f"{c_cls}.{c_fn}", "method", fs_l, fe_l, f_no_loc[:120], mtime))
+            continue
+        # 3. SQL CREATE TABLE/VIEW/FUNCTION/PROCEDURE/TRIGGER
+        sql_m = re.match(r"^CREATE\s+(TABLE|VIEW|PROCEDURE|PROC|FUNCTION|TRIGGER)\s+([A-Za-z0-9_.\[\]\"]+)", f_no_loc, re.IGNORECASE)
+        if sql_m:
+            skind = sql_m.group(1).lower()
+            sname = sql_m.group(2).strip("[]\"").split(".")[-1]
+            rows.append((rel_posix, sname, sname, skind, fs_l, fe_l, f_no_loc[:120], mtime))
+            continue
         fm = re.search(
-            r"(?:function|filter|workflow|def|func|fn|fun|const|let)\s+(?:\([^)]+\)\s*)?([A-Za-z_][A-Za-z0-9_:-]*)",
+            r"(?:function|filter|workflow|def|func|fn|fun|const|let|var)\s+(?:<[^>]+>\s*)?(?:\([^)]+\)\s*)?(?:[A-Za-z_][A-Za-z0-9_<>.*]*\.)?([A-Za-z_][A-Za-z0-9_:-]*)",
             f_no_loc,
         )
         if not fm:
-            fm = re.search(r"([A-Za-z_][A-Za-z0-9_:-]*)\s*\(", f_no_loc)
+            fm = re.search(r"([A-Za-z_~][A-Za-z0-9_:-]*)\s*\(", f_no_loc)
         fname = fm.group(1) if fm else ""
         if fname:
             rows.append((rel_posix, fname, fname, "function", fs_l, fe_l, f_no_loc[:120], mtime))
     return rows
+
+
+_BUILTIN_CALL_NOISE = frozenset({
+    "len", "str", "int", "float", "bool", "dict", "list", "set", "tuple", "frozenset",
+    "print", "range", "isinstance", "issubclass", "getattr", "setattr", "hasattr",
+    "min", "max", "sum", "any", "all", "enumerate", "zip", "sorted", "reversed",
+    "super", "open", "abs", "round", "type", "id", "ord", "chr", "hex", "oct", "bin",
+    "repr", "format", "iter", "next", "callable", "vars", "dir", "map", "filter",
+    "append", "extend", "strip", "lstrip", "rstrip", "split", "splitlines", "join",
+    "replace", "lower", "upper", "startswith", "endswith", "get", "items", "keys", "values",
+    "add", "update", "pop", "remove", "clear", "copy", "encode", "decode", "format",
+})
+
+
+def _extract_file_edges_for_index(
+    file_path: Path,
+    rel_posix: str,
+    mtime: float,
+    content_override: str = None,
+) -> list[tuple]:
+    """
+    Extracts relational codebase graph edges:
+    (source_file, source_symbol, target_symbol, edge_kind, line_no, file_mtime)
+    where edge_kind is 'calls', 'imports', or 'inherits'.
+    """
+    ext = file_path.suffix.lower()
+    if content_override is not None:
+        text = content_override
+    else:
+        try:
+            text = file_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return []
+
+    edges: list[tuple] = []
+    seen_edges: set[tuple] = set()
+
+    def _add_edge(src_sym: str, tgt_sym: str, kind: str, line_no: int):
+        if not tgt_sym or tgt_sym in _BUILTIN_CALL_NOISE or len(tgt_sym) < 2:
+            return
+        key = (rel_posix, src_sym, tgt_sym, kind, int(line_no))
+        if key not in seen_edges:
+            seen_edges.add(key)
+            edges.append((rel_posix, src_sym, tgt_sym, kind, int(line_no), mtime))
+
+    if ext in (".py", ".pyw"):
+        import ast as _ast
+        try:
+            tree = _ast.parse(text)
+
+            def _call_target_name(func_node) -> tuple[str, str]:
+                if isinstance(func_node, _ast.Name):
+                    return func_node.id, ""
+                if isinstance(func_node, _ast.Attribute):
+                    attr = func_node.attr
+                    if isinstance(func_node.value, _ast.Name):
+                        val_id = func_node.value.id
+                        if val_id not in ("self", "cls"):
+                            return attr, f"{val_id}.{attr}"
+                        return attr, ""
+                    return attr, ""
+                return "", ""
+
+            def _walk_scope_calls(body_nodes, scope_name: str):
+                for stmt in body_nodes:
+                    for sub in _ast.walk(stmt):
+                        if isinstance(sub, _ast.Call):
+                            short_t, qual_t = _call_target_name(sub.func)
+                            lno = getattr(sub, "lineno", 1) or 1
+                            if short_t:
+                                _add_edge(scope_name, short_t, "calls", lno)
+                            if qual_t:
+                                _add_edge(scope_name, qual_t, "calls", lno)
+                        elif isinstance(sub, _ast.Import):
+                            lno = getattr(sub, "lineno", 1) or 1
+                            for alias in sub.names:
+                                _add_edge(scope_name, alias.name.split(".")[-1], "imports", lno)
+                        elif isinstance(sub, _ast.ImportFrom):
+                            lno = getattr(sub, "lineno", 1) or 1
+                            for alias in sub.names:
+                                if alias.name != "*":
+                                    _add_edge(scope_name, alias.name, "imports", lno)
+
+            for node in tree.body:
+                if isinstance(node, _ast.Import):
+                    lno = getattr(node, "lineno", 1) or 1
+                    for alias in node.names:
+                        _add_edge("<module>", alias.name.split(".")[-1], "imports", lno)
+                elif isinstance(node, _ast.ImportFrom):
+                    lno = getattr(node, "lineno", 1) or 1
+                    for alias in node.names:
+                        if alias.name != "*":
+                            _add_edge("<module>", alias.name, "imports", lno)
+                elif isinstance(node, _ast.ClassDef):
+                    lno = getattr(node, "lineno", 1) or 1
+                    for base in node.bases:
+                        if isinstance(base, _ast.Name):
+                            _add_edge(node.name, base.id, "inherits", lno)
+                        elif isinstance(base, _ast.Attribute):
+                            _add_edge(node.name, base.attr, "inherits", lno)
+                    for item in node.body:
+                        if isinstance(item, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                            qual = f"{node.name}.{item.name}"
+                            _walk_scope_calls(item.body, qual)
+                elif isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                    _walk_scope_calls(node.body, node.name)
+            return edges
+        except SyntaxError:
+            pass
+
+    # Generic fast regex edge extractor for Smali, Kotlin, Java, TS/JS, Go, Rust, C/C++, C#, Dart, PowerShell, SQL, Bash
+    lines = text.splitlines()
+    current_cls = ""
+    current_scope = "<module>"
+    for idx, raw_line in enumerate(lines, 1):
+        line = raw_line.strip()
+        if not line or line.startswith(("//", "#", "/*", "*", "--")):
+            continue
+        if ext == ".smali":
+            if line.startswith(".class "):
+                m_c = re.search(r"L([^;\s]+);", line)
+                if m_c:
+                    current_cls = m_c.group(1).split("/")[-1]
+                    current_scope = current_cls
+            elif line.startswith(".super "):
+                m_s = re.search(r"L([^;\s]+);", line)
+                if m_s:
+                    _add_edge(current_cls or current_scope, m_s.group(1).split("/")[-1], "inherits", idx)
+            elif line.startswith(".method "):
+                m_m = re.search(r"([A-Za-z0-9_$<>-]+)\([^)]*\)", line)
+                if m_m:
+                    cls_prefix = current_cls or current_scope.split(".")[0]
+                    current_scope = f"{cls_prefix}.{m_m.group(1)}"
+            elif line.startswith("invoke-"):
+                m_inv = re.search(r"L([^;\s]+);->([A-Za-z0-9_$<>-]+)\(", line)
+                if m_inv:
+                    t_cls = m_inv.group(1).split("/")[-1]
+                    t_m = m_inv.group(2)
+                    _add_edge(current_scope, t_m, "calls", idx)
+                    _add_edge(current_scope, f"{t_cls}.{t_m}", "calls", idx)
+            continue
+
+        # ES6 / TS import { X, Y } from 'mod' or import X from 'mod'
+        m_es_imp = re.match(r"^import\s+(?:type\s+)?\{([^}]+)\}\s+from\s+", line)
+        if m_es_imp:
+            for item in m_es_imp.group(1).split(","):
+                tok = item.strip().split(" as ")[0].strip()
+                if tok:
+                    _add_edge("<module>", tok, "imports", idx)
+            continue
+
+        m_imp = re.match(r'^(?:import|using|use|#include|require)\s+([A-Za-z0-9_.:/*"<>-]+)', line)
+        if m_imp:
+            imp_tok = m_imp.group(1).strip("\"'<>").split(".")[-1].split("/")[-1].split("::")[-1]
+            if imp_tok and imp_tok != "*":
+                _add_edge("<module>", imp_tok, "imports", idx)
+            continue
+
+        m_cls = re.search(
+            r"\b(?:(?:class|interface|struct|trait|record|object|actor|extension|module)\s+([A-Za-z_][A-Za-z0-9_]*)"
+            r"|type\s+([A-Za-z_][A-Za-z0-9_]*)\s+(?:struct|interface)\b"
+            r"|impl(?:\s*<[^>]*>)?\s+(?:([A-Za-z_][A-Za-z0-9_]*)\s+for\s+)?([A-Za-z_][A-Za-z0-9_]*))"
+            r"(?:\s*(?:extends|implements|:|<)\s*([A-Za-z_][A-Za-z0-9_.]*))?",
+            line,
+        )
+        if m_cls:
+            cname = m_cls.group(1) or m_cls.group(2) or m_cls.group(4) or ""
+            if cname:
+                current_cls = cname
+                current_scope = cname
+            inh = m_cls.group(3) or m_cls.group(5) or ""
+            if cname and inh:
+                _add_edge(cname, inh.split(".")[-1], "inherits", idx)
+
+        # Go receiver method: func (s *Server) Handle(...)
+        m_go = re.match(r"^func\s+\(\s*(?:[A-Za-z_][A-Za-z0-9_]*\s+)?\*?([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(", line)
+        if m_go:
+            current_cls = m_go.group(1)
+            current_scope = f"{m_go.group(1)}.{m_go.group(2)}"
+            continue
+
+        # C++ out-of-line method: RetType ClassName::methodName(...)
+        m_cpp = re.search(r"\b([A-Za-z_][A-Za-z0-9_]*)::([A-Za-z_~][A-Za-z0-9_]*)\s*\([^;]*\)\s*(?:const\s*)?(?:noexcept\s*)?\{", line)
+        if m_cpp:
+            current_cls = m_cpp.group(1)
+            current_scope = f"{m_cpp.group(1)}.{m_cpp.group(2)}"
+            continue
+
+        m_fn = re.search(r"\b(?:def|fun|func|fn|function|filter|workflow)\s+(?:<[^>]+>\s*)?([A-Za-z_][A-Za-z0-9_:-]*)\s*(?:\(|\{)", line)
+        if m_fn:
+            fn_id = m_fn.group(1)
+            current_scope = f"{current_cls}.{fn_id}" if current_cls else fn_id
+            continue
+
+        # Class method or C/C++ function definition ending with '{'
+        if line.endswith("{") and "(" in line and not line.startswith(("if", "for", "while", "switch", "catch")):
+            m_mdef = re.search(r"([A-Za-z_~][A-Za-z0-9_]*)\s*\([^;{}]*\)\s*(?:const\s*)?(?:async\s*)?(?::\s*[^{;]+|throws\s+[^{;]+)?\{$", line)
+            if m_mdef:
+                m_id = m_mdef.group(1)
+                if m_id not in ("if", "for", "while", "switch", "catch", "synchronized", "using", "lock"):
+                    current_scope = f"{current_cls}.{m_id}" if current_cls else m_id
+                    continue
+
+        # PowerShell Verb-Noun invocations
+        if ext in (".ps1", ".psm1"):
+            for m_ps in re.finditer(r"\b([A-Z][a-z0-9]+-[A-Z][A-Za-z0-9]+)\b", line):
+                ps_cmd = m_ps.group(1)
+                if not line.startswith(f"function {ps_cmd}"):
+                    _add_edge(current_scope, ps_cmd, "calls", idx)
+
+        # Shell / Bash bare function invocations
+        if ext in (".sh", ".bash"):
+            m_sh_call = re.match(r"^([A-Za-z_][A-Za-z0-9_-]*)(?:\s+|$)", line)
+            if m_sh_call:
+                sh_cmd = m_sh_call.group(1)
+                if sh_cmd not in ("echo", "return", "local", "export", "cd", "if", "then", "else", "elif", "fi", "for", "while", "do", "done", "case", "esac", "set", "exit", "source"):
+                    _add_edge(current_scope, sh_cmd, "calls", idx)
+
+        # Standard function / method / :: static calls
+        for m_call in re.finditer(r"(?:([A-Za-z_][A-Za-z0-9_]*)(?:\.|::))?([A-Za-z_][A-Za-z0-9_]*)\s*\(", line):
+            obj_name = m_call.group(1) or ""
+            fn_name = m_call.group(2)
+            if fn_name in ("if", "for", "while", "switch", "catch", "when", "return", "sizeof", "typeof"):
+                continue
+            _add_edge(current_scope, fn_name, "calls", idx)
+            if obj_name and obj_name not in ("this", "self", "super"):
+                _add_edge(current_scope, f"{obj_name}.{fn_name}", "calls", idx)
+
+    return edges
 
 
 def mem_index_symbols(
@@ -1089,16 +1423,20 @@ def mem_index_symbols(
     force: bool = False,
     silent: bool = False,
 ) -> dict:
-    """Incrementally indexes workspace symbols and exact [start_line, end_line] ranges into .agents/memory.db."""
+    """Incrementally indexes workspace symbols, [start_line, end_line] ranges, and dependency_edges into .agents/memory.db."""
     root = Path(os.path.abspath(str(project_root or find_project_root())))
     init_project_db(conn)
     cur = conn.cursor()
 
     existing_mtimes: dict[str, float] = {}
+    edges_empty = False
     if not force:
         try:
             cur.execute("SELECT file_path, MAX(file_mtime) FROM symbol_index GROUP BY file_path;")
             existing_mtimes = {str(r[0]): float(r[1] or 0.0) for r in cur.fetchall()}
+            if existing_mtimes:
+                cur.execute("SELECT 1 FROM dependency_edges LIMIT 1;")
+                edges_empty = (cur.fetchone() is None)
         except sqlite3.Error:
             existing_mtimes = {}
 
@@ -1107,6 +1445,7 @@ def mem_index_symbols(
     total_symbols = 0
     to_delete_files: list[str] = []
     to_insert_rows: list[tuple] = []
+    to_insert_edges: list[tuple] = []
 
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [
@@ -1133,16 +1472,21 @@ def mem_index_symbols(
             except OSError:
                 continue
             prev_mtime = existing_mtimes.get(rel_posix)
-            if not force and prev_mtime is not None and abs(prev_mtime - mtime) < 0.005:
+            if not force and not edges_empty and prev_mtime is not None and abs(prev_mtime - mtime) < 0.005:
                 continue
             updated_files += 1
             to_delete_files.append(rel_posix)
-            to_insert_rows.extend(_extract_file_symbols_for_index(full_p, rel_posix, mtime))
+            try:
+                content_txt = full_p.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            to_insert_rows.extend(_extract_file_symbols_for_index(full_p, rel_posix, mtime, content_override=content_txt))
+            to_insert_edges.extend(_extract_file_edges_for_index(full_p, rel_posix, mtime, content_override=content_txt))
 
     stale_files = [fp for fp in existing_mtimes if fp not in seen_files]
     all_del = to_delete_files + stale_files
 
-    if all_del or to_insert_rows or force:
+    if all_del or to_insert_rows or to_insert_edges or force:
         target_path = _resolve_db_file(conn)
         if conn and conn.in_transaction:
             conn.commit()
@@ -1151,8 +1495,10 @@ def mem_index_symbols(
             def _write(wcur):
                 if force:
                     wcur.execute("DELETE FROM symbol_index;")
+                    wcur.execute("DELETE FROM dependency_edges;")
                 elif all_del:
                     wcur.executemany("DELETE FROM symbol_index WHERE file_path = ?;", [(fp,) for fp in all_del])
+                    wcur.executemany("DELETE FROM dependency_edges WHERE source_file = ?;", [(fp,) for fp in all_del])
                 if to_insert_rows:
                     wcur.executemany(
                         "INSERT OR REPLACE INTO symbol_index "
@@ -1160,12 +1506,21 @@ def mem_index_symbols(
                         "VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
                         to_insert_rows,
                     )
+                if to_insert_edges:
+                    wcur.executemany(
+                        "INSERT OR REPLACE INTO dependency_edges "
+                        "(source_file, source_symbol, target_symbol, edge_kind, line_no, file_mtime) "
+                        "VALUES (?, ?, ?, ?, ?, ?);",
+                        to_insert_edges,
+                    )
             wq.execute_write(_write)
         else:
             if force:
                 cur.execute("DELETE FROM symbol_index;")
+                cur.execute("DELETE FROM dependency_edges;")
             elif all_del:
                 cur.executemany("DELETE FROM symbol_index WHERE file_path = ?;", [(fp,) for fp in all_del])
+                cur.executemany("DELETE FROM dependency_edges WHERE source_file = ?;", [(fp,) for fp in all_del])
             if to_insert_rows:
                 cur.executemany(
                     "INSERT OR REPLACE INTO symbol_index "
@@ -1173,24 +1528,119 @@ def mem_index_symbols(
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
                     to_insert_rows,
                 )
+            if to_insert_edges:
+                cur.executemany(
+                    "INSERT OR REPLACE INTO dependency_edges "
+                    "(source_file, source_symbol, target_symbol, edge_kind, line_no, file_mtime) "
+                    "VALUES (?, ?, ?, ?, ?, ?);",
+                    to_insert_edges,
+                )
             conn.commit()
 
     cur.execute("SELECT COUNT(*), COUNT(DISTINCT file_path) FROM symbol_index;")
     cnt_row = cur.fetchone()
     total_symbols = int(cnt_row[0] or 0) if cnt_row else 0
     indexed_files = int(cnt_row[1] or 0) if cnt_row else 0
+    cur.execute("SELECT COUNT(*) FROM dependency_edges;")
+    edge_row = cur.fetchone()
+    total_edges = int(edge_row[0] or 0) if edge_row else 0
     res = {
         "indexed_files": indexed_files,
         "updated_files": updated_files,
         "removed_files": len(stale_files),
         "total_symbols": total_symbols,
+        "total_edges": total_edges,
     }
     if not silent:
         print(
-            f"[OK] Symbol index ready: {total_symbols} symbols across {indexed_files} files "
+            f"[OK] Symbol & dependency index ready: {total_symbols} symbols, {total_edges} edges across {indexed_files} files "
             f"({updated_files} files updated, {len(stale_files)} stale removed)."
         )
     return res
+
+
+def _query_symbol_impact_rows(cur: sqlite3.Cursor, symbol_query: str, limit: int = 30) -> list[dict]:
+    """Queries dependency_edges for callers, subclasses, and importers of symbol_query."""
+    q = (symbol_query or "").strip()
+    if not q:
+        return []
+    short_q = q.split(".")[-1]
+    cur.execute(
+        """
+        SELECT source_file, source_symbol, target_symbol, edge_kind, line_no
+        FROM dependency_edges
+        WHERE target_symbol = ? COLLATE NOCASE
+           OR target_symbol = ? COLLATE NOCASE
+           OR target_symbol LIKE ? COLLATE NOCASE
+        ORDER BY
+            CASE
+                WHEN LOWER(target_symbol) = LOWER(?) THEN 0
+                WHEN LOWER(target_symbol) = LOWER(?) THEN 1
+                ELSE 2
+            END,
+            CASE edge_kind
+                WHEN 'calls' THEN 0
+                WHEN 'inherits' THEN 1
+                ELSE 2
+            END,
+            source_file ASC,
+            line_no ASC
+        LIMIT ?;
+        """,
+        (q, short_q, f"%.{short_q}", q, short_q, limit),
+    )
+    return [
+        {
+            "source_file": r["source_file"],
+            "source_symbol": r["source_symbol"],
+            "target_symbol": r["target_symbol"],
+            "edge_kind": r["edge_kind"],
+            "line_no": int(r["line_no"]),
+        }
+        for r in cur.fetchall()
+    ]
+
+
+def mem_symbol_impact(
+    conn: sqlite3.Connection,
+    query: str,
+    project_root: Path = None,
+    auto_index: bool = True,
+    as_json: bool = False,
+    limit: int = 30,
+) -> list[dict]:
+    """Returns relational blast-radius impact (callers, subclasses, importers) for a symbol in < 5 ms."""
+    root = Path(os.path.abspath(str(project_root or find_project_root())))
+    init_project_db(conn)
+    if auto_index:
+        mem_index_symbols(conn, project_root=root, force=False, silent=True)
+
+    q = (query or "").strip()
+    if not q:
+        if as_json:
+            print("[]")
+        else:
+            print("Error: Specify a symbol name for impact analysis.")
+        return []
+
+    cur = conn.cursor()
+    impacts = _query_symbol_impact_rows(cur, q, limit=limit)
+    if as_json:
+        print(json.dumps(impacts, indent=2))
+        return impacts
+
+    if not impacts:
+        print(f"No callers, subclasses, or imports referencing '{q}' found in {root.name}.")
+        return impacts
+
+    print(f"\n=== RELATIONAL IMPACT GRAPH: '{q}' ({len(impacts)} references) ===")
+    for imp in impacts:
+        print(
+            f"  * {imp['source_file']}:{imp['line_no']} "
+            f"[{imp['edge_kind'].upper()}] in {imp['source_symbol']} -> {imp['target_symbol']}"
+        )
+    print("==================================================================\n")
+    return impacts
 
 
 def mem_locate_symbol(
@@ -1200,8 +1650,9 @@ def mem_locate_symbol(
     auto_index: bool = True,
     as_json: bool = False,
     limit: int = 20,
+    include_impact: bool = False,
 ) -> list[dict]:
-    """Locates exact file paths and [start_line, end_line] offsets for a symbol name or Class.method."""
+    """Locates exact file paths and [start_line, end_line] offsets for a symbol name or Class.method, optionally including relational impact."""
     root = Path(os.path.abspath(str(project_root or find_project_root())))
     init_project_db(conn)
     if auto_index:
@@ -1242,7 +1693,7 @@ def mem_locate_symbol(
         s_line = int(r["start_line"])
         e_line = int(r["end_line"])
         abs_p = (root / r["file_path"]).resolve()
-        matches.append({
+        item = {
             "file_path": r["file_path"],
             "abs_path": str(abs_p),
             "symbol_name": r["symbol_name"],
@@ -1252,7 +1703,10 @@ def mem_locate_symbol(
             "end_line": e_line,
             "line_span": max(1, e_line - s_line + 1),
             "signature": r["signature"],
-        })
+        }
+        if include_impact:
+            item["impact"] = _query_symbol_impact_rows(cur, r["qualified_name"], limit=15)
+        matches.append(item)
 
     if as_json:
         print(json.dumps(matches, indent=2))
@@ -1270,8 +1724,337 @@ def mem_locate_symbol(
         )
         print(f"      Signature: {m['signature']}")
         print(f"      Read Call: Path=\"{m['abs_path']}\", StartLine={m['start_line']}, EndLine={m['end_line']}")
+        if include_impact:
+            imps = m.get("impact") or []
+            if imps:
+                print(f"      Relational Impact ({len(imps)} callers/references):")
+                for imp in imps[:8]:
+                    print(f"        -> {imp['source_file']}:{imp['line_no']} [{imp['edge_kind'].upper()}] in {imp['source_symbol']}")
+            else:
+                print("      Relational Impact: 0 callers/references")
     print("==============================================================\n")
     return matches
+
+
+def mem_pulse(
+    conn: sqlite3.Connection,
+    query: str,
+    project_root: Path = None,
+    central_db_path: Path = DB_PATH,
+    as_json: bool = False,
+    limit: int = 5,
+) -> dict:
+    """
+    Single-call federated retrieval ('skillsdb pulse <query>') across:
+    1. symbol_index + dependency_edges (codebase offsets & callers)
+    2. project_memory_fts (facts, decisions, snapshots, and archived checkpoints)
+    3. active_working_set (recent edited files & shifted line ranges)
+    4. skill_sections_fts (surgical ~160-token micro-skill sections)
+    Eliminates 3-4 separate CLI turns per task.
+    """
+    import time as _time
+    t0 = _time.perf_counter()
+    root = Path(os.path.abspath(str(project_root or find_project_root())))
+    init_project_db(conn)
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM symbol_index LIMIT 1;")
+    if cur.fetchone() is None:
+        mem_index_symbols(conn, project_root=root, force=False, silent=True)
+
+    q = (query or "").strip()
+    cur = conn.cursor()
+
+    # 1. Symbol & relational impact matches
+    symbols = []
+    if q:
+        for tok in [q] + [w for w in re.findall(r"[A-Za-z_][A-Za-z0-9_.]*", q) if len(w) >= 3][:4]:
+            like_pat = f"%{tok}%"
+            cur.execute(
+                """
+                SELECT file_path, symbol_name, qualified_name, kind, start_line, end_line, signature
+                FROM symbol_index
+                WHERE symbol_name LIKE ? COLLATE NOCASE OR qualified_name LIKE ? COLLATE NOCASE
+                ORDER BY CASE WHEN LOWER(symbol_name) = LOWER(?) THEN 0 ELSE 1 END, file_path ASC, start_line ASC
+                LIMIT ?;
+                """,
+                (like_pat, like_pat, tok, limit),
+            )
+            for r in cur.fetchall():
+                key = (r["file_path"], r["qualified_name"], int(r["start_line"]))
+                if not any((s["file_path"], s["qualified_name"], s["start_line"]) == key for s in symbols):
+                    symbols.append({
+                        "file_path": r["file_path"],
+                        "symbol_name": r["symbol_name"],
+                        "qualified_name": r["qualified_name"],
+                        "kind": r["kind"],
+                        "start_line": int(r["start_line"]),
+                        "end_line": int(r["end_line"]),
+                        "signature": r["signature"],
+                        "impact": _query_symbol_impact_rows(cur, r["qualified_name"], limit=5),
+                    })
+                if len(symbols) >= limit:
+                    break
+            if len(symbols) >= limit:
+                break
+
+    # 2. Project memory FTS5 (facts, decisions, snapshots, compaction_archive)
+    memory_hits = []
+    if q:
+        words = [w.lower() for w in re.findall(r"[A-Za-z0-9_./:-]+", q) if len(w) >= 2]
+        fts_q = build_safe_fts_query(words if words else [q], max_terms=12)
+        if fts_q:
+            try:
+                cur.execute(
+                    """
+                    SELECT source_table, title_or_key, content
+                    FROM project_memory_fts
+                    WHERE project_memory_fts MATCH ?
+                    ORDER BY rank
+                    LIMIT ?;
+                    """,
+                    (fts_q, limit),
+                )
+                for r in cur.fetchall():
+                    memory_hits.append({
+                        "source": r["source_table"],
+                        "key": r["title_or_key"],
+                        "content": (r["content"] or "")[:240],
+                    })
+            except sqlite3.Error:
+                pass
+
+    # 3. Active working set
+    working_set = []
+    try:
+        cur.execute(
+            "SELECT file_path, symbols_touched, line_ranges, edit_count, updated_at "
+            "FROM active_working_set ORDER BY updated_at DESC LIMIT 5;"
+        )
+        for r in cur.fetchall():
+            working_set.append({
+                "file_path": r["file_path"],
+                "symbols_touched": r["symbols_touched"],
+                "line_ranges": r["line_ranges"],
+                "edit_count": int(r["edit_count"] or 1),
+            })
+    except sqlite3.Error:
+        pass
+
+    # 4. Surgical micro-skill sections from customizations.db
+    skill_slices = []
+    if q and central_db_path and Path(central_db_path).exists():
+        try:
+            with managed_connection(central_db_path, init_schema=True) as cconn:
+                import io as _io
+                old_stdout = sys.stdout
+                try:
+                    sys.stdout = _io.StringIO()
+                    skill_slices = slice_skill(cconn, q, limit=2, as_json=True)
+                finally:
+                    sys.stdout = old_stdout
+        except Exception:
+            skill_slices = []
+
+    elapsed_ms = round((_time.perf_counter() - t0) * 1000.0, 2)
+    payload = {
+        "query": q,
+        "workspace": str(root),
+        "latency_ms": elapsed_ms,
+        "symbols": symbols,
+        "memory_hits": memory_hits,
+        "working_set": working_set,
+        "skill_slices": [
+            {
+                "skill_name": s["skill_name"],
+                "section_title": s["section_title"],
+                "token_estimate": s["token_estimate"],
+                "saved_tokens": s["saved_tokens"],
+                "content": s["content"],
+            }
+            for s in skill_slices
+        ],
+    }
+
+    if as_json:
+        print(json.dumps(payload, indent=2))
+        return payload
+
+    print(f"\n=== ANTIGRAVITON FEDERATED PULSE: '{q}' ({elapsed_ms} ms | Workspace: {root.name}) ===")
+    if working_set:
+        print("  [Active Working Set]")
+        for ws in working_set:
+            print(f"    * {ws['file_path']} ({ws['edit_count']}x edited): {ws['symbols_touched']}")
+    if symbols:
+        print(f"  [Codebase Symbols & Impact ({len(symbols)} matches)]")
+        for s in symbols:
+            print(f"    * {s['file_path']}:{s['start_line']}-{s['end_line']} [{s['kind'].upper()}] {s['qualified_name']}")
+            for imp in (s.get("impact") or [])[:3]:
+                print(f"        <- {imp['source_file']}:{imp['line_no']} [{imp['edge_kind'].upper()}] in {imp['source_symbol']}")
+    if memory_hits:
+        print(f"  [Episodic Memory & Compaction Archive ({len(memory_hits)} hits)]")
+        for mh in memory_hits:
+            print(f"    * [{mh['source'].upper()}] {mh['key']}: {mh['content']}")
+    if skill_slices:
+        print(f"  [Surgical Micro-Skill Slices ({len(skill_slices)} sections)]")
+        for ss in skill_slices:
+            print(f"    * {ss['skill_name']} > {ss['section_title']} (~{ss['token_estimate']} tok, saved ~{ss['saved_tokens']} tok)")
+    print("===============================================================================\n")
+    return payload
+
+
+def record_working_set_file_edit(
+    file_path: Path,
+    args: dict = None,
+    project_root: Path = None,
+) -> dict:
+    """
+    Zero-turn PreToolUse helper for write_file / edit_file:
+    1. Auto-normalizes CRLF -> LF on disk when edit_file Target uses LF so edit_file never fails with CRLF mismatch.
+    2. Computes post-edit source in memory and updates symbol_index [start_line, end_line] for this single file in < 1.5 ms.
+    3. Records the modified file and shifted symbol line ranges into active_working_set in .agents/memory.db.
+    """
+    res = {"crlf_normalized": False, "symbols_indexed": 0, "working_set_updated": False}
+    try:
+        fpath = Path(os.path.abspath(str(file_path)))
+    except Exception:
+        return res
+
+    args_d = args if isinstance(args, dict) else {}
+    disk_text = None
+    if fpath.exists() and fpath.is_file():
+        try:
+            st = fpath.stat()
+            if st.st_size <= 2_000_000:
+                raw_b = fpath.read_bytes()
+                if raw_b.startswith(b"\xef\xbb\xbf"):
+                    raw_b = raw_b[3:]
+                    fpath.write_bytes(raw_b.replace(b"\r\n", b"\n"))
+                    raw_b = fpath.read_bytes()
+                    res["crlf_normalized"] = True
+                if b"\r\n" in raw_b:
+                    lf_text = raw_b.replace(b"\r\n", b"\n").decode("utf-8", errors="replace")
+                    need_lf_write = False
+                    for t_key in ("Target", "TargetContent", "old_string", "target"):
+                        t_val = args_d.get(t_key)
+                        if isinstance(t_val, str) and t_val and "\r\n" not in t_val and "\n" in t_val and t_val in lf_text:
+                            need_lf_write = True
+                            break
+                    if not need_lf_write and isinstance(args_d.get("ReplacementChunks"), list):
+                        for ch in args_d["ReplacementChunks"]:
+                            if isinstance(ch, dict):
+                                tc_val = ch.get("TargetContent") or ch.get("Target")
+                                if isinstance(tc_val, str) and tc_val and "\r\n" not in tc_val and "\n" in tc_val and tc_val in lf_text:
+                                    need_lf_write = True
+                                    break
+                    if need_lf_write:
+                        fpath.write_bytes(raw_b.replace(b"\r\n", b"\n"))
+                        res["crlf_normalized"] = True
+                    disk_text = lf_text
+                else:
+                    disk_text = raw_b.decode("utf-8", errors="replace")
+        except Exception:
+            disk_text = None
+
+    post_text = disk_text
+    for w_key in ("Content", "CodeContent", "content"):
+        if isinstance(args_d.get(w_key), str):
+            post_text = args_d[w_key]
+            break
+    if post_text is not None and disk_text is not None:
+        t_str = args_d.get("Target") or args_d.get("TargetContent") or args_d.get("old_string")
+        r_str = args_d.get("Replacement") or args_d.get("ReplacementContent") or args_d.get("new_string")
+        if isinstance(t_str, str) and t_str and isinstance(r_str, str) and t_str in post_text:
+            post_text = post_text.replace(t_str, r_str)
+
+    probe_dir = fpath.parent if fpath.parent.exists() else Path.cwd()
+    root = find_project_root(project_root or probe_dir)
+    if not root or not root.exists() or _is_protected_non_workspace(root):
+        return res
+    db_file = get_project_db_path(root)
+    if not db_file.exists():
+        return res
+
+    try:
+        rel_posix = fpath.relative_to(root).as_posix()
+    except ValueError:
+        return res
+
+    ext = fpath.suffix.lower()
+    sym_rows = []
+    # Use a future mtime tolerance (+2.0s) when simulating pre-write post_text so post-edit mtime matches
+    import time as _time
+    eff_mtime = round(_time.time() + 2.0, 3)
+    if ext in _INDEX_CODE_EXTS and post_text:
+        sym_rows = _extract_file_symbols_for_index(fpath, rel_posix, eff_mtime, content_override=post_text)
+
+    touched_syms = []
+    line_spans = []
+    t_Check = (
+        str(args_d.get("Replacement") or args_d.get("ReplacementContent") or args_d.get("Content") or "")
+        + " "
+        + str(args_d.get("Target") or args_d.get("TargetContent") or "")
+    )
+    for r_row in sym_rows:
+        qname = r_row[2]
+        sname = r_row[1]
+        sl, el = r_row[4], r_row[5]
+        if not t_Check.strip() or (sname in t_Check):
+            touched_syms.append(f"{qname}[L{sl}-L{el}]")
+            line_spans.append(f"L{sl}-L{el}")
+    if not touched_syms and sym_rows:
+        for r_row in sym_rows[:4]:
+            touched_syms.append(f"{r_row[2]}[L{r_row[4]}-L{r_row[5]}]")
+            line_spans.append(f"L{r_row[4]}-L{r_row[5]}")
+
+    syms_summary = ", ".join(touched_syms[:5])[:160]
+    ranges_summary = ", ".join(line_spans[:5])[:80]
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    try:
+        with managed_connection(db_file, is_project_db=True) as conn:
+            init_project_db(conn)
+            cur = conn.cursor()
+            if ext in _INDEX_CODE_EXTS and post_text is not None:
+                edge_rows = _extract_file_edges_for_index(fpath, rel_posix, eff_mtime, content_override=post_text)
+                cur.execute("DELETE FROM symbol_index WHERE file_path = ?;", (rel_posix,))
+                cur.execute("DELETE FROM dependency_edges WHERE source_file = ?;", (rel_posix,))
+                if sym_rows:
+                    cur.executemany(
+                        "INSERT OR REPLACE INTO symbol_index "
+                        "(file_path, symbol_name, qualified_name, kind, start_line, end_line, signature, file_mtime) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
+                        sym_rows,
+                    )
+                if edge_rows:
+                    cur.executemany(
+                        "INSERT OR REPLACE INTO dependency_edges "
+                        "(source_file, source_symbol, target_symbol, edge_kind, line_no, file_mtime) "
+                        "VALUES (?, ?, ?, ?, ?, ?);",
+                        edge_rows,
+                    )
+                res["symbols_indexed"] = len(sym_rows)
+                res["edges_indexed"] = len(edge_rows)
+            cur.execute(
+                """
+                INSERT INTO active_working_set (file_path, symbols_touched, line_ranges, edit_count, updated_at)
+                VALUES (?, ?, ?, 1, ?)
+                ON CONFLICT(file_path) DO UPDATE SET
+                    symbols_touched = CASE WHEN excluded.symbols_touched != '' THEN excluded.symbols_touched ELSE active_working_set.symbols_touched END,
+                    line_ranges = CASE WHEN excluded.line_ranges != '' THEN excluded.line_ranges ELSE active_working_set.line_ranges END,
+                    edit_count = active_working_set.edit_count + 1,
+                    updated_at = excluded.updated_at;
+                """,
+                (rel_posix, syms_summary, ranges_summary, now_iso),
+            )
+            cur.execute(
+                "DELETE FROM active_working_set WHERE file_path NOT IN "
+                "(SELECT file_path FROM active_working_set ORDER BY updated_at DESC LIMIT 6);"
+            )
+            conn.commit()
+            res["working_set_updated"] = True
+    except Exception:
+        pass
+    return res
 
 
 def mem_batch(
@@ -1438,6 +2221,39 @@ def analyze_conversation_epochs_and_scope(
     if not t_file.exists():
         return result
 
+    try:
+        curr_fsize = t_file.stat().st_size
+    except OSError:
+        return result
+
+    target_central_db = Path(db_path) if db_path else DB_PATH
+    stored_offset = 0
+    stored_fsize = 0
+    cached_Accumulator = None
+    existing_cursor_row = None
+
+    if target_central_db and target_central_db.exists():
+        try:
+            with managed_connection(target_central_db, init_schema=True) as cconn:
+                ccur = cconn.cursor()
+                ccur.execute(
+                    "SELECT file_size, last_byte_offset, cached_state_json FROM transcript_cursors WHERE conversation_id = ?;",
+                    (str(cid),),
+                )
+                existing_cursor_row = ccur.fetchone()
+                if existing_cursor_row:
+                    stored_fsize = int(existing_cursor_row["file_size"] or 0)
+                    stored_offset = int(existing_cursor_row["last_byte_offset"] or 0)
+                    raw_cjson = existing_cursor_row["cached_state_json"] or "{}"
+                    loaded_c = json.loads(raw_cjson)
+                    if isinstance(loaded_c, dict) and "user_steps" in loaded_c:
+                        cached_Accumulator = loaded_c
+                        ws_key_check = str(active_workspace or "")
+                        if stored_fsize == curr_fsize and curr_fsize > 0 and loaded_c.get("active_ws_str") == ws_key_check and "cached_result" in loaded_c:
+                            return loaded_c["cached_result"]
+        except Exception:
+            cached_Accumulator = None
+
     user_steps = []
     recent_lines = []
     subagent_raw_lines = []
@@ -1445,9 +2261,41 @@ def analyze_conversation_epochs_and_scope(
     checkpoint_count = 0
     last_checkpoint_step = 0
     max_step_idx = 0
-    try:
-        with open(t_file, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
+    new_checkpoints = []
+
+    if cached_Accumulator is not None and 0 < stored_offset <= curr_fsize:
+        recent_lines = list(cached_Accumulator.get("recent_lines") or [])[-30:]
+        subagent_raw_lines = list(cached_Accumulator.get("subagent_raw_lines") or [])[-5:]
+        steps_since_compaction = int(cached_Accumulator.get("steps_since_compaction") or 0)
+        checkpoint_count = int(cached_Accumulator.get("checkpoint_count") or 0)
+        last_checkpoint_step = int(cached_Accumulator.get("last_checkpoint_step") or 0)
+        max_step_idx = int(cached_Accumulator.get("max_step_idx") or 0)
+        for ust in (cached_Accumulator.get("user_steps") or []):
+            ts_s = str(ust.get("created_at") or "")
+            try:
+                dt_obj = datetime.fromisoformat(ts_s.replace("Z", "+00:00")) if ts_s else None
+            except Exception:
+                dt_obj = None
+            user_steps.append({
+                "step_index": int(ust.get("step_index") or 0),
+                "created_at": ts_s,
+                "date": str(ust.get("date") or ts_s[:10]),
+                "dt": dt_obj,
+                "content": str(ust.get("content") or ""),
+            })
+        seek_offset = stored_offset
+    else:
+        seek_offset = 0
+
+    if seek_offset < curr_fsize:
+        try:
+            with open(t_file, "rb") as bf:
+                if seek_offset > 0:
+                    bf.seek(seek_offset)
+                delta_text = bf.read().decode("utf-8", errors="ignore")
+            for line in delta_text.splitlines():
+                if not line:
+                    continue
                 steps_since_compaction += 1
                 if '"CHECKPOINT"' in line[:320] or "<CONTEXT_SUMMARY>" in line:
                     steps_since_compaction = 0
@@ -1459,6 +2307,15 @@ def analyze_conversation_epochs_and_scope(
                             last_checkpoint_step = cs_idx
                         if cs_idx > max_step_idx:
                             max_step_idx = cs_idx
+                        cp_content = str(cd.get("content") or "").strip()
+                        cp_ts = str(cd.get("created_at") or datetime.now(timezone.utc).isoformat())
+                        if cp_content:
+                            new_checkpoints.append({
+                                "checkpoint_num": checkpoint_count,
+                                "step_index": cs_idx,
+                                "summary": cp_content,
+                                "created_at": cp_ts,
+                            })
                     except Exception:
                         pass
                 recent_lines.append(line)
@@ -1493,8 +2350,9 @@ def analyze_conversation_epochs_and_scope(
                     "dt": ts_dt,
                     "content": str(d.get("content") or ""),
                 })
-    except Exception:
-        return result
+        except Exception:
+            if seek_offset == 0:
+                return result
 
     read_streak = 0
     poll_streak = 0
@@ -1731,6 +2589,112 @@ def analyze_conversation_epochs_and_scope(
                             break
         result["foreign_project_mentions"] = mentions
 
+    # Persist O(1) incremental byte-offset cursor into customizations.db (transcript_cursors)
+    if target_central_db and (seek_offset < curr_fsize or existing_cursor_row is None):
+        try:
+            serializable_steps = [
+                {
+                    "step_index": u["step_index"],
+                    "created_at": u["created_at"],
+                    "date": u["date"],
+                    "content": u["content"][:1000],
+                }
+                for u in user_steps
+            ]
+            acc_payload = {
+                "user_steps": serializable_steps,
+                "recent_lines": recent_lines[-30:],
+                "subagent_raw_lines": subagent_raw_lines[-5:],
+                "steps_since_compaction": steps_since_compaction,
+                "checkpoint_count": checkpoint_count,
+                "last_checkpoint_step": last_checkpoint_step,
+                "max_step_idx": max_step_idx,
+                "active_ws_str": str(active_workspace or ""),
+                "cached_result": result,
+            }
+            now_cursor_iso = datetime.now(timezone.utc).isoformat()
+            act_ep_date = result["active_epoch"]["date"] if result.get("active_epoch") else ""
+            inf_ws_str = str(result.get("inferred_workspace") or "")
+            with managed_connection(target_central_db, init_schema=True) as cconn:
+                ccon_cur = cconn.cursor()
+                ccon_cur.execute(
+                    """
+                    INSERT INTO transcript_cursors (
+                        conversation_id, file_size, last_byte_offset, max_step_index,
+                        checkpoint_count, last_checkpoint_step, epoch_count, active_epoch_date,
+                        inferred_workspace, cached_state_json, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(conversation_id) DO UPDATE SET
+                        file_size = excluded.file_size,
+                        last_byte_offset = excluded.last_byte_offset,
+                        max_step_index = excluded.max_step_index,
+                        checkpoint_count = excluded.checkpoint_count,
+                        last_checkpoint_step = excluded.last_checkpoint_step,
+                        epoch_count = excluded.epoch_count,
+                        active_epoch_date = excluded.active_epoch_date,
+                        inferred_workspace = CASE WHEN excluded.inferred_workspace != '' THEN excluded.inferred_workspace ELSE transcript_cursors.inferred_workspace END,
+                        cached_state_json = excluded.cached_state_json,
+                        updated_at = excluded.updated_at;
+                    """,
+                    (
+                        str(cid),
+                        curr_fsize,
+                        curr_fsize,
+                        max_step_idx,
+                        checkpoint_count,
+                        last_checkpoint_step,
+                        int(result.get("epoch_count") or 0),
+                        act_ep_date,
+                        inf_ws_str,
+                        json.dumps(acc_payload),
+                        now_cursor_iso,
+                    ),
+                )
+        except Exception:
+            pass
+
+    # Archive any newly discovered CHECKPOINT compaction summaries into .agents/memory.db (compaction_archive + project_memory_fts)
+    if new_checkpoints:
+        target_ws_for_ckpt = active_workspace or (Path(result["inferred_workspace"]) if result.get("inferred_workspace") else None)
+        ckpt_db_path = None
+        if target_ws_for_ckpt:
+            try:
+                ws_root_p = find_project_root(Path(target_ws_for_ckpt))
+                if ws_root_p and ws_root_p.exists() and not _is_protected_non_workspace(ws_root_p):
+                    cand_db = get_project_db_path(ws_root_p)
+                    if cand_db.exists():
+                        ckpt_db_path = cand_db
+            except Exception:
+                ckpt_db_path = None
+        if ckpt_db_path is None and cid and t_file.exists():
+            conv_root_dir = t_file.parent.parent.parent
+            if conv_root_dir.exists():
+                ckpt_db_path = conv_root_dir / ".agents" / "memory.db"
+        if ckpt_db_path is not None:
+            try:
+                with managed_connection(ckpt_db_path, is_project_db=True) as pconn:
+                    init_project_db(pconn)
+                    pcur = pconn.cursor()
+                    for cp in new_checkpoints:
+                        refs = ", ".join(dict.fromkeys(win_path_re.findall(cp["summary"])))[:300]
+                        pcur.execute(
+                            """
+                            INSERT OR IGNORE INTO compaction_archive
+                            (conversation_id, checkpoint_num, step_index, summary, extracted_refs, created_at)
+                            VALUES (?, ?, ?, ?, ?, ?);
+                            """,
+                            (str(cid), cp["checkpoint_num"], cp["step_index"], cp["summary"], refs, cp["created_at"]),
+                        )
+                        if pcur.rowcount > 0:
+                            fts_key = f"Checkpoint #{cp['checkpoint_num']} (step {cp['step_index']}, {cp['created_at'][:10]})"
+                            pcur.execute(
+                                "INSERT INTO project_memory_fts (source_table, title_or_key, content) VALUES ('checkpoint', ?, ?);",
+                                (fts_key, cp["summary"][:4000]),
+                            )
+                    pconn.commit()
+            except Exception:
+                pass
+
     return result
 
 
@@ -1767,10 +2731,15 @@ def handle_pre_invocation_hook():
     cid = payload.get("conversationId")
     brain_dir_override = Path(payload["brainDir"]) if payload.get("brainDir") else None
     central_db_override = Path(payload["dbPath"]) if payload.get("dbPath") else DB_PATH
+    cursor_db_path = (
+        Path(payload["dbPath"])
+        if payload.get("dbPath")
+        else (_HOOK_STATE_FILE.with_suffix(".db") if _HOOK_STATE_FILE != _DEFAULT_HOOK_STATE_FILE else DB_PATH)
+    )
     epoch_info = analyze_conversation_epochs_and_scope(
         cid=cid,
         active_workspace=root_path,
-        db_path=central_db_override,
+        db_path=cursor_db_path,
         brain_dir=brain_dir_override,
     )
 
@@ -1787,14 +2756,28 @@ def handle_pre_invocation_hook():
 
     today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     active_ep_date = epoch_info["active_epoch"]["date"] if epoch_info.get("active_epoch") else today_utc
+    conv_brain_dir = (
+        ((brain_dir_override or (resolve_user_home() / ".gemini" / "antigravity" / "brain")) / str(cid))
+        if cid else None
+    )
+    conv_db_path = (conv_brain_dir / ".agents" / "memory.db") if (conv_brain_dir and conv_brain_dir.exists()) else None
 
     def _collect_project_memory_lines() -> tuple[list[str], int]:
         mem_lines = []
         facts_cnt = 0
-        if not (has_valid_workspace and root_path and db_path and db_path.exists()):
+        target_mem_db = None
+        if has_valid_workspace and root_path and db_path and db_path.exists():
+            target_mem_db = db_path
+        elif not has_valid_workspace and conv_db_path and (
+            conv_db_path.exists()
+            or epoch_info.get("subagent_findings")
+            or int(epoch_info.get("checkpoint_count", 0) or 0) > 0
+        ):
+            target_mem_db = conv_db_path
+        if not target_mem_db:
             return mem_lines, facts_cnt
         try:
-            with managed_connection(db_path, is_project_db=True) as conn:
+            with managed_connection(target_mem_db, is_project_db=True) as conn:
                 init_project_db(conn)
                 cursor = conn.cursor()
                 now_iso_hook = datetime.now(timezone.utc).isoformat()
@@ -1847,12 +2830,13 @@ def handle_pre_invocation_hook():
                     conn.commit()
                 cursor.execute("SELECT COUNT(*) FROM project_tasks WHERE status = 'completed';")
                 completed_count = cursor.fetchone()[0]
-                if completed_count >= 3:
-                    mem_compact(conn, summary=f"[AUTO-COMPACTED] Pruned {completed_count} completed tasks and consolidated state.", archive_completed=True, project_root=root_path, db_path=db_path, silent=True, auto_commit=False)
+                if completed_count >= 3 and has_valid_workspace and root_path:
+                    mem_compact(conn, summary=f"[AUTO-COMPACTED] Pruned {completed_count} completed tasks and consolidated state.", archive_completed=True, project_root=root_path, db_path=target_mem_db, silent=True, auto_commit=False)
 
-                git_telem = get_workspace_git_telemetry(root_path, auto_recover=False)
-                if git_telem:
-                    mem_lines.append(git_telem)
+                if has_valid_workspace and root_path:
+                    git_telem = get_workspace_git_telemetry(root_path, auto_recover=False)
+                    if git_telem:
+                        mem_lines.append(git_telem)
 
                 cursor.execute("""
                 SELECT id, title, status, priority, updated_at FROM project_tasks
@@ -1882,8 +2866,42 @@ def handle_pre_invocation_hook():
                         note_s = f" - '{ho['notes'][:60]}...'" if ho['notes'] else ""
                         mem_lines.append(f"  * [{ho['id']}] [{ho['source_role']}] -> [{ho['target_role']}]{note_s}")
 
-                cursor.execute("SELECT key, value, updated_at FROM project_facts WHERE deprecated_at IS NULL ORDER BY updated_at DESC LIMIT 12;")
-                facts = cursor.fetchall()
+                cursor.execute("SELECT COUNT(*) FROM project_facts WHERE deprecated_at IS NULL;")
+                total_active_facts = int(cursor.fetchone()[0] or 0)
+                prompt_hint = _extract_hook_user_message(payload)
+                if total_active_facts > 12 and prompt_hint:
+                    cursor.execute("SELECT key, value, updated_at FROM project_facts WHERE deprecated_at IS NULL ORDER BY updated_at DESC LIMIT 6;")
+                    recent_f = list(cursor.fetchall())
+                    seen_fkeys = {r["key"] for r in recent_f}
+                    fts_q = build_safe_fts_query(expand_query_with_synonyms(prompt_hint), max_terms=10)
+                    if fts_q:
+                        try:
+                            cursor.execute(
+                                """
+                                SELECT p.key, p.value, p.updated_at
+                                FROM project_memory_fts f
+                                JOIN project_facts p ON f.title_or_key = p.key
+                                WHERE f.source_table = 'fact' AND p.deprecated_at IS NULL AND project_memory_fts MATCH ?
+                                ORDER BY rank LIMIT 6;
+                                """,
+                                (fts_q,),
+                            )
+                            for mr in cursor.fetchall():
+                                if mr["key"] not in seen_fkeys and len(recent_f) < 12:
+                                    seen_fkeys.add(mr["key"])
+                                    recent_f.append(mr)
+                        except Exception:
+                            pass
+                    if len(recent_f) < 12:
+                        cursor.execute("SELECT key, value, updated_at FROM project_facts WHERE deprecated_at IS NULL ORDER BY updated_at DESC LIMIT 12;")
+                        for ar in cursor.fetchall():
+                            if ar["key"] not in seen_fkeys and len(recent_f) < 12:
+                                seen_fkeys.add(ar["key"])
+                                recent_f.append(ar)
+                    facts = recent_f
+                else:
+                    cursor.execute("SELECT key, value, updated_at FROM project_facts WHERE deprecated_at IS NULL ORDER BY updated_at DESC LIMIT 12;")
+                    facts = cursor.fetchall()
                 facts_cnt = len(facts)
                 if facts:
                     if mem_lines:
@@ -1921,6 +2939,20 @@ def handle_pre_invocation_hook():
                         mem_lines.append(f"  Files Touched: {snap['files_touched']}")
                     if snap["next_steps"]:
                         mem_lines.append(f"  Next Steps: {snap['next_steps']}")
+                else:
+                    cursor.execute(
+                        "SELECT checkpoint_num, step_index, summary, created_at FROM compaction_archive ORDER BY checkpoint_num DESC LIMIT 1;"
+                    )
+                    cp_row = cursor.fetchone()
+                    if cp_row:
+                        if mem_lines:
+                            mem_lines.append("")
+                        cp_dt = str(cp_row["created_at"] or "")[:10]
+                        cp_sum = " ".join(str(cp_row["summary"] or "").split())[:220]
+                        mem_lines.append(
+                            f"Latest Archived Compaction Checkpoint (#{cp_row['checkpoint_num']}, step {cp_row['step_index']}, {cp_dt}):"
+                        )
+                        mem_lines.append(f"  Summary: {cp_sum}")
         except Exception:
             pass
         return mem_lines, facts_cnt
@@ -1962,100 +2994,65 @@ def handle_pre_invocation_hook():
     dedup_token = f"{workspace_key}@{epoch_info['epoch_key']}"
     if cid:
         try:
-            state = {}
-            if _HOOK_STATE_FILE.exists():
-                try:
-                    loaded = json.loads(_HOOK_STATE_FILE.read_text(encoding="utf-8"))
-                    if isinstance(loaded, dict):
-                        state = loaded
-                except Exception:
-                    state = {}
-            if state.get(cid) == dedup_token:
-                drift_bucket = epoch_info.get("step_bucket", 0)
-                read_streak = epoch_info.get("recent_read_streak", 0)
-                poll_streak = epoch_info.get("recent_poll_streak", 0)
-                rep_file = epoch_info.get("repeated_file_warning", "")
-                max_step = epoch_info.get("max_step_index", 0)
-                drift_key = f"{cid}:drift_bucket"
-                anomaly_key = f"{cid}:anomaly_step"
-                routing_sig_key = f"{cid}:routing_sig"
-                ckpt_key = f"{cid}:checkpoint_count"
-                last_bucket = state.get(drift_key, 0)
-                last_anomaly = state.get(anomaly_key, -100)
-                prev_routing_sig = state.get(routing_sig_key, "")
-                curr_ckpt_cnt = int(epoch_info.get("checkpoint_count", 0) or 0)
-                last_ckpt_cnt = int(state.get(ckpt_key, 0) or 0)
-                need_drift_guard = False
-                need_routing_refresh = False
-                need_checkpoint_rehydrate = False
-                if curr_ckpt_cnt > last_ckpt_cnt:
-                    state[ckpt_key] = curr_ckpt_cnt
-                    need_checkpoint_rehydrate = True
-                if False and drift_bucket > last_bucket:
-                    state[drift_key] = drift_bucket
-                    need_drift_guard = True
-                    need_routing_refresh = True
-                elif False and (read_streak >= 6 or poll_streak >= 2 or bool(rep_file)) and (max_step - last_anomaly >= 25):
-                    state[anomaly_key] = max_step
-                    need_drift_guard = True
-                    need_routing_refresh = True
-                if current_routing_sig and prev_routing_sig != current_routing_sig:
-                    state[routing_sig_key] = current_routing_sig
-                    if prev_routing_sig:
-                        need_routing_refresh = True
-                if need_checkpoint_rehydrate or need_drift_guard or need_routing_refresh or (current_routing_sig and not prev_routing_sig):
-                    try:
-                        _HOOK_STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
-                    except Exception:
-                        pass
-                inject_msgs = []
-                if utf8_healed:
-                    if _sync_builtin_fn:
-                        try:
-                            _sync_builtin_fn(silent=True)
-                        except Exception:
-                            pass
-                    inject_msgs.append("[SKILLSDB SELF-HEALING: Restored Windows UTF-8 application manifests after mid-session Antigravity IDE update]")
-                if need_routing_refresh and routing_dec:
-                    inject_msgs.append(format_hook_routing_banner(routing_dec).strip())
-                if need_checkpoint_rehydrate:
-                    rehydrated_lines, _ = _collect_project_memory_lines()
-                    if rehydrated_lines:
-                        inject_msgs.append("=== PROJECT MEMORY CONTEXT (Auto-Hydrated Post-Compaction from .agents/memory.db) ===\n" + "\n".join(rehydrated_lines))
-                if need_drift_guard:
-                    proj_flag = f' --project "{root_path}"' if root_path else ""
-                    inject_msgs.append(
-                        f"[SKILLSDB TURN-ECONOMY & DRIFT GUARD (Step {max_step})]:\n"
-                        "1. NO SALAMI-SLICING: Read files <= 800 lines in 1 call; for > 800 lines, locate lines via grep/script first and batch all read_file calls in parallel within a single turn.\n"
-                        "2. SUBAGENT FIREWALL & ZERO POLLING: Delegate open multi-file debugging (>= 4 search steps or > 5 files) to invoke_subagent ('research'), fix entire bug classes at once ('build && test'), and never poll 'manage_task status'.\n"
-                        f"3. PROJECT MEMORY (.agents/memory.db): Persist discovered file structures, class/method mappings, and line offsets via 'skillsdb mem-save-fact <key> <value>{proj_flag}' and track work items via 'skillsdb mem-task-add <title>{proj_flag}' so context compaction never forces re-reading files."
-                    )
-                    rehydrated_lines, facts_cnt = _collect_project_memory_lines()
-                    if rep_file or (has_valid_workspace and max_step >= 25 and facts_cnt < 5):
-                        warn_detail = f"Repeated reads detected on {rep_file}!" if rep_file else f"Only {facts_cnt} facts currently stored in .agents/memory.db!"
-                        inject_msgs.append(
-                            f"[PROJECT MEMORY ALERT: {warn_detail} Immediately save key file line ranges, class/method roles, and architectural findings via 'skillsdb mem-save-fact <key> <value>{proj_flag}' so you do not re-read the same files after context compaction!]"
+            curr_ckpt_cnt = int(epoch_info.get("checkpoint_count", 0) or 0)
+            stored_dedup = ""
+            last_ckpt_cnt = 0
+            with managed_connection(cursor_db_path, init_schema=True) as hconn:
+                hcur = hconn.cursor()
+                hcur.execute(
+                    "SELECT dedup_token, hydrated_checkpoint_count FROM transcript_cursors WHERE conversation_id = ?;",
+                    (str(cid),),
+                )
+                hrow = hcur.fetchone()
+                if hrow:
+                    stored_dedup = str(hrow["dedup_token"] or "")
+                    last_ckpt_cnt = int(hrow["hydrated_checkpoint_count"] or 0)
+
+                if stored_dedup == dedup_token:
+                    need_checkpoint_rehydrate = False
+                    if curr_ckpt_cnt > last_ckpt_cnt:
+                        need_checkpoint_rehydrate = True
+                        hcur.execute(
+                            "UPDATE transcript_cursors SET hydrated_checkpoint_count = ?, updated_at = ? WHERE conversation_id = ?;",
+                            (curr_ckpt_cnt, datetime.now(timezone.utc).isoformat(), str(cid)),
                         )
-                    if rehydrated_lines:
-                        inject_msgs.append("=== PROJECT MEMORY CONTEXT (Auto-Hydrated from .agents/memory.db) ===\n" + "\n".join(rehydrated_lines))
-                if inject_msgs:
-                    print(json.dumps({
-                        "injectSteps": [{
-                            "ephemeralMessage": "\n".join(inject_msgs)
-                        }]
-                    }))
-                else:
-                    print(json.dumps({"injectSteps": []}))
-                return
-            state[cid] = dedup_token
-            state[f"{cid}:drift_bucket"] = epoch_info.get("step_bucket", 0)
-            state[f"{cid}:checkpoint_count"] = int(epoch_info.get("checkpoint_count", 0) or 0)
-            if current_routing_sig:
-                state[f"{cid}:routing_sig"] = current_routing_sig
-            if len(state) > 100:
-                keys = list(state.keys())[-50:]
-                state = {k: state[k] for k in keys}
-            _HOOK_STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
+                        hconn.commit()
+                    inject_msgs = []
+                    if utf8_healed:
+                        if _sync_builtin_fn:
+                            try:
+                                _sync_builtin_fn(silent=True)
+                            except Exception:
+                                pass
+                        inject_msgs.append("[SKILLSDB SELF-HEALING: Restored Windows UTF-8 application manifests after mid-session Antigravity IDE update]")
+                    if need_checkpoint_rehydrate:
+                        rehydrated_lines, _ = _collect_project_memory_lines()
+                        if rehydrated_lines:
+                            inject_msgs.append("=== PROJECT MEMORY CONTEXT (Auto-Hydrated Post-Compaction from .agents/memory.db) ===\n" + "\n".join(rehydrated_lines))
+                    if inject_msgs:
+                        print(json.dumps({
+                            "injectSteps": [{
+                                "ephemeralMessage": "\n".join(inject_msgs)
+                            }]
+                        }))
+                    else:
+                        print(json.dumps({"injectSteps": []}))
+                    return
+
+                now_h_iso = datetime.now(timezone.utc).isoformat()
+                hcur.execute(
+                    """
+                    INSERT INTO transcript_cursors (
+                        conversation_id, dedup_token, hydrated_checkpoint_count, checkpoint_count, updated_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(conversation_id) DO UPDATE SET
+                        dedup_token = excluded.dedup_token,
+                        hydrated_checkpoint_count = excluded.hydrated_checkpoint_count,
+                        updated_at = excluded.updated_at;
+                    """,
+                    (str(cid), dedup_token, curr_ckpt_cnt, curr_ckpt_cnt, now_h_iso),
+                )
+                hconn.commit()
         except Exception:
             pass
 
@@ -2160,6 +3157,7 @@ def handle_pre_invocation_hook():
     user_msg = _extract_hook_user_message(payload)
     if (cwd_hints or user_msg) and DB_PATH.exists():
         try:
+            from ..search.synonyms import DEFAULT_SYNONYMS
             with managed_connection(DB_PATH) as gconn:
                 gcursor = gconn.cursor()
                 query_terms = []
@@ -2173,12 +3171,25 @@ def handle_pre_invocation_hook():
                     fts_query = build_safe_fts_query(query_terms, max_terms=12)
                     if fts_query:
                         gcursor.execute("""
-                        SELECT s.name, s.description FROM skills_fts f
+                        SELECT s.name, s.description, s.category FROM skills_fts f
                         JOIN skills s ON f.rowid = s.id
                         WHERE skills_fts MATCH ?
                         ORDER BY rank LIMIT 3;
                         """, (fts_query,))
-                        matched_skills = gcursor.fetchall()
+                        raw_matched = gcursor.fetchall()
+                        if cwd_hints or has_valid_workspace:
+                            matched_skills = raw_matched
+                        else:
+                            # In workspace-less conversations, filter out accidental prose matches on generic description words
+                            raw_msg_tokens = set(re.findall(r"[a-zA-Z0-9äöüÄÖÜß_-]{2,}", (user_msg or "").lower()))
+                            has_syn_trigger = bool(raw_msg_tokens.intersection(DEFAULT_SYNONYMS.keys()))
+                            q_set = {t.lower() for t in query_terms if len(t) >= 3}
+                            for ms in raw_matched:
+                                sname_l = (ms["name"] or "").lower()
+                                scat_l = (ms["category"] or "").lower()
+                                name_parts = set(re.findall(r"[a-z0-9]{3,}", sname_l + " " + scat_l))
+                                if has_syn_trigger or q_set.intersection(name_parts):
+                                    matched_skills.append(ms)
             if matched_skills:
                 if cwd_hints:
                     lines.append(f"[AUTONOMOUS DIRECTORY SCOPING: {', '.join(cwd_hints)}]")

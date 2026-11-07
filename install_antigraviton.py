@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Unified Cross-Platform One-Command Installer for the AntiGraviton Complete Suite (v2.1.4).
+Unified Cross-Platform One-Command Installer for the AntiGraviton Complete Suite (v2.2.0).
 
 Supports Linux (systemd --user / rootless daemon), macOS (launchd LaunchAgent), and Windows
 across both Home workstations and Enterprise Active Directory (UNC / mapped drive) environments.
 Deploys:
 1. Non-destructive upgrade preservation of existing runtime_config, Gitea tokens, learned workspaces, and user-learned rules
-2. SkillsDB Context & Memory Engine (v4.1.4) + customizations-db Plugin + shell PATH integration
+2. SkillsDB Context & Memory Engine (v4.2.0) + customizations-db Plugin + shell PATH integration
 3. Antigravity Gitea Local Service (v1.1.2) on loopback (127.0.0.1:3000) with crash auto-recovery and optional 03:00 backup timer
 4. Zero-touch local Gitea Admin user (with optional explicit password) & API Token provisioning into SkillsDB
 5. Strict /api/healthz verification gate, organic workspace discovery, and interactive capability briefing
@@ -401,7 +401,7 @@ def install_antigraviton(
 ) -> None:
     suite_root = Path(os.path.abspath(__file__)).parent
     version_file = suite_root / "VERSION"
-    suite_version = version_file.read_text(encoding="utf-8-sig").strip() if version_file.exists() else "2.1.4"
+    suite_version = version_file.read_text(encoding="utf-8-sig").strip() if version_file.exists() else "2.2.0"
     user_home = resolve_user_home()
     gemini_dir = user_home / ".gemini"
     target_db_path = gemini_dir / "database" / "customizations.db"
@@ -428,7 +428,7 @@ def install_antigraviton(
         preserved_state = {"runtime_config": {}, "learned_rules": []}
 
     # STEP 2: Deploy SkillsDB Core & Antigravity Plugin
-    print("[2/5] Deploying SkillsDB Engine (v4.1.4) and customizations-db Plugin...")
+    print("[2/5] Deploying SkillsDB Engine (v4.2.0) and customizations-db Plugin...")
     deploy_py = suite_root / "deploy.py"
     subprocess.run([sys.executable, str(deploy_py), "--source", str(suite_root), "--target", str(gemini_dir)], check=True)
     ensure_posix_shell_path(gemini_dir / "antigravity" / "bin")

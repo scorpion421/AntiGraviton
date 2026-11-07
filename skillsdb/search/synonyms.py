@@ -81,7 +81,21 @@ DEFAULT_SYNONYMS = {
 
 
 _FTS5_RESERVED_WORDS = frozenset({"and", "or", "not", "near"})
-_STOPWORDS_2 = frozenset({"in", "on", "to", "of", "is", "it", "by", "at", "an", "as", "or", "zu", "im", "am", "ab", "so", "ob", "da"})
+_STOPWORDS_2 = frozenset({
+    "in", "on", "to", "of", "is", "it", "by", "at", "an", "as", "or", "be", "we", "do", "if", "so", "no", "up", "my", "me",
+    "the", "for", "with", "that", "this", "from", "have", "has", "had", "what", "when", "where", "which", "who", "whom", "whose",
+    "why", "how", "can", "could", "should", "would", "will", "just", "more", "some", "into", "than", "then", "also", "very",
+    "zu", "im", "am", "ab", "so", "ob", "da", "du", "er", "es", "ihr", "sie", "wir", "mir", "dir", "uns", "ihm", "ihn",
+    "ich", "ein", "eine", "einer", "eines", "einem", "einen", "der", "die", "das", "den", "dem", "des", "und", "oder", "aber",
+    "mit", "auf", "für", "fuer", "von", "aus", "bei", "nach", "vor", "über", "ueber", "unter", "durch", "gegen", "ohne", "um",
+    "wie", "was", "wer", "wo", "wann", "warum", "wieso", "weshalb", "welche", "welcher", "welches", "welchen", "welchem",
+    "ist", "sind", "war", "waren", "wird", "werden", "wurde", "wurden", "hat", "haben", "hatte", "hatten", "kann", "kannst",
+    "können", "koennen", "soll", "sollte", "muss", "müssen", "muessen", "darf", "will", "wollen", "möchte", "moechte",
+    "nicht", "kein", "keine", "keinen", "keiner", "keinem", "noch", "schon", "auch", "nur", "mal", "bitte", "danke",
+    "hier", "dort", "dann", "wenn", "weil", "dass", "als", "bis", "seit", "heute", "morgen", "gestern", "immer", "alles",
+    "machen", "gehen", "geben", "kommen", "sehen", "lassen", "stehen", "finden", "bleiben", "liegen", "heißen", "denken",
+    "frage", "fragen", "antwort", "normal", "normale", "normalen", "dinge", "sachen", "thema", "user",
+})
 
 
 def init_synonyms(conn: sqlite3.Connection):

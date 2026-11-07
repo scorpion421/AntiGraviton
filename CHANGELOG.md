@@ -5,6 +5,30 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - 2026-11-07
+
+### Added
+- **Incremental `O(1)` byte-offset transcript cursor & lossless `compaction_archive` (Step 1, `skillsdb/core/db.py`, `skillsdb/memory/project_memory.py`, `v4.2.0`)**:
+  - Added the `transcript_cursors` table to `customizations.db` and replaced `%TEMP%\skillsdb_hook_state.json` with ACID-safe SQLite cursor tracking (`last_byte_offset`, `max_step_index`, `checkpoint_count`, `hydrated_checkpoint_count`, `cached_state_json`).
+  - Upgraded `analyze_conversation_epochs_and_scope()` to seek directly to `last_byte_offset` (`f.seek(last_byte_offset)`), reducing warm transcript analysis latency on the `8.82 MB` (`4,346`-step) benchmark from `80.05 ms` to **`2.04 ms`** (`39.3x` faster).
+  - Added the `compaction_archive` table to `.agents/memory.db` to automatically persist every `"type": "CHECKPOINT"` compaction summary and index it into `project_memory_fts` (`31/31` checkpoints archived on benchmark `ab05cd72-aa2b-4ffd-b0a7-dfce798a8295`, reducing generational compaction loss from `96.7%` to **`0%`**).
+- **Zero-turn `active_working_set`, automatic `CRLF -> LF` pre-normalization, live post-edit `symbol_index` line shifts & BM25 fact ranking (Step 2, `skillsdb/memory/project_memory.py`, `skillsdb/core/guardrails.py`, `v4.2.0`)**:
+  - Added the `active_working_set` table (`file_path`, `symbols_touched`, `line_ranges`, `edit_count`, `updated_at`) to `.agents/memory.db` and wired `record_working_set_file_edit()` into `PreToolUse` (`handle_pre_tool_guardrail_hook()`).
+  - Automatically normalizes mixed `CRLF -> LF` line endings on disk when an incoming `edit_file` `Target` uses `LF` (eliminating `target content not found` retry turns) and immediately re-indexes post-edit symbol `[start_line, end_line]` ranges in memory (`~14.2 ms` total latency, `0` extra prompt tokens).
+  - Upgraded `_collect_project_memory_lines()` to rank `project_facts` via `project_memory_fts` BM25 when a project exceeds `12` active facts while strictly preserving the `12`-fact prompt cap.
+- **Relational codebase dependency graph (`dependency_edges`) & blast-radius impact queries (Step 3, `skillsdb/memory/project_memory.py`, `skillsdb/cli.py`, `v4.2.0`)**:
+  - Added the `dependency_edges` table (`source_file`, `source_symbol`, `target_symbol`, `edge_kind` in `calls|imports|inherits`, `line_no`, `file_mtime`) to `.agents/memory.db`, populated automatically during `mem_index_symbols()` and single-file `record_working_set_file_edit()` across Python AST and multi-language regex/Smali (`invoke-*`, `.super`) files (`10,541` edges indexed across `33` files in AntiGraviton).
+  - Added `skillsdb impact <symbol>` (alias `mem-impact`) and `skillsdb locate <symbol> --impact` (`1.75 ms` query latency).
+- **Pre-compiled `skill_sections` FTS5 index, `skillsdb slice-skill`, and federated `skillsdb pulse` (Step 4, `skillsdb/core/db.py`, `skillsdb/search/fts.py`, `skillsdb/updater/merger.py`, `skillsdb/memory/project_memory.py`, `skillsdb/cli.py`, `v4.2.0`)**:
+  - Added `skill_sections` and `skill_sections_fts` to `customizations.db`, decomposing all `124` skills into `2,931` atomic `##`/`###` micro-sections (`142` tokens/section vs. `3,477` tokens/full skill = **`-95.9%`** token reduction).
+  - Added `skillsdb slice-skill "<query>"` (`0.85 ms` BM25 section retrieval) and `skillsdb pulse "<query>"` (`mem_pulse()`, single-process federated retrieval across `symbol_index`, `dependency_edges`, `project_memory_fts`, `active_working_set`, and `skill_sections_fts`).
+- **Universal 12-language polyglot symbol, call-graph, and live line-shift engine (`skillsdb/core/fim.py`, `skillsdb/memory/project_memory.py`, `v4.2.0`)**:
+  - Expanded `_INDEX_CODE_EXTS` to 29 file extensions and upgraded `_extract_generic_regex_contracts()`, `_extract_file_symbols_for_index()`, and `_extract_file_edges_for_index()` to index classes, methods, Go struct receivers (`func (s *Server) Handle`), C++ out-of-line `Class::Method` definitions, Smali bytecode (`.class`, `.method`, `invoke-*`), unprefixed TypeScript/Dart/Java methods, PowerShell `Verb-Noun` cmdlet calls, and Shell/Bash functions (`12/12` languages verified at `100%` symbol, edge, and live line-shift accuracy; `2,349` symbols and `37,070` edges indexed across `250` APK `.smali` files in `533.81 ms`).
+- **Non-coding conversation & general research memory isolation (`skillsdb/memory/project_memory.py`, `skillsdb/search/synonyms.py`, `v4.2.0`)**:
+  - Added automatic fallback to `~/.gemini/antigravity/brain/<conversation-id>/.agents/memory.db` when Antigravity is used without an active coding workspace (`workspacePaths: []`), preserving `compaction_archive` checkpoints and `research` subagent findings across compactions while expanding German/English conversational stopwords (`_STOPWORDS_2`) and Turn-1 skill relevance filtering so normal non-coding questions inject `0` false-positive coding skills (`109/109` unit tests passing).
+
+---
+
 ## [2.1.4] - 2026-11-07
 
 ### Fixed

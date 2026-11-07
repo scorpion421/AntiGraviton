@@ -512,24 +512,33 @@ def _extract_generic_regex_contracts(
     is_sql = suffix.lower() == ".sql"
 
     cls_re = re.compile(
-        r"^\s*(?:export\s+)?(?:public\s+|private\s+|protected\s+|internal\s+|abstract\s+|sealed\s+|final\s+|data\s+)*"
-        r"(?:(?:class|interface|struct|enum|trait|record)\s+([A-Za-z_][A-Za-z0-9_]*)"
+        r"^\s*(?:export\s+)?(?:default\s+)?(?:pub(?:\([^)]*\))?\s+|public\s+|private\s+|protected\s+|internal\s+|abstract\s+|sealed\s+|final\s+|open\s+|data\s+|value\s+)*"
+        r"(?:(?:class|interface|struct|enum|trait|record|object|actor|extension|module)\s+([A-Za-z_][A-Za-z0-9_]*)"
         r"|type\s+([A-Za-z_][A-Za-z0-9_]*)\s+(?:struct|interface)\b"
         r"|impl(?:\s*<[^>]*>)?\s+(?:[A-Za-z0-9_:<>]+\s+for\s+)?([A-Za-z_][A-Za-z0-9_]*))"
     )
     fn_re = re.compile(
-        r"^\s*(?:export\s+)?(?:default\s+)?(?:pub(?:\([^)]*\))?\s+|public\s+|private\s+|protected\s+|internal\s+|static\s+|virtual\s+|override\s+|inline\s+)*"
+        r"^\s*(?:export\s+)?(?:default\s+)?(?:pub(?:\([^)]*\))?\s+|public\s+|private\s+|protected\s+|internal\s+|static\s+|virtual\s+|override\s+|inline\s+|extern\s+)*"
         r"(?:suspend\s+|async\s+)*"
         r"(?:function|filter|workflow|def|func|fn|fun)\s+"
+        r"(?:<[^>]+>\s*)?"
         r"(?:\([^)]+\)\s*)?"  # Optional Go receiver e.g. (s *Server)
+        r"(?:[A-Za-z_][A-Za-z0-9_<>.*]*\.)?"  # Optional Kotlin/Dart extension receiver
         r"([A-Za-z_][A-Za-z0-9_:-]*)\s*(\([^)]*\))?"
     )
     ts_arrow_re = re.compile(
-        r"^\s*(?:export\s+)?(?:const|let)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_][A-Za-z0-9_]*)\s*=>"
+        r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*[^=]+)?=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_][A-Za-z0-9_]*)\s*=>"
     )
     typed_method_re = re.compile(
-        r"^\s*(?:(?:public|private|protected|internal|static|virtual|override|abstract|async|synchronized|final|readonly|get|set)\s+)+"
-        r"(?:[A-Za-z_][A-Za-z0-9_<>,.\[\]?]*\s+)*([A-Za-z_][A-Za-z0-9_]*)\s*\(([^;{}]*)\)\s*(?::\s*[^{;]+|throws\s+[^{;]+)?\{"
+        r"^\s*(?:(?:public|private|protected|internal|static|virtual|override|abstract|async|synchronized|final|readonly|get|set|inline|constexpr|explicit|friend)\s+)*"
+        r"(?:[A-Za-z_~][A-Za-z0-9_<>,.\[\]?&*:]*\s+)*([A-Za-z_~][A-Za-z0-9_]*)\s*\(([^;{}]*)\)\s*(?:const\s*)?(?:noexcept\s*)?(?:override\s*)?(?:async\s*)?(?::\s*[^{;]+|throws\s+[^{;]+|where\s+[^{;]+)?\{"
+    )
+    c_cpp_fn_re = re.compile(
+        r"^\s*(?:(?:static|inline|virtual|explicit|constexpr|extern|friend|const|unsigned|signed|struct|enum)\s+)*"
+        r"[A-Za-z_][A-Za-z0-9_<>:*,&\[\]\s]*?\s+\**(?:([A-Za-z_][A-Za-z0-9_]*)::)?([A-Za-z_~][A-Za-z0-9_]*)\s*\(([^;{}]*)\)\s*(?:const\s*)?(?:noexcept\s*)?\{"
+    )
+    sh_fn_re = re.compile(
+        r"^\s*([A-Za-z_][A-Za-z0-9_-]*)\s*\(\s*\)\s*\{"
     )
     sql_re = re.compile(
         r"^\s*CREATE\s+(?:OR\s+(?:ALTER|REPLACE)\s+)?(?:TEMP|TEMPORARY\s+)?"
@@ -594,12 +603,20 @@ def _extract_generic_regex_contracts(
                     break
             candidate_line = re.sub(r"\s+", " ", " ".join(joined_parts))
 
-        fm = fn_re.match(candidate_line) or ts_arrow_re.match(candidate_line)
+        fm = fn_re.match(candidate_line) or ts_arrow_re.match(candidate_line) or sh_fn_re.match(candidate_line)
+        fname = fm.group(1) if fm else ""
         if not fm and active_cls is not None:
             fm = typed_method_re.match(candidate_line)
-        if fm:
-            fname = fm.group(1)
-            if fname in ("if", "for", "while", "switch", "catch", "using", "lock", "synchronized"):
+            if fm:
+                fname = fm.group(1)
+        if not fm and active_cls is None:
+            cm_cpp = c_cpp_fn_re.match(candidate_line)
+            if cm_cpp:
+                fm = cm_cpp
+                fname = f"{cm_cpp.group(1)}::{cm_cpp.group(2)}" if cm_cpp.group(1) else cm_cpp.group(2)
+        if fm and fname:
+            base_check = fname.split("::")[-1]
+            if base_check in ("if", "for", "while", "switch", "catch", "using", "lock", "synchronized", "return", "else", "do", "try", "sizeof", "typeof"):
                 continue
             end_l = _find_block_end_line(lines, idx_0)
             loc = f"[L{idx}-L{end_l}]" if end_l > idx else f"[L{idx}]"

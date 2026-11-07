@@ -25,6 +25,9 @@ _REQUIRED_CENTRAL_TABLES = frozenset({
     "skills_fts",
     "synonym_fts",
     "quota_ledger",
+    "transcript_cursors",
+    "skill_sections",
+    "skill_sections_fts",
 })
 
 
@@ -168,7 +171,7 @@ def _central_schema_ready(conn: sqlite3.Connection) -> bool:
         cur = conn.cursor()
         cur.execute(
             "SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND name IN "
-            "('rules', 'skills', 'runtime_config', 'synonym_synapses', 'rules_fts', 'skills_fts', 'synonym_fts', 'quota_ledger');"
+            "('rules', 'skills', 'runtime_config', 'synonym_synapses', 'rules_fts', 'skills_fts', 'synonym_fts', 'quota_ledger', 'transcript_cursors', 'skill_sections', 'skill_sections_fts');"
         )
         found = {row[0] for row in cur.fetchall()}
         return _REQUIRED_CENTRAL_TABLES.issubset(found)
@@ -295,6 +298,49 @@ def init_db(conn: sqlite3.Connection) -> None:
         term,
         synonyms,
         content='synonym_synapses',
+        content_rowid='id'
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS transcript_cursors (
+        conversation_id TEXT PRIMARY KEY,
+        file_size INTEGER NOT NULL DEFAULT 0,
+        last_byte_offset INTEGER NOT NULL DEFAULT 0,
+        max_step_index INTEGER NOT NULL DEFAULT 0,
+        checkpoint_count INTEGER NOT NULL DEFAULT 0,
+        last_checkpoint_step INTEGER NOT NULL DEFAULT 0,
+        hydrated_checkpoint_count INTEGER NOT NULL DEFAULT 0,
+        epoch_count INTEGER NOT NULL DEFAULT 1,
+        active_epoch_date TEXT DEFAULT '',
+        dedup_token TEXT DEFAULT '',
+        inferred_workspace TEXT DEFAULT '',
+        cached_state_json TEXT DEFAULT '{}',
+        updated_at TEXT NOT NULL
+    );
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS skill_sections (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        skill_name TEXT NOT NULL,
+        plugin_name TEXT NOT NULL,
+        category TEXT NOT NULL,
+        section_title TEXT NOT NULL,
+        heading_level INTEGER NOT NULL DEFAULT 2,
+        content TEXT NOT NULL,
+        token_estimate INTEGER NOT NULL DEFAULT 0,
+        UNIQUE(skill_name, section_title)
+    );
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_skill_sections_skill ON skill_sections(skill_name);")
+
+    cursor.execute("""
+    CREATE VIRTUAL TABLE IF NOT EXISTS skill_sections_fts USING fts5(
+        skill_name,
+        section_title,
+        content,
+        content='skill_sections',
         content_rowid='id'
     );
     """)

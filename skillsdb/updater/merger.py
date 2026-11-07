@@ -27,6 +27,7 @@ from ..core.detector import detect_model_tier, detect_model_and_pool, parse_anti
 from ..core.fim import extract_ast_contract_map
 from ..core.quota_router import detect_external_pools
 from ..core.concurrency import fetch_single_skill
+from ..search.fts import rebuild_skill_sections_index
 from ..memory.project_memory import find_project_root, _is_protected_non_workspace
 from ..memory.gitea_sync import get_gitea_config, get_gitea_service_status, check_gitea_health, get_learned_workspaces, is_gitea_configured
 from ..platform.windows_utf8 import check_windows_utf8, ensure_windows_utf8_manifests
@@ -211,6 +212,7 @@ def merge_upstream_database(local_db_path: Path, upstream_db_path: Path) -> dict
 
             cur.execute("INSERT INTO rules_fts(rules_fts) VALUES ('rebuild');")
             cur.execute("INSERT INTO skills_fts(skills_fts) VALUES ('rebuild');")
+            rebuild_skill_sections_index(conn, force=True)
             cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='synonym_fts';")
             if cur.fetchone():
                 cur.execute("INSERT INTO synonym_fts(synonym_fts) VALUES ('rebuild');")
@@ -468,6 +470,7 @@ def sync_builtin_skills(conn: sqlite3.Connection = None, force: bool = False, si
 
         if synced_count > 0:
             cur.execute("INSERT INTO skills_fts(skills_fts) VALUES ('rebuild');")
+            rebuild_skill_sections_index(active_conn, force=True)
             if current_checksum:
                 cur.execute("""
                 INSERT OR REPLACE INTO runtime_config (key, value, updated_at)
@@ -786,6 +789,7 @@ def import_from_plugins(conn: sqlite3.Connection):
 
     cursor.execute("INSERT INTO rules_fts(rules_fts) VALUES ('rebuild');")
     cursor.execute("INSERT INTO skills_fts(skills_fts) VALUES ('rebuild');")
+    rebuild_skill_sections_index(conn, force=True)
     conn.commit()
 
     cursor.execute("SELECT COUNT(*) FROM rules;")

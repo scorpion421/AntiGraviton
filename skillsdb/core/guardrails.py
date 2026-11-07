@@ -847,6 +847,8 @@ def handle_pre_tool_guardrail_hook():
             or payload.get("name")
             or ""
         ).strip().lower()
+        if ":" in tool_name:
+            tool_name = tool_name.split(":")[-1].strip()
         raw_args = (
             tool_call.get("args")
             or tool_call.get("arguments")
@@ -1137,9 +1139,22 @@ def handle_pre_tool_guardrail_hook():
             except Exception:
                 pass
 
+        is_write_or_edit = (
+            tool_name in ("edit_file", "replace_file_content", "multi_replace_file_content", "write_file", "write_to_file")
+            or any(k in args for k in ("Target", "Replacement", "Content", "TargetContent", "ReplacementContent", "ReplacementChunks"))
+        )
         try:
             target_path = Path(target_file)
             if _is_test_file_path(target_path) or _is_scratch_file_path(target_path):
+                if is_write_or_edit and target_file != "<tool_input>":
+                    try:
+                        _rec_fn = globals().get("record_working_set_file_edit")
+                        if not _rec_fn:
+                            from ..memory.project_memory import record_working_set_file_edit as _rec_fn
+                        if _rec_fn:
+                            _rec_fn(target_path, args=args)
+                    except Exception:
+                        pass
                 print(json.dumps({"decision": "allow"}))
                 return
         except Exception:
@@ -1167,6 +1182,16 @@ def handle_pre_tool_guardrail_hook():
                 )
                 print(json.dumps({"decision": "deny", "reason": reason}))
                 return
+
+        if is_write_or_edit and target_file != "<tool_input>":
+            try:
+                _rec_fn = globals().get("record_working_set_file_edit")
+                if not _rec_fn:
+                    from ..memory.project_memory import record_working_set_file_edit as _rec_fn
+                if _rec_fn:
+                    _rec_fn(Path(target_file), args=args)
+            except Exception:
+                pass
     except Exception:
         pass
 

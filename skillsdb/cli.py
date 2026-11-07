@@ -70,6 +70,7 @@ from .search.fts import (
     suggest_skills,
     search,
     get_skill,
+    slice_skill,
     get_active_rules,
     get_rule,
     list_all,
@@ -98,6 +99,8 @@ from .memory.project_memory import (
     mem_prune,
     mem_index_symbols,
     mem_locate_symbol,
+    mem_symbol_impact,
+    mem_pulse,
     mem_batch,
     analyze_conversation_epochs_and_scope,
     handle_pre_invocation_hook,
@@ -135,6 +138,11 @@ def build_parser() -> argparse.ArgumentParser:
     get_skill_parser.add_argument("name", help="Skill name")
     get_skill_parser.add_argument("--summary", action="store_true", help="Output only skill outline and section list (~80 tokens)")
     get_skill_parser.add_argument("--section", default=None, help="Output only a specific section/micro-skill (~150-300 tokens)")
+
+    slice_skill_parser = subparsers.add_parser("slice-skill", aliases=["slice"], help="Retrieve top-K atomic micro-skill sections via BM25 over skill_sections_fts (~160 tokens vs ~3,479 tokens)")
+    slice_skill_parser.add_argument("query", help="Task or technical query to match against pre-compiled skill sections")
+    slice_skill_parser.add_argument("--limit", type=int, default=3, help="Max sections to return (default: 3)")
+    slice_skill_parser.add_argument("--json", action="store_true", help="Output as JSON")
 
     learn_rule_parser = subparsers.add_parser("learn-rule", help="Persist a new learned rule into central database")
     learn_rule_parser.add_argument("key", help="Unique rule key")
@@ -365,9 +373,23 @@ def build_parser() -> argparse.ArgumentParser:
     mem_loc_parser = subparsers.add_parser("locate", aliases=["mem-locate"], help="Locate exact file paths and [start_line, end_line] offsets for a symbol or Class.method")
     mem_loc_parser.add_argument("query", help="Symbol, function, class, or Class.method name to locate")
     mem_loc_parser.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
+    mem_loc_parser.add_argument("--impact", action="store_true", help="Include relational caller, subclass, and import impact graph from dependency_edges")
     mem_loc_parser.add_argument("--no-index", action="store_true", help="Skip automatic incremental mtime index refresh")
     mem_loc_parser.add_argument("--json", action="store_true", help="Output results as JSON")
     mem_loc_parser.add_argument("--project", default=None, help="Project root directory (optional)")
+
+    mem_imp_parser = subparsers.add_parser("impact", aliases=["mem-impact"], help="Query relational blast-radius impact (callers, subclasses, importers) for a symbol")
+    mem_imp_parser.add_argument("query", help="Symbol, function, class, or method name to analyze")
+    mem_imp_parser.add_argument("--limit", type=int, default=30, help="Max references (default: 30)")
+    mem_imp_parser.add_argument("--no-index", action="store_true", help="Skip automatic incremental mtime index refresh")
+    mem_imp_parser.add_argument("--json", action="store_true", help="Output results as JSON")
+    mem_imp_parser.add_argument("--project", default=None, help="Project root directory (optional)")
+
+    mem_pulse_parser = subparsers.add_parser("pulse", aliases=["mem-pulse"], help="Single-call federated retrieval across symbol_index, dependency_edges, project_memory_fts, active_working_set, and skill_sections_fts")
+    mem_pulse_parser.add_argument("query", help="Symbol, feature, or technical query")
+    mem_pulse_parser.add_argument("--limit", type=int, default=5, help="Max items per federated source (default: 5)")
+    mem_pulse_parser.add_argument("--json", action="store_true", help="Output federated pulse bundle as JSON")
+    mem_pulse_parser.add_argument("--project", default=None, help="Project root directory (optional)")
 
     mem_batch_parser = subparsers.add_parser("mem-batch", aliases=["batch"], help="Execute multiple project memory operations (facts, decisions, tasks, snapshot, symbol locate) in a single Python process")
     mem_batch_parser.add_argument("--fact", dest="facts", action="append", default=[], help="Fact in 'key=value' format (repeatable)")
@@ -790,7 +812,7 @@ def main(argv: list[str] = None):
         return
 
     # Route project memory commands directly to project database
-    if args.command and (args.command.startswith("mem-") or args.command in ("context", "locate", "batch", "index-symbols")):
+    if args.command and (args.command.startswith("mem-") or args.command in ("context", "locate", "impact", "pulse", "batch", "index-symbols")):
         proj_root = Path(os.path.abspath(str(args.project))) if getattr(args, "project", None) else find_project_root()
         if args.command == "mem-init":
             mem_init(proj_root)
@@ -856,6 +878,25 @@ def main(argv: list[str] = None):
                     auto_index=not getattr(args, "no_index", False),
                     as_json=getattr(args, "json", False),
                     limit=getattr(args, "limit", 20),
+                    include_impact=getattr(args, "impact", False),
+                )
+            elif args.command in ("impact", "mem-impact"):
+                mem_symbol_impact(
+                    pconn,
+                    args.query,
+                    project_root=proj_root,
+                    auto_index=not getattr(args, "no_index", False),
+                    as_json=getattr(args, "json", False),
+                    limit=getattr(args, "limit", 30),
+                )
+            elif args.command in ("pulse", "mem-pulse"):
+                mem_pulse(
+                    pconn,
+                    args.query,
+                    project_root=proj_root,
+                    central_db_path=DB_PATH,
+                    as_json=getattr(args, "json", False),
+                    limit=getattr(args, "limit", 5),
                 )
             elif args.command in ("mem-batch", "batch"):
                 mem_batch(
@@ -908,6 +949,8 @@ def main(argv: list[str] = None):
             get_rule(conn, args.key)
         elif args.command == "get-skill":
             get_skill(conn, args.name, summary=getattr(args, "summary", False), section=getattr(args, "section", None))
+        elif args.command in ("slice-skill", "slice"):
+            slice_skill(conn, args.query, limit=getattr(args, "limit", 3), as_json=getattr(args, "json", False))
         elif args.command == "learn-rule":
             learn_rule(conn, args.key, args.name, args.content, category=args.category, scope=args.scope)
         elif args.command == "doctor":

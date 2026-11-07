@@ -14,8 +14,8 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-__version__ = "4.1.4"
-__suite_version__ = "2.1.4"
+__version__ = "4.2.0"
+__suite_version__ = "2.2.0"
 
 
 # Model capability & subscription tiers
