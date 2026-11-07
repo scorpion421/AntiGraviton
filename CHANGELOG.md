@@ -5,6 +5,16 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.1] - 2026-11-07
+
+### Fixed
+- **Persistent `inferred_workspace` across incremental `O(1)` `f.seek()` transcript scans (`skillsdb/memory/project_memory.py`, `v4.2.1`)**:
+  - Restores `stored_inferred_workspace` from `transcript_cursors.inferred_workspace` when an incremental post-compaction `f.seek(last_byte_offset)` delta contains no new file paths (`candidate_roots == {}`), guaranteeing that `.agents/memory.db` (including `github_owner_handle = https://github.com/scorpion421`) is always re-hydrated after compaction even when `workspacePaths == []`.
+- **Explicit GitHub remote URL output in `skillsdb gitea-sync --github` (`skillsdb/memory/gitea_sync.py`, `v4.2.1`)**:
+  - Updated `sync_workspace()` to print the resolved GitHub remote URL alongside the push confirmation (`[OK] Pushed branch 'main' to GitHub remote (https://github.com/scorpion421/AntiGraviton)`), preventing confusion between the local Gitea owner (`MickyFoley`) and the GitHub account (`scorpion421`).
+
+---
+
 ## [2.2.0] - 2026-11-07
 
 ### Added

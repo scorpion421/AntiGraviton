@@ -2232,18 +2232,20 @@ def analyze_conversation_epochs_and_scope(
     cached_Accumulator = None
     existing_cursor_row = None
 
+    stored_inferred_ws = ""
     if target_central_db and target_central_db.exists():
         try:
             with managed_connection(target_central_db, init_schema=True) as cconn:
                 ccur = cconn.cursor()
                 ccur.execute(
-                    "SELECT file_size, last_byte_offset, cached_state_json FROM transcript_cursors WHERE conversation_id = ?;",
+                    "SELECT file_size, last_byte_offset, inferred_workspace, cached_state_json FROM transcript_cursors WHERE conversation_id = ?;",
                     (str(cid),),
                 )
                 existing_cursor_row = ccur.fetchone()
                 if existing_cursor_row:
                     stored_fsize = int(existing_cursor_row["file_size"] or 0)
                     stored_offset = int(existing_cursor_row["last_byte_offset"] or 0)
+                    stored_inferred_ws = str(existing_cursor_row["inferred_workspace"] or "")
                     raw_cjson = existing_cursor_row["cached_state_json"] or "{}"
                     loaded_c = json.loads(raw_cjson)
                     if isinstance(loaded_c, dict) and "user_steps" in loaded_c:
@@ -2416,6 +2418,8 @@ def analyze_conversation_epochs_and_scope(
     if not active_workspace and candidate_roots:
         best_root = max(candidate_roots.items(), key=lambda kv: kv[1])[0]
         result["inferred_workspace"] = best_root
+    elif not active_workspace and stored_inferred_ws:
+        result["inferred_workspace"] = stored_inferred_ws
 
     if read_file_counts:
         top_fname, top_cnt = max(read_file_counts.items(), key=lambda kv: kv[1])

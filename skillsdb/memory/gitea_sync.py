@@ -1456,9 +1456,21 @@ def sync_workspace(
                 rem_chk = subprocess.run(["git", "remote"], cwd=str(project_root), capture_output=True, text=True, timeout=3)
                 if "github" in rem_chk.stdout.split():
                     branch_name = _get_current_branch(project_root)
+                    gh_url_res = subprocess.run(
+                        ["git", "remote", "get-url", "github"],
+                        cwd=str(project_root),
+                        capture_output=True,
+                        text=True,
+                        timeout=3,
+                    )
+                    gh_raw_url = (gh_url_res.stdout or "").strip()
+                    gh_clean_url = re.sub(r"://[^/@]+@", "://", gh_raw_url)
+                    if gh_clean_url.endswith(".git"):
+                        gh_clean_url = gh_clean_url[:-4]
                     gh_push = subprocess.run(["git", "push", "github", branch_name], cwd=str(project_root), capture_output=True, text=True, timeout=45)
                     if gh_push.returncode == 0:
-                        print(f"  [OK] Pushed branch '{branch_name}' to GitHub remote")
+                        gh_suffix = f" ({gh_clean_url})" if gh_clean_url else ""
+                        print(f"  [OK] Pushed branch '{branch_name}' to GitHub remote{gh_suffix}")
             except Exception:
                 pass
 
