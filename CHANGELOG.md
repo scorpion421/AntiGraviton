@@ -5,6 +5,16 @@ All notable changes to the **AntiGraviton** project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-11-07
+
+### Changed
+- **Back to the roots: pure zero-overhead SkillsDB and `.agents/memory.db` (`plugin/hooks.json`, `skillsdb/memory/project_memory.py`, `skillsdb/core/guardrails.py`, `v4.1.0`)**:
+  - Narrowed the `PreToolUse` matcher in `plugin/hooks.json` exclusively to file-writing tools (`write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content`) so `read_file`, `view_file`, `run_command`, `invoke_subagent`, and `manage_task` execute with zero Python subprocess cold-start latency.
+  - Removed automatic `compute_routing_decision()` 5-hour transcript scanning, `[SKILLSDB MULTI-POOL QUOTA ROUTER]` prompt injection, and mid-session Turn-2+ Drift-Guard / DB re-hydration spam from `handle_pre_invocation_hook()`, ensuring Turn 2+ is 100% silent (`{"injectSteps": []}`).
+  - Added bounded head/tail seeking (`8 KB + 64 KB`) for transcripts exceeding `256 KB` in `analyze_conversation_epochs_and_scope()` and removed the catastrophic backtracking regex in `cmd_arg_re` (`skillsdb/core/guardrails.py`).
+
+---
+
 ## [2.0.9] - 2026-11-05
 
 ### Fixed

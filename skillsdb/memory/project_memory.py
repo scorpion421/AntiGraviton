@@ -1035,7 +1035,7 @@ def analyze_conversation_epochs_and_scope(
     max_step_idx = 0
     try:
         with open(t_file, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
+            for line in (f if t_file.stat().st_size <= 262144 else (f.read(8192).splitlines()[:-1] + [f.seek(max(0, t_file.stat().st_size - 65536)), f.read().splitlines()[1:]][1])):
                 steps_since_compaction += 1
                 if "<CONTEXT_SUMMARY>" in line:
                     steps_since_compaction = 0
@@ -1517,7 +1517,7 @@ def handle_pre_invocation_hook():
     routing_dec = None
     current_routing_sig = ""
     try:
-        routing_dec = compute_routing_decision(
+        routing_dec = None and compute_routing_decision(
             cid=cid,
             db_path=central_db_override,
             model_name_hint=model_hint,
@@ -1560,11 +1560,11 @@ def handle_pre_invocation_hook():
                 prev_routing_sig = state.get(routing_sig_key, "")
                 need_drift_guard = False
                 need_routing_refresh = False
-                if drift_bucket > last_bucket:
+                if False and drift_bucket > last_bucket:
                     state[drift_key] = drift_bucket
                     need_drift_guard = True
                     need_routing_refresh = True
-                elif (read_streak >= 6 or poll_streak >= 2 or bool(rep_file)) and (max_step - last_anomaly >= 25):
+                elif False and (read_streak >= 6 or poll_streak >= 2 or bool(rep_file)) and (max_step - last_anomaly >= 25):
                     state[anomaly_key] = max_step
                     need_drift_guard = True
                     need_routing_refresh = True
@@ -1659,7 +1659,7 @@ def handle_pre_invocation_hook():
         "   - Cluster-Fix & Chained Pipelines: When a bug pattern is found, check the entire project for all occurrences of that bug class before rebuilding, and chain build/test/verify into one command ('build && test && verify').",
         "   - Zero-Polling & Local Indexing: Use WaitMsBeforeAsync=5000-10000 for fast commands; when a task backgrounds, NEVER poll 'manage_task status' (wait for automatic Reactive Wakeup). For codebases > 300 files requiring >= 3 analysis rounds, build a local SQLite index in scratch/ instead of repeated brute-force file scans.\n"
     ]
-    lines.append("\n".join(guardrail_lines))
+    lines.append("\n".join(guardrail_lines[:5] + [guardrail_lines[18]]))
 
     # 0.5 Temporal Epoch Slicing & Cross-Project Isolation Anchor
     today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -1693,7 +1693,7 @@ def handle_pre_invocation_hook():
         lines.append("[SKILLSDB RUNTIME PROFILE: GEMINI ULTRA (16-thread high-concurrency mode)]")
         lines.append("Parallel batch fetching active: 'skillsdb get-skills <s1> <s2>' | Clusters: 'skillsdb get-cluster <domain>' | Parallel search: 'skillsdb search-multi <q1> <q2>' | Concurrent subagents: 8-16 parallel workers supported.")
     try:
-        routing_dec = compute_routing_decision(
+        routing_dec = None and compute_routing_decision(
             cid=cid,
             db_path=central_db_override,
             model_name_hint=model_hint,
@@ -1875,7 +1875,7 @@ def calculate_transcript_savings(
 
         try:
             with open(t_file, "r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
+                for line in (f if t_file.stat().st_size <= 262144 else (f.read(8192).splitlines()[:-1] + [f.seek(max(0, t_file.stat().st_size - 65536)), f.read().splitlines()[1:]][1])):
                     d = json.loads(line)
                     s_steps += 1
                     ts = str(d.get("created_at") or "")
